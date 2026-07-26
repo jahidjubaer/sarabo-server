@@ -1,5 +1,6 @@
 const { generateTrackingId } = require('../utils/trackingId');
 const { logTracking } = require('../middleware/logging');
+const { VALID_STATUSES, isValidTransition } = require('../utils/parcelStatus');
 
 class ParcelController {
     constructor(models, collections) {
@@ -121,7 +122,21 @@ class ParcelController {
             if (!isAdmin && !(isRider && isAssignedRider)) {
                 return res.status(403).send({ message: 'forbidden access' });
             }
-            
+
+            if (!VALID_STATUSES.includes(deliveryStatus)) {
+                return res.status(400).send({ message: 'invalid delivery status' });
+            }
+
+            if (deliveryStatus === parcel.deliveryStatus) {
+                // Idempotent re-submission of the current status: nothing to
+                // persist, and no tracking log should be duplicated for it.
+                return res.send({ message: 'status unchanged', matchedCount: 1, modifiedCount: 0 });
+            }
+
+            if (!isValidTransition(parcel.deliveryStatus, deliveryStatus)) {
+                return res.status(400).send({ message: 'invalid status transition' });
+            }
+
             const result = await this.Parcel.updateStatus(id, deliveryStatus);
 
             if (deliveryStatus === 'parcel_delivered' && riderId) {

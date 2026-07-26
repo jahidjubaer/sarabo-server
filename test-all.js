@@ -1,10 +1,15 @@
 // Comprehensive API test script
 const http = require('http');
+require('dotenv').config();
 
 const BASE_URL = 'http://localhost:3000';
 let testsPassed = 0;
 let testsFailed = 0;
 const results = [];
+
+// Known local-development accounts (see docs for this project's role bootstrap).
+const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
+const CUSTOMER_EMAIL = 'jahidhasan.metro@gmail.com';
 
 function logTest(name, passed, message = '') {
     if (passed) {
@@ -41,6 +46,134 @@ function makeRequest(options, expectedStatus, testName) {
         }
         req.end();
     });
+}
+
+// Every /parcels/*/status route requires a real Firebase-verified token,
+// which this script has no way to mint. These tests instead call the parcel
+// controller directly against the same local dev database the server above
+// uses, simulating `req.decoded_email` exactly as the verifyFBToken
+// middleware would set it for a real authenticated request. This is the only
+// way to exercise the authenticated status-transition logic end-to-end
+// without a live browser/Firebase sign-in.
+async function testStatusTransitions() {
+    console.log('11. Testing Status Transition Validation');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections, client } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+
+    const createdParcelIds = [];
+    const createdTrackingIds = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const parcelController = controllers.parcel;
+
+        async function createTestParcel(marker) {
+            const res = fakeRes();
+            await parcelController.createParcel(
+                { body: { parcelName: marker, cost: 1 }, decoded_email: CUSTOMER_EMAIL },
+                res
+            );
+            const id = res.body.insertedId.toString();
+            createdParcelIds.push(id);
+            const parcel = await models.Parcel.findById(id);
+            createdTrackingIds.push(parcel.trackingId);
+            return { id, trackingId: parcel.trackingId };
+        }
+
+        async function assignTestRider(id, trackingId) {
+            await parcelController.assignRiderToParcel(
+                {
+                    params: { id },
+                    body: { riderId: 'test-rider-id', riderName: 'Test Rider', riderEmail: RIDER_EMAIL, trackingId }
+                },
+                fakeRes()
+            );
+        }
+
+        async function updateStatus(id, deliveryStatus, decoded_email, trackingId) {
+            const res = fakeRes();
+            await parcelController.updateParcelStatus(
+                { params: { id }, body: { deliveryStatus, trackingId }, decoded_email },
+                res
+            );
+            return res;
+        }
+
+        // --- Main sequence parcel: valid full sequence, backward, repeated,
+        // nonsense, and post-completion transitions ---
+        const marker = `TEST-STATUS-TRANSITION-${Date.now()}`;
+        const main = await createTestParcel(marker);
+        await assignTestRider(main.id, main.trackingId);
+
+        let res = await updateStatus(main.id, 'rider_arriving', RIDER_EMAIL, main.trackingId);
+        logTest('Valid transition: driver_assigned -> rider_arriving', res.statusCode === 200);
+
+        res = await updateStatus(main.id, 'parcel_picked_up', RIDER_EMAIL, main.trackingId);
+        logTest('Valid transition: rider_arriving -> parcel_picked_up', res.statusCode === 200);
+
+        res = await updateStatus(main.id, 'totally_invalid_status_xyz', RIDER_EMAIL, main.trackingId);
+        logTest('Nonsense status value rejected', res.statusCode === 400);
+
+        res = await updateStatus(main.id, 'driver_assigned', RIDER_EMAIL, main.trackingId);
+        logTest('Backward transition rejected', res.statusCode === 400);
+
+        const trackingCountBefore = await collections.trackings.countDocuments({ trackingId: main.trackingId });
+        res = await updateStatus(main.id, 'parcel_picked_up', RIDER_EMAIL, main.trackingId);
+        const trackingCountAfter = await collections.trackings.countDocuments({ trackingId: main.trackingId });
+        logTest(
+            'Repeated same status handled safely (no duplicate tracking log)',
+            res.statusCode === 200 && trackingCountAfter === trackingCountBefore
+        );
+
+        res = await updateStatus(main.id, 'parcel_delivered', RIDER_EMAIL, main.trackingId);
+        logTest('Valid transition: parcel_picked_up -> parcel_delivered', res.statusCode === 200);
+
+        res = await updateStatus(main.id, 'rider_arriving', RIDER_EMAIL, main.trackingId);
+        logTest('Completed request cannot transition further', res.statusCode === 400);
+
+        // --- Second parcel, fresh from assignment: skipped transition and
+        // unauthorized-customer checks ---
+        const marker2 = `TEST-STATUS-SKIP-${Date.now()}`;
+        const second = await createTestParcel(marker2);
+        await assignTestRider(second.id, second.trackingId);
+
+        res = await updateStatus(second.id, 'parcel_delivered', RIDER_EMAIL, second.trackingId);
+        logTest('Skipped transition rejected (driver_assigned -> parcel_delivered)', res.statusCode === 400);
+
+        res = await updateStatus(second.id, 'rider_arriving', CUSTOMER_EMAIL, second.trackingId);
+        logTest('Unauthorized customer blocked from status update', res.statusCode === 403);
+    } finally {
+        // logTracking() is fire-and-forget in the controller (not awaited),
+        // so give any in-flight writes a moment to land before cleanup reads
+        // back a final, complete picture and deletes by trackingId.
+        await new Promise(resolve => setTimeout(resolve, 300));
+
+        // Clean up only the throwaway parcels/tracking logs this test created.
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        if (createdTrackingIds.length) {
+            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
+        await client.close();
+    }
+
+    console.log('');
 }
 
 async function runAllTests() {
@@ -218,6 +351,8 @@ async function runAllTests() {
         'GET / (rejected unknown origin)'
     );
     console.log('');
+
+    await testStatusTransitions();
 
     // Summary
     console.log('='.repeat(60));
