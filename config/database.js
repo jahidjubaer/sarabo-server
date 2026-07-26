@@ -35,8 +35,12 @@ let connectionPromise = null;
 async function connectDatabase() {
     if (!connectionPromise) {
         connectionPromise = client.connect()
-            .then(() => {
+            .then(async () => {
                 console.log("✅ MongoDB Connected");
+                // Enforces at the database level that a single Stripe Checkout
+                // Session can only ever back one payment record, independent of
+                // any application-level race in handlePaymentSuccess.
+                await collections.payments.createIndex({ sessionId: 1 }, { unique: true });
                 return { db, collections };
             })
             .catch((error) => {

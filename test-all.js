@@ -18,6 +18,10 @@ const ADMIN_EMAIL = 'jahidjubaer17@gmail.com';
 // ./controllers below - every test section shares one process-wide module
 // cache, so this only needs to happen once, here, at the top of the file.
 const capturedStripeSessionParams = [];
+// Fixtures for the payment-success verification tests below - keyed by
+// sessionId, since `stripe.checkout.sessions.retrieve` is mocked to look up
+// this map instead of calling the real Stripe API.
+const stripeSessionFixtures = new Map();
 const stripeModulePath = require.resolve('stripe');
 require.cache[stripeModulePath] = {
     id: stripeModulePath,
@@ -30,6 +34,16 @@ require.cache[stripeModulePath] = {
                     create: async (params) => {
                         capturedStripeSessionParams.push(params);
                         return { url: 'https://checkout.stripe.com/pay/cs_test_fake_session', id: 'cs_test_fake_session' };
+                    },
+                    retrieve: async (sessionId) => {
+                        const fixture = stripeSessionFixtures.get(sessionId);
+                        if (!fixture) {
+                            throw new Error('No such checkout session: ' + sessionId);
+                        }
+                        if (fixture.__simulateOutage) {
+                            throw new Error('simulated Stripe outage');
+                        }
+                        return fixture;
                     }
                 }
             }
@@ -419,6 +433,325 @@ async function testSecureCheckoutSession() {
     console.log('');
 }
 
+// Confirms the secured PATCH /payment-success contract: auth required
+// (HTTP-level), sessionId validated, the Stripe session fully re-verified
+// (mode, payment_status, metadata, amount, currency), ownership enforced
+// across the authenticated caller/stored owner/Stripe customer email,
+// idempotent on repeat calls (via the unique sessionId index), deliveryStatus
+// never touched, and never trusting any browser-supplied field other than
+// sessionId - all against the mocked Stripe fixtures above, never the real
+// Stripe API.
+async function testSecurePaymentSuccess() {
+    console.log('14. Testing Secure Payment Success Verification');
+    console.log('-'.repeat(60));
+
+    // HTTP-level: confirm the route itself now requires authentication.
+    await makeRequest(
+        {
+            hostname: 'localhost', port: 3000, path: '/payment-success', method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: 'cs_test_does_not_matter' })
+        },
+        401,
+        'PATCH /payment-success (no auth)'
+    );
+    await makeRequest(
+        {
+            hostname: 'localhost', port: 3000, path: '/payment-success', method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer invalid_token_12345' },
+            body: JSON.stringify({ sessionId: 'cs_test_does_not_matter' })
+        },
+        401,
+        'PATCH /payment-success (invalid token)'
+    );
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+
+    const createdParcelIds = [];
+    const createdSessionIds = [];
+    const createdTrackingIds = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    let uniqueCounter = 0;
+    function newSessionId(label) {
+        uniqueCounter += 1;
+        const id = `cs_test_TESTPAY_${Date.now()}_${uniqueCounter}_${label}`;
+        createdSessionIds.push(id);
+        return id;
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const paymentController = controllers.payment;
+
+        async function createTestParcel(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, deliveryStatus, paymentStatus } = {}) {
+            const doc = {
+                parcelName: marker,
+                cost,
+                senderEmail,
+                trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                createdAt: new Date()
+            };
+            if (deliveryStatus) doc.deliveryStatus = deliveryStatus;
+            if (paymentStatus) doc.paymentStatus = paymentStatus;
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            createdTrackingIds.push(doc.trackingId);
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function verify(sessionId, decoded_email, extraBody = {}) {
+            const res = fakeRes();
+            return paymentController.handlePaymentSuccess(
+                { body: { sessionId, ...extraBody }, decoded_email },
+                res
+            ).then(() => res);
+        }
+
+        // amount_total defaults assume a $30.00 parcel (3000 cents) unless overridden.
+        function makeSession(overrides = {}) {
+            return {
+                mode: 'payment',
+                payment_status: 'paid',
+                payment_intent: `pi_test_${overrides.parcelId || 'x'}`,
+                customer_email: CUSTOMER_EMAIL,
+                amount_total: 3000,
+                currency: 'usd',
+                metadata: { parcelId: overrides.parcelId, trackingId: overrides.trackingId },
+                ...overrides
+            };
+        }
+
+        // --- 3. Missing sessionId ---
+        let res = await verify(undefined, CUSTOMER_EMAIL);
+        logTest('Missing sessionId rejected', res.statusCode === 400);
+
+        // --- 4. Invalid sessionId shape (non-string values) ---
+        res = await verify(12345, CUSTOMER_EMAIL);
+        logTest('Numeric sessionId rejected', res.statusCode === 400);
+        res = await verify(['cs_test_x'], CUSTOMER_EMAIL);
+        logTest('Array sessionId rejected', res.statusCode === 400);
+        res = await verify({ id: 'cs_test_x' }, CUSTOMER_EMAIL);
+        logTest('Object sessionId rejected', res.statusCode === 400);
+
+        // --- 5. Stripe session does not exist ---
+        res = await verify(newSessionId('nonexistent'), CUSTOMER_EMAIL);
+        logTest('Nonexistent Stripe session rejected', res.statusCode === 404);
+
+        // --- 6. Session exists but unpaid - no mutation ---
+        const unpaidParcel = await createTestParcel(`TEST-PAYSUCCESS-UNPAID-${Date.now()}`, { cost: 30 });
+        const unpaidSid = newSessionId('unpaid');
+        stripeSessionFixtures.set(unpaidSid, makeSession({
+            parcelId: unpaidParcel.id, trackingId: unpaidParcel.trackingId, payment_status: 'unpaid'
+        }));
+        res = await verify(unpaidSid, CUSTOMER_EMAIL);
+        const afterUnpaid = await models.Parcel.findById(unpaidParcel.id);
+        logTest(
+            'Unpaid session rejected with no mutation',
+            res.statusCode === 409 && afterUnpaid.paymentStatus !== 'paid'
+        );
+
+        // --- 7. Session mode is not "payment" - no mutation ---
+        const badModeParcel = await createTestParcel(`TEST-PAYSUCCESS-MODE-${Date.now()}`, { cost: 30 });
+        const badModeSid = newSessionId('badmode');
+        stripeSessionFixtures.set(badModeSid, makeSession({
+            parcelId: badModeParcel.id, trackingId: badModeParcel.trackingId, mode: 'setup'
+        }));
+        res = await verify(badModeSid, CUSTOMER_EMAIL);
+        const afterBadMode = await models.Parcel.findById(badModeParcel.id);
+        logTest(
+            'Non-payment session mode rejected with no mutation',
+            res.statusCode === 409 && afterBadMode.paymentStatus !== 'paid'
+        );
+
+        // --- 8. Metadata has no parcelId ---
+        const noMetaSid = newSessionId('nometa');
+        stripeSessionFixtures.set(noMetaSid, makeSession({ metadata: {} }));
+        res = await verify(noMetaSid, CUSTOMER_EMAIL);
+        logTest('Session with no metadata.parcelId rejected', res.statusCode === 404);
+
+        // --- 9. Metadata parcelId is invalid ObjectId shape ---
+        const badIdSid = newSessionId('badid');
+        stripeSessionFixtures.set(badIdSid, makeSession({ parcelId: 'not-a-valid-object-id', trackingId: 'x' }));
+        res = await verify(badIdSid, CUSTOMER_EMAIL);
+        logTest('Session with invalid metadata.parcelId rejected', res.statusCode === 404);
+
+        // --- 10. Referenced parcel does not exist ---
+        const missingParcelSid = newSessionId('missingparcel');
+        stripeSessionFixtures.set(missingParcelSid, makeSession({
+            parcelId: '000000000000000000000000', trackingId: 'x'
+        }));
+        res = await verify(missingParcelSid, CUSTOMER_EMAIL);
+        logTest('Session referencing a nonexistent parcel rejected', res.statusCode === 404);
+
+        // --- 11 & 20 & 21. Authenticated caller does not own the parcel ---
+        const ownerParcel = await createTestParcel(`TEST-PAYSUCCESS-OWNER-${Date.now()}`, { cost: 30 });
+        const wrongCallerSid = newSessionId('wrongcaller');
+        stripeSessionFixtures.set(wrongCallerSid, makeSession({
+            parcelId: ownerParcel.id, trackingId: ownerParcel.trackingId
+        }));
+        res = await verify(wrongCallerSid, RIDER_EMAIL);
+        logTest('Non-owner technician caller rejected (test 11 & 21)', res.statusCode === 403);
+
+        const wrongCallerSid2 = newSessionId('wrongcaller2');
+        stripeSessionFixtures.set(wrongCallerSid2, makeSession({
+            parcelId: ownerParcel.id, trackingId: ownerParcel.trackingId
+        }));
+        res = await verify(wrongCallerSid2, ADMIN_EMAIL);
+        logTest('Non-owner admin caller rejected (test 20)', res.statusCode === 403);
+
+        // --- 12. Stripe customer email does not match owner ---
+        const emailMismatchParcel = await createTestParcel(`TEST-PAYSUCCESS-EMAILMISMATCH-${Date.now()}`, { cost: 30 });
+        const emailMismatchSid = newSessionId('emailmismatch');
+        stripeSessionFixtures.set(emailMismatchSid, makeSession({
+            parcelId: emailMismatchParcel.id, trackingId: emailMismatchParcel.trackingId,
+            customer_email: 'someone-else@example.com'
+        }));
+        res = await verify(emailMismatchSid, CUSTOMER_EMAIL);
+        logTest('Stripe customer_email mismatch rejected', res.statusCode === 403);
+
+        // --- 13. Safe metadata email - not applicable in this contract ---
+        logTest(
+            'Metadata email cross-check - not applicable',
+            true,
+            'Unit 1 metadata contract only sets parcelId/trackingId - no email field exists to cross-check'
+        );
+
+        // --- 14. Stripe amount does not match Mongo cost ---
+        const amountMismatchParcel = await createTestParcel(`TEST-PAYSUCCESS-AMOUNT-${Date.now()}`, { cost: 30 });
+        const amountMismatchSid = newSessionId('amountmismatch');
+        stripeSessionFixtures.set(amountMismatchSid, makeSession({
+            parcelId: amountMismatchParcel.id, trackingId: amountMismatchParcel.trackingId,
+            amount_total: 100 // parcel cost is $30.00 (3000 cents) - deliberately wrong
+        }));
+        res = await verify(amountMismatchSid, CUSTOMER_EMAIL);
+        logTest('Stripe amount mismatch rejected', res.statusCode === 409);
+
+        // --- 15. Stripe currency does not match expected currency ---
+        const currencyMismatchParcel = await createTestParcel(`TEST-PAYSUCCESS-CURRENCY-${Date.now()}`, { cost: 30 });
+        const currencyMismatchSid = newSessionId('currencymismatch');
+        stripeSessionFixtures.set(currencyMismatchSid, makeSession({
+            parcelId: currencyMismatchParcel.id, trackingId: currencyMismatchParcel.trackingId,
+            currency: 'eur'
+        }));
+        res = await verify(currencyMismatchSid, CUSTOMER_EMAIL);
+        logTest('Stripe currency mismatch rejected', res.statusCode === 409);
+
+        // --- 16. Valid paid session succeeds, for every starting deliveryStatus ---
+        const startingStatuses = ['pending-pickup', 'driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered'];
+        for (const startStatus of startingStatuses) {
+            const p = await createTestParcel(`TEST-PAYSUCCESS-LIFECYCLE-${startStatus}-${Date.now()}`, {
+                cost: 30, deliveryStatus: startStatus
+            });
+            const sid = newSessionId(`lifecycle_${startStatus.replace(/-/g, '_')}`);
+            stripeSessionFixtures.set(sid, makeSession({ parcelId: p.id, trackingId: p.trackingId }));
+            res = await verify(sid, CUSTOMER_EMAIL);
+            const afterPay = await models.Parcel.findById(p.id);
+            const paymentCount = await collections.payments.countDocuments({ sessionId: sid });
+            logTest(
+                `Valid payment succeeds and preserves deliveryStatus (${startStatus})`,
+                res.statusCode === 200 &&
+                res.body.success === true &&
+                res.body.alreadyProcessed === false &&
+                afterPay.paymentStatus === 'paid' &&
+                afterPay.deliveryStatus === startStatus &&
+                paymentCount === 1
+            );
+        }
+
+        // --- 17. Same valid session called twice - idempotent, no duplicate row ---
+        const idemParcel = await createTestParcel(`TEST-PAYSUCCESS-IDEMPOTENT-${Date.now()}`, { cost: 30 });
+        const idemSid = newSessionId('idempotent');
+        stripeSessionFixtures.set(idemSid, makeSession({ parcelId: idemParcel.id, trackingId: idemParcel.trackingId }));
+        const firstCall = await verify(idemSid, CUSTOMER_EMAIL);
+        const secondCall = await verify(idemSid, CUSTOMER_EMAIL);
+        const idemPaymentCount = await collections.payments.countDocuments({ sessionId: idemSid });
+        logTest(
+            'Repeated call with same session is idempotent (no duplicate payment record)',
+            firstCall.statusCode === 200 && firstCall.body.alreadyProcessed === false &&
+            secondCall.statusCode === 200 && secondCall.body.alreadyProcessed === true &&
+            secondCall.body.transactionId === firstCall.body.transactionId &&
+            idemPaymentCount === 1
+        );
+
+        // --- 18. Same session referenced by a caller who owns a different parcel - rejected ---
+        await createTestParcel(`TEST-PAYSUCCESS-OTHEROWNER-${Date.now()}`, {
+            cost: 30, senderEmail: 'other-customer@example.com'
+        });
+        res = await verify(idemSid, 'other-customer@example.com');
+        logTest(
+            'Already-recorded session claimed by a non-owning caller rejected',
+            res.statusCode === 403
+        );
+
+        // --- 19. Parcel already paid by a different session - controlled conflict ---
+        const alreadyPaidParcel = await createTestParcel(`TEST-PAYSUCCESS-ALREADYPAID-${Date.now()}`, {
+            cost: 30, paymentStatus: 'paid'
+        });
+        const differentSessionSid = newSessionId('differentsession');
+        stripeSessionFixtures.set(differentSessionSid, makeSession({
+            parcelId: alreadyPaidParcel.id, trackingId: alreadyPaidParcel.trackingId
+        }));
+        res = await verify(differentSessionSid, CUSTOMER_EMAIL);
+        logTest('Parcel already paid via a different session rejected', res.statusCode === 409);
+
+        // --- 22. Raw browser-supplied fields ignored ---
+        const tamperedParcel = await createTestParcel(`TEST-PAYSUCCESS-TAMPERED-${Date.now()}`, { cost: 30 });
+        const tamperedSid = newSessionId('tampered');
+        stripeSessionFixtures.set(tamperedSid, makeSession({ parcelId: tamperedParcel.id, trackingId: tamperedParcel.trackingId }));
+        res = await verify(tamperedSid, CUSTOMER_EMAIL, {
+            parcelId: '000000000000000000000000', email: 'attacker@example.com', amount: 1, paymentStatus: 'paid'
+        });
+        const afterTampered = await models.Parcel.findById(tamperedParcel.id);
+        logTest(
+            'Tampered client body fields ignored - real metadata parcel is the one paid',
+            res.statusCode === 200 && res.body.trackingId === tamperedParcel.trackingId && afterTampered.paymentStatus === 'paid'
+        );
+
+        // --- 23. Stripe failure (not just "not found") - controlled, no leakage, no mutation ---
+        const outageParcel = await createTestParcel(`TEST-PAYSUCCESS-OUTAGE-${Date.now()}`, { cost: 30 });
+        const outageSid = newSessionId('outage');
+        stripeSessionFixtures.set(outageSid, { __simulateOutage: true });
+        res = await verify(outageSid, CUSTOMER_EMAIL);
+        const afterOutage = await models.Parcel.findById(outageParcel.id);
+        logTest(
+            'Simulated Stripe outage returns a safe error with no mutation',
+            res.statusCode === 404 &&
+            !JSON.stringify(res.body).includes('simulated Stripe outage') &&
+            afterOutage.paymentStatus !== 'paid'
+        );
+    } finally {
+        await new Promise(resolve => setTimeout(resolve, 300));
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        if (createdSessionIds.length) {
+            await collections.payments.deleteMany({ sessionId: { $in: createdSessionIds } });
+        }
+        if (createdTrackingIds.length) {
+            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
+        for (const sid of createdSessionIds) {
+            stripeSessionFixtures.delete(sid);
+        }
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -599,6 +932,7 @@ async function runAllTests() {
     await testStatusTransitions();
     await testInitialRequestStatus();
     await testSecureCheckoutSession();
+    await testSecurePaymentSuccess();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

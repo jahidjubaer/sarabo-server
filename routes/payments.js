@@ -8,8 +8,9 @@ function paymentRoutes(app, controllers) {
     // verify ownership, payment eligibility, and the trusted stored amount
     app.post('/payment-checkout-session', verifyFBToken, ensureDatabaseReady, (req, res) => paymentController.createCheckoutSession(req, res));
 
-    // Handle payment success
-    app.patch('/payment-success', ensureDatabaseReady, (req, res) => paymentController.handlePaymentSuccess(req, res));
+    // Handle payment success - requires auth; the caller's sessionId is
+    // verified server-side against Stripe and MongoDB, never trusted alone
+    app.patch('/payment-success', verifyFBToken, ensureDatabaseReady, (req, res) => paymentController.handlePaymentSuccess(req, res));
 
     // Get payments
     app.get('/payments', verifyFBToken, ensureDatabaseReady, (req, res) => paymentController.getAllPayments(req, res));
