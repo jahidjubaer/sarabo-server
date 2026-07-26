@@ -164,13 +164,93 @@ async function testStatusTransitions() {
         await new Promise(resolve => setTimeout(resolve, 300));
 
         // Clean up only the throwaway parcels/tracking logs this test created.
+        // The shared Mongo connection itself is closed once, at the very end
+        // of runAllTests(), after every database-backed test section is done.
         for (const id of createdParcelIds) {
             await collections.parcels.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdTrackingIds.length) {
             await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
-        await client.close();
+    }
+
+    console.log('');
+}
+
+// Confirms a newly created repair request stores deliveryStatus: 'pending-pickup'
+// (not just a client-side display fallback), that the admin's existing
+// pending-pickup filter surfaces it, and that assignment still moves it to
+// driver_assigned - the exact fix and compatibility checks for commit
+// "fix: set initial repair request status".
+async function testInitialRequestStatus() {
+    console.log('12. Testing Initial Repair Request Status');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+
+    const createdParcelIds = [];
+    const createdTrackingIds = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const parcelController = controllers.parcel;
+
+        const marker = `TEST-INITIAL-STATUS-${Date.now()}`;
+        const countBefore = await collections.parcels.countDocuments({ parcelName: marker });
+
+        const createRes = fakeRes();
+        await parcelController.createParcel(
+            { body: { parcelName: marker, cost: 1 }, decoded_email: CUSTOMER_EMAIL },
+            createRes
+        );
+        const id = createRes.body.insertedId.toString();
+        createdParcelIds.push(id);
+
+        // Read back from MongoDB directly - confirms the value is actually
+        // persisted, not just something the client fabricates for display.
+        const stored = await models.Parcel.findById(id);
+        createdTrackingIds.push(stored.trackingId);
+        logTest('New request stores deliveryStatus: pending-pickup in MongoDB', stored.deliveryStatus === 'pending-pickup');
+
+        const countAfter = await collections.parcels.countDocuments({ parcelName: marker });
+        logTest('No duplicate request created', countAfter === countBefore + 1);
+
+        // Same query the admin "Assign Technicians" page issues.
+        const pendingResults = await models.Parcel.findAll({ deliveryStatus: 'pending-pickup' });
+        const foundInPending = pendingResults.some(p => p._id.toString() === id);
+        logTest('Admin pending-pickup filter (GET /parcels?deliveryStatus=pending-pickup) returns the new request', foundInPending);
+
+        await parcelController.assignRiderToParcel(
+            {
+                params: { id },
+                body: { riderId: 'test-rider-id', riderName: 'Test Rider', riderEmail: RIDER_EMAIL, trackingId: stored.trackingId }
+            },
+            fakeRes()
+        );
+        const afterAssignment = await models.Parcel.findById(id);
+        logTest('Assignment changes status to driver_assigned', afterAssignment.deliveryStatus === 'driver_assigned');
+    } finally {
+        await new Promise(resolve => setTimeout(resolve, 300));
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        if (createdTrackingIds.length) {
+            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
     }
 
     console.log('');
@@ -353,6 +433,13 @@ async function runAllTests() {
     console.log('');
 
     await testStatusTransitions();
+    await testInitialRequestStatus();
+
+    // Both database-backed sections above share one cached Mongo connection
+    // (config/database.js's connectDatabase()); close it once, here, now that
+    // every test needing it has finished.
+    const { client } = require('./config/database');
+    await client.close();
 
     // Summary
     console.log('='.repeat(60));

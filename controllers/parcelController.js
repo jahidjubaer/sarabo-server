@@ -93,6 +93,7 @@ class ParcelController {
             parcel.createdAt = new Date();
             parcel.trackingId = trackingId;
             parcel.senderEmail = req.decoded_email;
+            parcel.deliveryStatus = 'pending-pickup';
 
             logTracking(this.collections.trackings, trackingId, 'parcel_created');
 
