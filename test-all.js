@@ -190,6 +190,35 @@ async function runAllTests() {
     );
     console.log('');
 
+    // Test 10: CORS origin handling. Requests with no Origin header (every
+    // test above) already exercise the "no Origin -> allowed" path; these
+    // two confirm the allow-list itself is enforced.
+    console.log('10. Testing CORS Origin Handling');
+    console.log('-'.repeat(60));
+    await makeRequest(
+        {
+            hostname: 'localhost',
+            port: 3000,
+            path: '/',
+            method: 'GET',
+            headers: { Origin: 'http://localhost:5173' }
+        },
+        200,
+        'GET / (allowed localhost dev origin)'
+    );
+    await makeRequest(
+        {
+            hostname: 'localhost',
+            port: 3000,
+            path: '/',
+            method: 'GET',
+            headers: { Origin: 'http://evil-not-allowed.example' }
+        },
+        403,
+        'GET / (rejected unknown origin)'
+    );
+    console.log('');
+
     // Summary
     console.log('='.repeat(60));
     console.log('Test Summary');

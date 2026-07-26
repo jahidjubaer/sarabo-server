@@ -34,8 +34,8 @@ Create a `.env` file in the root directory with the following variables:
 PORT=3000
 
 # MongoDB Connection
-DB_USER=your_mongodb_username
-DB_PASS=your_mongodb_password
+# Full connection string, e.g. mongodb+srv://<user>:<password>@<cluster>/...
+MONGO_URI=your_mongodb_connection_string
 
 # Firebase Admin SDK
 # This should be a base64 encoded JSON service account key
@@ -44,9 +44,24 @@ FB_SERVICE_KEY=your_base64_encoded_firebase_service_account_key
 # Stripe Payment
 STRIPE_SECRET=your_stripe_secret_key
 
-# Site Domain (for Stripe redirect URLs)
-SITE_DOMAIN=http://localhost:3000
+# Site Domain
+# The production client origin, used for Stripe redirect URLs and for the
+# server's CORS allow-list. Must include the protocol (http:// or https://)
+# and must not include a trailing path or trailing slash.
+# Example only - replace with your actual deployed client URL:
+SITE_DOMAIN=https://your-client-domain.example
 ```
+
+### Environment variables reference
+
+| Name | Purpose |
+|---|---|
+| `FB_SERVICE_KEY` | Base64-encoded Firebase Admin service account key, used to verify Firebase ID tokens. |
+| `MONGO_URI` | MongoDB connection string. |
+| `STRIPE_SECRET` | Stripe secret key, used to create checkout sessions. |
+| `SITE_DOMAIN` | Production client origin (protocol + host, no trailing path/slash). Used for Stripe redirect URLs and allowed in the server's CORS policy alongside local development origins. |
+
+No actual values are listed above - see your own `.env` file (never committed) for the real configuration.
 
 ### 3. Get Firebase Service Account Key
 

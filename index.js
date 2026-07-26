@@ -3,6 +3,7 @@ const cors = require('cors');
 require('dotenv').config();
 
 const { collections } = require('./config/database');
+const { corsOptions } = require('./config/cors');
 const { initializeModels } = require('./models');
 const { initializeControllers } = require('./controllers');
 
@@ -20,7 +21,15 @@ const isServerless = !!process.env.VERCEL;
 
 // Middleware
 app.use(express.json());
-app.use(cors());
+app.use(cors(corsOptions));
+// Turns a rejected-origin CORS error into a controlled response instead of
+// falling through to Express's default error handler.
+app.use((err, req, res, next) => {
+    if (err && err.message === 'Not allowed by CORS') {
+        return res.status(403).send({ message: 'Origin not allowed' });
+    }
+    next(err);
+});
 
 // Root endpoint - does not depend on the database, always available immediately
 app.get('/', (req, res) => {
