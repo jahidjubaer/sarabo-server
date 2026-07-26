@@ -4,8 +4,9 @@ const { ensureDatabaseReady } = require('../middleware/database');
 function paymentRoutes(app, controllers) {
     const paymentController = controllers.payment;
 
-    // Create checkout session (Stripe only, no database access)
-    app.post('/payment-checkout-session', (req, res) => paymentController.createCheckoutSession(req, res));
+    // Create checkout session - requires auth and looks up the parcel to
+    // verify ownership, payment eligibility, and the trusted stored amount
+    app.post('/payment-checkout-session', verifyFBToken, ensureDatabaseReady, (req, res) => paymentController.createCheckoutSession(req, res));
 
     // Handle payment success
     app.patch('/payment-success', ensureDatabaseReady, (req, res) => paymentController.handlePaymentSuccess(req, res));

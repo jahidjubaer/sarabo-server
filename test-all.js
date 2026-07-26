@@ -10,6 +10,32 @@ const results = [];
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
 const CUSTOMER_EMAIL = 'jahidhasan.metro@gmail.com';
+const ADMIN_EMAIL = 'jahidjubaer17@gmail.com';
+
+// Real Stripe must never be called during automated tests. paymentController.js
+// calls `require('stripe')(secret)` once at module load, so this replaces the
+// cached 'stripe' module's export with a fake *before* anything requires
+// ./controllers below - every test section shares one process-wide module
+// cache, so this only needs to happen once, here, at the top of the file.
+const capturedStripeSessionParams = [];
+const stripeModulePath = require.resolve('stripe');
+require.cache[stripeModulePath] = {
+    id: stripeModulePath,
+    filename: stripeModulePath,
+    loaded: true,
+    exports: function fakeStripeFactory() {
+        return {
+            checkout: {
+                sessions: {
+                    create: async (params) => {
+                        capturedStripeSessionParams.push(params);
+                        return { url: 'https://checkout.stripe.com/pay/cs_test_fake_session', id: 'cs_test_fake_session' };
+                    }
+                }
+            }
+        };
+    }
+};
 
 function logTest(name, passed, message = '') {
     if (passed) {
@@ -256,6 +282,143 @@ async function testInitialRequestStatus() {
     console.log('');
 }
 
+// Confirms the secured POST /payment-checkout-session contract: auth required
+// (HTTP-level, via the real middleware chain), ownership-enforced, amount and
+// email always server-derived (never trusted from the client), already-paid
+// requests rejected, and Stripe only ever receives safe metadata - all
+// against a real Stripe stub captured in capturedStripeSessionParams (see the
+// top of this file), never the real Stripe API.
+async function testSecureCheckoutSession() {
+    console.log('13. Testing Secure Payment Checkout Session');
+    console.log('-'.repeat(60));
+
+    // HTTP-level: confirm the route itself now requires authentication.
+    await makeRequest(
+        {
+            hostname: 'localhost', port: 3000, path: '/payment-checkout-session', method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ parcelId: '000000000000000000000000' })
+        },
+        401,
+        'POST /payment-checkout-session (no auth)'
+    );
+    await makeRequest(
+        {
+            hostname: 'localhost', port: 3000, path: '/payment-checkout-session', method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer invalid_token_12345' },
+            body: JSON.stringify({ parcelId: '000000000000000000000000' })
+        },
+        401,
+        'POST /payment-checkout-session (invalid token)'
+    );
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+
+    const createdParcelIds = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const paymentController = controllers.payment;
+
+        async function createTestParcel(marker, cost) {
+            const doc = {
+                parcelName: marker,
+                cost,
+                senderEmail: CUSTOMER_EMAIL,
+                trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                createdAt: new Date()
+            };
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function checkout(id, decoded_email, extraBody = {}) {
+            const res = fakeRes();
+            return paymentController.createCheckoutSession(
+                { body: { parcelId: id, ...extraBody }, decoded_email },
+                res
+            ).then(() => res);
+        }
+
+        // --- Owner can create a checkout session; a fake client-supplied
+        // amount and email must have no effect on what Stripe receives. ---
+        const main = await createTestParcel(`TEST-PAYMENT-${Date.now()}`, 49.99);
+        const sessionsBefore = capturedStripeSessionParams.length;
+        let res = await checkout(main.id, CUSTOMER_EMAIL, { cost: 1, senderEmail: 'attacker@example.com' });
+        logTest('Owner can create checkout session', res.statusCode === 200 && !!res.body.url);
+
+        const captured = capturedStripeSessionParams[capturedStripeSessionParams.length - 1];
+        logTest(
+            'Server converts stored amount correctly (ignores captured client-supplied cost)',
+            capturedStripeSessionParams.length === sessionsBefore + 1 &&
+            captured.line_items[0].price_data.unit_amount === 4999
+        );
+        logTest(
+            'Fake client-supplied email has no effect (real token email used)',
+            captured.customer_email === CUSTOMER_EMAIL
+        );
+        logTest(
+            'Stripe receives only safe metadata (parcelId, trackingId - no other fields)',
+            Object.keys(captured.metadata).sort().join(',') === 'parcelId,trackingId'
+        );
+        logTest(
+            'Success/cancel URLs come from server config (SITE_DOMAIN), not the client',
+            captured.success_url.startsWith(process.env.SITE_DOMAIN) &&
+            captured.cancel_url.startsWith(process.env.SITE_DOMAIN)
+        );
+
+        // --- Non-owners rejected, including admin/technician accounts. ---
+        res = await checkout(main.id, RIDER_EMAIL);
+        logTest('Non-owner (technician) rejected', res.statusCode === 403);
+
+        res = await checkout(main.id, ADMIN_EMAIL);
+        logTest('Non-owner (admin) rejected', res.statusCode === 403);
+
+        // --- Not found / invalid ObjectId. ---
+        res = await checkout('000000000000000000000000', CUSTOMER_EMAIL);
+        logTest('Request not found', res.statusCode === 404);
+
+        res = await checkout('not-a-valid-object-id', CUSTOMER_EMAIL);
+        logTest('Invalid ObjectId rejected', res.statusCode === 400);
+
+        // --- Invalid stored amount. ---
+        const zeroCost = await createTestParcel(`TEST-PAYMENT-ZERO-${Date.now()}`, 0);
+        res = await checkout(zeroCost.id, CUSTOMER_EMAIL);
+        logTest('Zero stored amount rejected', res.statusCode === 400);
+
+        const badCost = await createTestParcel(`TEST-PAYMENT-BAD-${Date.now()}`, 'not-a-number');
+        res = await checkout(badCost.id, CUSTOMER_EMAIL);
+        logTest('Non-numeric stored amount rejected', res.statusCode === 400);
+
+        // --- Already-paid request rejected. ---
+        const paid = await createTestParcel(`TEST-PAYMENT-PAID-${Date.now()}`, 25);
+        await collections.parcels.updateOne({ _id: new ObjectId(paid.id) }, { $set: { paymentStatus: 'paid' } });
+        res = await checkout(paid.id, CUSTOMER_EMAIL);
+        logTest('Already-paid request rejected', res.statusCode === 409);
+    } finally {
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -363,7 +526,8 @@ async function runAllTests() {
     );
     console.log('');
 
-    // Test 7: Payment endpoints
+    // Test 7: Payment endpoints. This route now requires authentication and
+    // ownership (see Test 13) - it is no longer publicly callable.
     console.log('7. Testing Payment Endpoints');
     console.log('-'.repeat(60));
     await makeRequest(
@@ -373,10 +537,10 @@ async function runAllTests() {
             path: '/payment-checkout-session',
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cost: 100, parcelName: 'Test Parcel' })
+            body: JSON.stringify({ parcelId: '000000000000000000000000' })
         },
-        200, // Payment endpoint doesn't require auth
-        'POST /payment-checkout-session'
+        401,
+        'POST /payment-checkout-session (no auth)'
     );
     console.log('');
 
@@ -434,6 +598,7 @@ async function runAllTests() {
 
     await testStatusTransitions();
     await testInitialRequestStatus();
+    await testSecureCheckoutSession();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
