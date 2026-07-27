@@ -45,11 +45,14 @@ FB_SERVICE_KEY=your_base64_encoded_firebase_service_account_key
 STRIPE_SECRET=your_stripe_secret_key
 
 # Site Domain
-# The production client origin, used for Stripe redirect URLs and for the
-# server's CORS allow-list. Must include the protocol (http:// or https://)
-# and must not include a trailing path or trailing slash.
-# Example only - replace with your actual deployed client URL:
-SITE_DOMAIN=https://your-client-domain.example
+# The client origin, used for Stripe redirect URLs and for the server's CORS
+# allow-list. Must include the protocol (http:// or https://) and must not
+# include a trailing path or trailing slash.
+# For local development, this must be the React client's dev server origin
+# (not the Express server's own port) - the client (Vite) defaults to 5173:
+SITE_DOMAIN=http://localhost:5173
+# For a deployed environment, use the deployed client URL instead, e.g.
+# https://your-client-domain.example
 ```
 
 ### Environment variables reference
@@ -59,7 +62,7 @@ SITE_DOMAIN=https://your-client-domain.example
 | `FB_SERVICE_KEY` | Base64-encoded Firebase Admin service account key, used to verify Firebase ID tokens. |
 | `MONGO_URI` | MongoDB connection string. |
 | `STRIPE_SECRET` | Stripe secret key, used to create checkout sessions. |
-| `SITE_DOMAIN` | Production client origin (protocol + host, no trailing path/slash). Used for Stripe redirect URLs and allowed in the server's CORS policy alongside local development origins. |
+| `SITE_DOMAIN` | Client origin (protocol + host, no trailing path/slash) - the React client's dev server (`http://localhost:5173`) for local development, or the deployed client URL otherwise. Used for Stripe redirect URLs and allowed in the server's CORS policy. |
 
 No actual values are listed above - see your own `.env` file (never committed) for the real configuration.
 
