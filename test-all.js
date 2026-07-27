@@ -170,6 +170,7 @@ async function testStatusTransitions() {
 
     const createdParcelIds = [];
     const createdTrackingIds = [];
+    let originalRiderWorkStatus = null;
 
     function fakeRes() {
         return {
@@ -186,6 +187,13 @@ async function testStatusTransitions() {
         const controllers = initializeControllers(models, collections);
         const parcelController = controllers.parcel;
 
+        // Real assignments against the shared RIDER_EMAIL account can now
+        // actually succeed (Phase 2.5 Unit 2 made assignment transactional
+        // and validates the technician up front), so capture its workStatus
+        // before this test can mutate it and restore it in `finally`.
+        const riderBeforeTest = await collections.riders.findOne({ email: RIDER_EMAIL });
+        originalRiderWorkStatus = riderBeforeTest?.workStatus ?? null;
+
         async function createTestParcel(marker) {
             const res = fakeRes();
             await parcelController.createParcel(
@@ -200,10 +208,16 @@ async function testStatusTransitions() {
         }
 
         async function assignTestRider(id, trackingId) {
+            // Must be a real, approved technician document now that
+            // assignRiderToParcel validates riderId as an ObjectId and
+            // looks the technician up (Phase 2.5 Unit 2) - reuses the same
+            // known, persistent local-dev rider account referenced by
+            // RIDER_EMAIL elsewhere in this file, rather than a fake string.
+            const realRider = await collections.riders.findOne({ email: RIDER_EMAIL });
             await parcelController.assignRiderToParcel(
                 {
                     params: { id },
-                    body: { riderId: 'test-rider-id', riderName: 'Test Rider', riderEmail: RIDER_EMAIL, trackingId }
+                    body: { riderId: realRider._id.toString(), riderName: realRider.name, riderEmail: RIDER_EMAIL, trackingId }
                 },
                 fakeRes()
             );
@@ -276,6 +290,19 @@ async function testStatusTransitions() {
         if (createdTrackingIds.length) {
             await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
+
+        // Restore the real, shared RIDER_EMAIL account's workStatus - this
+        // test's assignments can genuinely flip it to 'in_delivery' now that
+        // assignment is transactional, and it must never be left mutated.
+        if (originalRiderWorkStatus !== null) {
+            const currentRider = await collections.riders.findOne({ email: RIDER_EMAIL });
+            if (currentRider && currentRider.workStatus !== originalRiderWorkStatus) {
+                await collections.riders.updateOne(
+                    { email: RIDER_EMAIL },
+                    { $set: { workStatus: originalRiderWorkStatus } }
+                );
+            }
+        }
     }
 
     console.log('');
@@ -297,6 +324,7 @@ async function testInitialRequestStatus() {
 
     const createdParcelIds = [];
     const createdTrackingIds = [];
+    let originalRiderWorkStatus = null;
 
     function fakeRes() {
         return {
@@ -312,6 +340,12 @@ async function testInitialRequestStatus() {
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
         const parcelController = controllers.parcel;
+
+        // This test's assignment can genuinely flip the shared RIDER_EMAIL
+        // account's workStatus now that assignment is transactional -
+        // capture the original value up front and restore it in `finally`.
+        const riderBeforeTest = await collections.riders.findOne({ email: RIDER_EMAIL });
+        originalRiderWorkStatus = riderBeforeTest?.workStatus ?? null;
 
         const marker = `TEST-INITIAL-STATUS-${Date.now()}`;
         const countBefore = await collections.parcels.countDocuments({ parcelName: marker });
@@ -338,10 +372,14 @@ async function testInitialRequestStatus() {
         const foundInPending = pendingResults.some(p => p._id.toString() === id);
         logTest('Admin pending-pickup filter (GET /parcels?deliveryStatus=pending-pickup) returns the new request', foundInPending);
 
+        // Must be a real, approved technician document now that
+        // assignRiderToParcel validates riderId as an ObjectId and looks the
+        // technician up (Phase 2.5 Unit 2).
+        const realRiderForAssignment = await collections.riders.findOne({ email: RIDER_EMAIL });
         await parcelController.assignRiderToParcel(
             {
                 params: { id },
-                body: { riderId: 'test-rider-id', riderName: 'Test Rider', riderEmail: RIDER_EMAIL, trackingId: stored.trackingId }
+                body: { riderId: realRiderForAssignment._id.toString(), riderName: realRiderForAssignment.name, riderEmail: RIDER_EMAIL, trackingId: stored.trackingId }
             },
             fakeRes()
         );
@@ -354,6 +392,17 @@ async function testInitialRequestStatus() {
         }
         if (createdTrackingIds.length) {
             await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
+
+        // Restore the real, shared RIDER_EMAIL account's workStatus.
+        if (originalRiderWorkStatus !== null) {
+            const currentRider = await collections.riders.findOne({ email: RIDER_EMAIL });
+            if (currentRider && currentRider.workStatus !== originalRiderWorkStatus) {
+                await collections.riders.updateOne(
+                    { email: RIDER_EMAIL },
+                    { $set: { workStatus: originalRiderWorkStatus } }
+                );
+            }
         }
     }
 
@@ -2061,6 +2110,7 @@ async function testRequestCancellation() {
 
     const createdParcelIds = [];
     const createdTrackingIds = [];
+    let originalRiderWorkStatus = null;
 
     function fakeRes() {
         return {
@@ -2080,6 +2130,15 @@ async function testRequestCancellation() {
         const parcelController = controllers.parcel;
         const paymentController = controllers.payment;
         const trackingController = controllers.tracking;
+        // Must be a real, approved technician document now that
+        // assignRiderToParcel validates riderId as an ObjectId and looks the
+        // technician up (Phase 2.5 Unit 2) - reuses the same known,
+        // persistent local-dev rider account used elsewhere in this file.
+        const realRider = await collections.riders.findOne({ email: RIDER_EMAIL });
+        // The p10 cancellation-vs-assignment race can genuinely resolve to a
+        // real successful assignment, which would flip this shared account's
+        // workStatus - capture the original value now and restore it below.
+        originalRiderWorkStatus = realRider?.workStatus ?? null;
 
         async function createTestParcel(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, deliveryStatus, riderEmail, paymentStatus } = {}) {
             const doc = {
@@ -2221,18 +2280,18 @@ async function testRequestCancellation() {
         // --- 19. A cancelled request cannot be assigned. ---
         const p9 = await createTestParcel(`TEST-CANCEL-NOASSIGN-${Date.now()}`);
         await cancelReq(p9.id, CUSTOMER_EMAIL);
-        res = await assignReq(p9.id, { riderId: new ObjectId().toString(), riderName: 'Test Rider', riderEmail: RIDER_EMAIL, trackingId: p9.trackingId });
+        res = await assignReq(p9.id, { riderId: realRider._id.toString(), riderName: realRider.name, riderEmail: RIDER_EMAIL, trackingId: p9.trackingId });
         const p9After = await models.Parcel.findById(p9.id);
         logTest(
             'A cancelled request cannot be assigned',
-            res.statusCode === 409 && res.body.code === 'REQUEST_NOT_ASSIGNABLE' && !p9After.riderEmail
+            res.statusCode === 409 && res.body.code === 'REQUEST_CANCELLED' && !p9After.riderEmail
         );
 
         // --- 20, 22. Cancellation-versus-assignment race has exactly one winner; loser writes no tracking log. ---
         const p10 = await createTestParcel(`TEST-CANCEL-RACE-ASSIGN-${Date.now()}`);
         const [raceCancelRes, raceAssignRes] = await Promise.all([
             cancelReq(p10.id, CUSTOMER_EMAIL),
-            assignReq(p10.id, { riderId: new ObjectId().toString(), riderName: 'Test Rider', riderEmail: RIDER_EMAIL, trackingId: p10.trackingId })
+            assignReq(p10.id, { riderId: realRider._id.toString(), riderName: realRider.name, riderEmail: RIDER_EMAIL, trackingId: p10.trackingId })
         ]);
         const p10After = await models.Parcel.findById(p10.id);
         const p10Logs = await trackingLogsFor(p10.trackingId);
@@ -2319,6 +2378,375 @@ async function testRequestCancellation() {
         }
         await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds } });
         await collections.payments.deleteMany({ parcelId: { $in: createdParcelIds } });
+
+        // Restore the real, shared RIDER_EMAIL account's workStatus.
+        if (originalRiderWorkStatus !== null) {
+            const currentRider = await collections.riders.findOne({ email: RIDER_EMAIL });
+            if (currentRider && currentRider.workStatus !== originalRiderWorkStatus) {
+                await collections.riders.updateOne(
+                    { email: RIDER_EMAIL },
+                    { $set: { workStatus: originalRiderWorkStatus } }
+                );
+            }
+        }
+    }
+
+    console.log('');
+}
+
+// Phase 2.5 Unit 2: Make Technician Assignment Transaction-Safe. Exercises
+// the rewritten assignRiderToParcel end-to-end: pre-transaction validation
+// ordering and error codes, the atomic parcel+technician+tracking-log
+// transaction and its rollback under injected failures (technician-update
+// failure, tracking-insert failure, transaction-commit failure), session
+// lifecycle, idempotency/conflict handling for repeated assignment,
+// concurrency races (assignment-vs-assignment and cancellation-vs-
+// assignment), and legacy/unknown deliveryStatus compatibility. MongoDB
+// transactions are real (this Atlas cluster is a replica set, per the
+// existing services/paymentProcessor.js precedent); only the deliberate
+// failure points below are mocked, and real Stripe is never called.
+async function testTechnicianAssignment() {
+    console.log('20. Testing Transactional Technician Assignment');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections, client } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+
+    const createdParcelIds = [];
+    const createdTrackingIds = [];
+    const createdRiderIds = [];
+    let originalRiderWorkStatus = null;
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            headers: {},
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            set(name, value) { this.headers[name] = value; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const parcelController = controllers.parcel;
+        const trackingController = controllers.tracking;
+
+        // Reuses the same known, persistent local-dev rider account used
+        // elsewhere in this file for one genuine end-to-end success case;
+        // every other scenario below uses its own throwaway rider fixture so
+        // this shared account is touched as little as possible. Its
+        // workStatus is still captured and restored below regardless.
+        const realRider = await collections.riders.findOne({ email: RIDER_EMAIL });
+        originalRiderWorkStatus = realRider?.workStatus ?? null;
+
+        async function createTestParcel(marker, { deliveryStatus = 'pending-pickup', omitStatus = false } = {}) {
+            const doc = {
+                parcelName: marker,
+                cost: 30,
+                senderEmail: CUSTOMER_EMAIL,
+                trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                createdAt: new Date()
+            };
+            if (!omitStatus) doc.deliveryStatus = deliveryStatus;
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            createdTrackingIds.push(doc.trackingId);
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        async function createTestRider(marker, { status = 'approved', workStatus = 'available' } = {}) {
+            const doc = {
+                name: marker,
+                email: `${marker.toLowerCase()}@test.local`,
+                status,
+                workStatus,
+                createdAt: new Date()
+            };
+            const result = await collections.riders.insertOne(doc);
+            createdRiderIds.push(result.insertedId.toString());
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function assignReq(parcelId, body) {
+            const res = fakeRes();
+            return parcelController.assignRiderToParcel({ params: { id: parcelId }, body }, res).then(() => res);
+        }
+
+        function cancelReq(id, decoded_email) {
+            const res = fakeRes();
+            return parcelController.cancelParcel({ params: { id }, decoded_email }, res).then(() => res);
+        }
+
+        function publicTrackReq(trackingCode) {
+            const res = fakeRes();
+            return trackingController.getPublicTracking({ params: { trackingCode } }, res).then(() => res);
+        }
+
+        function trackingLogsFor(trackingId) {
+            return collections.trackings.find({ trackingId }).toArray();
+        }
+
+        // --- 1-6. Pre-transaction validation ordering & error codes. ---
+        let res = await assignReq('not-a-valid-object-id', { riderId: realRider._id.toString() });
+        logTest('Invalid request id rejected (400)', res.statusCode === 400 && res.body.code === 'INVALID_REQUEST_ID');
+
+        const p1 = await createTestParcel(`TEST-ASSIGN-VALID-${Date.now()}`);
+        res = await assignReq(p1.id, { riderId: 'not-a-valid-object-id' });
+        logTest(
+            'Invalid technician id rejected (400) and never causes a post-commit 500',
+            res.statusCode === 400 && res.body.code === 'INVALID_TECHNICIAN_ID'
+        );
+
+        res = await assignReq(p1.id, {});
+        logTest('Missing technician id rejected (400)', res.statusCode === 400 && res.body.code === 'INVALID_TECHNICIAN_ID');
+
+        res = await assignReq('000000000000000000000000', { riderId: realRider._id.toString() });
+        logTest('Missing repair request rejected (404)', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND');
+
+        res = await assignReq(p1.id, { riderId: new ObjectId().toString() });
+        logTest('Missing technician rejected (404)', res.statusCode === 404 && res.body.code === 'TECHNICIAN_NOT_FOUND');
+
+        const pendingTechnician = await createTestRider(`TEST-RIDER-PENDING-${Date.now()}`, { status: 'pending' });
+        res = await assignReq(p1.id, { riderId: pendingTechnician.id });
+        logTest('Unapproved technician rejected (409)', res.statusCode === 409 && res.body.code === 'TECHNICIAN_NOT_APPROVED');
+
+        const p1After = await models.Parcel.findById(p1.id);
+        logTest(
+            'None of the above rejected validation attempts ever mutated the request',
+            p1After.deliveryStatus === 'pending-pickup' && !p1After.riderId
+        );
+
+        // --- 7-10. Successful assignment: full three-part invariant. ---
+        const p2 = await createTestParcel(`TEST-ASSIGN-SUCCESS-${Date.now()}`);
+        const beforeCount = (await trackingLogsFor(p2.trackingId)).length;
+        res = await assignReq(p2.id, {
+            riderId: realRider._id.toString(),
+            // Deliberately wrong client-supplied identity fields - the
+            // controller must derive name/email from the validated
+            // technician document fetched server-side, never trust these.
+            riderName: 'Should Be Ignored',
+            riderEmail: 'ignored@example.com'
+        });
+        logTest(
+            'Successful assignment returns 200 with the client-compatible response shape',
+            res.statusCode === 200 && res.body.acknowledged === true && res.body.modifiedCount === 1 && res.body.deliveryStatus === 'driver_assigned'
+        );
+
+        const p2After = await models.Parcel.findById(p2.id);
+        logTest(
+            'Parcel updated with server-derived technician identity, never the client-supplied fields',
+            p2After.deliveryStatus === 'driver_assigned' &&
+            p2After.riderId === realRider._id.toString() &&
+            p2After.riderEmail === realRider.email &&
+            p2After.riderName === realRider.name
+        );
+
+        const riderAfterP2 = await collections.riders.findOne({ _id: realRider._id });
+        logTest('Technician workStatus updated to in_delivery', riderAfterP2.workStatus === 'in_delivery');
+
+        const p2Logs = await trackingLogsFor(p2.trackingId);
+        const assignLog = p2Logs.find(l => l.status === 'driver_assigned');
+        logTest(
+            'Exactly one driver_assigned tracking log created, with no private data',
+            (p2Logs.length - beforeCount) === 1 && !!assignLog &&
+            !('riderEmail' in assignLog) && !('riderName' in assignLog) && !('senderEmail' in assignLog)
+        );
+
+        // --- 11. Technician-update failure mid-transaction rolls back everything. ---
+        const p3 = await createTestParcel(`TEST-ASSIGN-RIDERFAIL-${Date.now()}`);
+        const riderForFailure = await createTestRider(`TEST-RIDER-FAIL-${Date.now()}`);
+        const originalRiderUpdateOne = collections.riders.updateOne.bind(collections.riders);
+        collections.riders.updateOne = async () => ({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
+        try {
+            res = await assignReq(p3.id, { riderId: riderForFailure.id });
+        } finally {
+            collections.riders.updateOne = originalRiderUpdateOne;
+        }
+        logTest(
+            'Technician-update failure surfaces as 500 TECHNICIAN_UPDATE_FAILED',
+            res.statusCode === 500 && res.body.code === 'TECHNICIAN_UPDATE_FAILED'
+        );
+        const p3After = await models.Parcel.findById(p3.id);
+        const p3Logs = await trackingLogsFor(p3.trackingId);
+        logTest(
+            'Parcel update rolled back and no tracking log left behind on technician-update failure',
+            p3After.deliveryStatus === 'pending-pickup' && !p3After.riderId && p3Logs.length === 0
+        );
+
+        // --- 12. Tracking-insert failure mid-transaction rolls back everything. ---
+        const p4 = await createTestParcel(`TEST-ASSIGN-TRACKFAIL-${Date.now()}`);
+        const riderForTrackFailure = await createTestRider(`TEST-RIDER-TRACKFAIL-${Date.now()}`);
+        const originalTrackingInsertOne = collections.trackings.insertOne.bind(collections.trackings);
+        collections.trackings.insertOne = async () => { throw new Error('simulated tracking insert outage'); };
+        try {
+            res = await assignReq(p4.id, { riderId: riderForTrackFailure.id });
+        } finally {
+            collections.trackings.insertOne = originalTrackingInsertOne;
+        }
+        logTest('Tracking-insert failure surfaces as 500 ASSIGNMENT_FAILED', res.statusCode === 500 && res.body.code === 'ASSIGNMENT_FAILED');
+        const p4After = await models.Parcel.findById(p4.id);
+        const riderAfterTrackFailure = await collections.riders.findOne({ _id: new ObjectId(riderForTrackFailure.id) });
+        logTest(
+            'Parcel and technician both rolled back on tracking-insert failure',
+            p4After.deliveryStatus === 'pending-pickup' && !p4After.riderId && riderAfterTrackFailure.workStatus === 'available'
+        );
+
+        // --- 13. Transaction commit failure rolls back and always ends the session. ---
+        const p5 = await createTestParcel(`TEST-ASSIGN-COMMITFAIL-${Date.now()}`);
+        const riderForCommitFailure = await createTestRider(`TEST-RIDER-COMMITFAIL-${Date.now()}`);
+        const commitFailSession = client.startSession();
+        commitFailSession.commitTransaction = async () => { throw new Error('simulated commit failure'); };
+        const originalStartSession = client.startSession.bind(client);
+        client.startSession = () => commitFailSession;
+        try {
+            res = await assignReq(p5.id, { riderId: riderForCommitFailure.id });
+        } finally {
+            client.startSession = originalStartSession;
+        }
+        logTest('Transaction commit failure surfaces as 500 ASSIGNMENT_FAILED', res.statusCode === 500 && res.body.code === 'ASSIGNMENT_FAILED');
+        logTest('Session is always ended, even after a commit failure', commitFailSession.hasEnded === true);
+        const p5After = await models.Parcel.findById(p5.id);
+        const riderAfterCommitFailure = await collections.riders.findOne({ _id: new ObjectId(riderForCommitFailure.id) });
+        const p5Logs = await trackingLogsFor(p5.trackingId);
+        logTest(
+            'No partial state survives a commit failure',
+            p5After.deliveryStatus === 'pending-pickup' && !p5After.riderId &&
+            riderAfterCommitFailure.workStatus === 'available' && p5Logs.length === 0
+        );
+
+        // --- 14-15. Idempotency: repeated assignment, same or different technician. ---
+        const p6 = await createTestParcel(`TEST-ASSIGN-REPEAT-${Date.now()}`);
+        const riderA = await createTestRider(`TEST-RIDER-A-${Date.now()}`);
+        const riderB = await createTestRider(`TEST-RIDER-B-${Date.now()}`);
+        res = await assignReq(p6.id, { riderId: riderA.id });
+        logTest('First assignment for the repeat-assignment test succeeds', res.statusCode === 200);
+
+        res = await assignReq(p6.id, { riderId: riderA.id });
+        logTest(
+            'Repeated assignment with the SAME technician rejected (409, no reassignment)',
+            res.statusCode === 409 && res.body.code === 'REQUEST_ALREADY_ASSIGNED'
+        );
+
+        res = await assignReq(p6.id, { riderId: riderB.id });
+        logTest(
+            'Repeated assignment with a DIFFERENT technician also rejected (409, no reassignment)',
+            res.statusCode === 409 && res.body.code === 'REQUEST_ALREADY_ASSIGNED'
+        );
+
+        const riderBAfter = await collections.riders.findOne({ _id: new ObjectId(riderB.id) });
+        const p6Logs = await trackingLogsFor(p6.trackingId);
+        logTest(
+            'The rejected technician (B) is never mutated and only one tracking log exists',
+            riderBAfter.workStatus === 'available' && p6Logs.filter(l => l.status === 'driver_assigned').length === 1
+        );
+
+        // --- 16. Concurrent assignment race (two different technicians): exactly one winner. ---
+        const p7 = await createTestParcel(`TEST-ASSIGN-RACE-${Date.now()}`);
+        const riderC = await createTestRider(`TEST-RIDER-C-${Date.now()}`);
+        const riderD = await createTestRider(`TEST-RIDER-D-${Date.now()}`);
+        const [raceResC, raceResD] = await Promise.all([
+            assignReq(p7.id, { riderId: riderC.id }),
+            assignReq(p7.id, { riderId: riderD.id })
+        ]);
+        const raceStatuses = [raceResC.statusCode, raceResD.statusCode].sort();
+        logTest(
+            'Concurrent assignment of two different technicians to the same request produces exactly one winner',
+            raceStatuses[0] === 200 && raceStatuses[1] === 409
+        );
+        const p7Logs = await trackingLogsFor(p7.trackingId);
+        logTest('Exactly one tracking log survives the assignment race', p7Logs.filter(l => l.status === 'driver_assigned').length === 1);
+
+        const riderCAfter = await collections.riders.findOne({ _id: new ObjectId(riderC.id) });
+        const riderDAfter = await collections.riders.findOne({ _id: new ObjectId(riderD.id) });
+        const winnerIsC = raceResC.statusCode === 200;
+        logTest(
+            'Only the winning technician has workStatus mutated; the loser is untouched',
+            winnerIsC
+                ? (riderCAfter.workStatus === 'in_delivery' && riderDAfter.workStatus === 'available')
+                : (riderDAfter.workStatus === 'in_delivery' && riderCAfter.workStatus === 'available')
+        );
+
+        // --- Cancellation-vs-assignment race: reconfirms the Unit 1 one-winner
+        // guarantee still holds under the new transactional assignment path,
+        // using fixtures independent of section 19's own p10 test. ---
+        const p8 = await createTestParcel(`TEST-ASSIGN-CANCELRACE-${Date.now()}`);
+        const riderE = await createTestRider(`TEST-RIDER-E-${Date.now()}`);
+        await Promise.all([
+            cancelReq(p8.id, CUSTOMER_EMAIL),
+            assignReq(p8.id, { riderId: riderE.id })
+        ]);
+        const p8After = await models.Parcel.findById(p8.id);
+        const p8Logs = await trackingLogsFor(p8.trackingId);
+        logTest(
+            'Cancellation-vs-assignment race still produces exactly one coherent winner',
+            (p8After.deliveryStatus === 'cancelled' && !p8After.riderId) ||
+            (p8After.deliveryStatus === 'driver_assigned' && !!p8After.riderId)
+        );
+        logTest(
+            'Exactly one terminal tracking log survives the cancellation/assignment race',
+            p8Logs.filter(l => ['cancelled', 'driver_assigned'].includes(l.status)).length === 1
+        );
+
+        // --- 18-19. Legacy missing-status still assignable; unknown status rejected. ---
+        const p9 = await createTestParcel(`TEST-ASSIGN-LEGACY-${Date.now()}`, { omitStatus: true });
+        const riderF = await createTestRider(`TEST-RIDER-F-${Date.now()}`);
+        res = await assignReq(p9.id, { riderId: riderF.id });
+        logTest('Legacy request with no deliveryStatus field at all is still assignable', res.statusCode === 200);
+
+        const p10 = await createTestParcel(`TEST-ASSIGN-UNKNOWN-${Date.now()}`, { deliveryStatus: 'some_bogus_status' });
+        const riderG = await createTestRider(`TEST-RIDER-G-${Date.now()}`);
+        res = await assignReq(p10.id, { riderId: riderG.id });
+        // The controller's post-conflict reason-detection only special-cases
+        // 'cancelled'; any other non-pending-pickup value (including a
+        // bogus/unknown one) is reported as REQUEST_ALREADY_ASSIGNED rather
+        // than a distinct code - there is no separate "unknown status" error
+        // path, so the only real requirement here is that it's rejected as a
+        // conflict and never silently assigned.
+        logTest(
+            'Unexpected existing status value rejected as a conflict, never silently assigned',
+            res.statusCode === 409 && ['REQUEST_ALREADY_ASSIGNED', 'ASSIGNMENT_NOT_ALLOWED'].includes(res.body.code)
+        );
+
+        // --- 20. Public tracking still shows exactly one sanitized event, no PII. ---
+        const publicRes = await publicTrackReq(p2.trackingId);
+        const timeline = publicRes.body?.timeline || [];
+        const assignedEntries = timeline.filter(e => e.status === 'driver_assigned');
+        logTest(
+            'Public tracking shows exactly one sanitized driver_assigned entry with no rider PII',
+            publicRes.statusCode === 200 && assignedEntries.length === 1 &&
+            Object.keys(assignedEntries[0]).sort().join(',') === 'status,timestamp'
+        );
+    } finally {
+        // logTracking() writes made outside a transaction (none in the
+        // success paths above, but the shared account may have been touched)
+        // are all awaited directly in this controller, so no artificial
+        // delay is needed here unlike the fire-and-forget cancellation path.
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        if (createdTrackingIds.length) {
+            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
+        for (const id of createdRiderIds) {
+            await collections.riders.deleteOne({ _id: new ObjectId(id) });
+        }
+
+        // Restore the real, shared RIDER_EMAIL account's workStatus.
+        if (originalRiderWorkStatus !== null) {
+            const currentRider = await collections.riders.findOne({ email: RIDER_EMAIL });
+            if (currentRider && currentRider.workStatus !== originalRiderWorkStatus) {
+                await collections.riders.updateOne(
+                    { email: RIDER_EMAIL },
+                    { $set: { workStatus: originalRiderWorkStatus } }
+                );
+            }
+        }
     }
 
     console.log('');
@@ -2510,6 +2938,7 @@ async function runAllTests() {
     await testCurrencyAndEligibility();
     await testPublicTracking();
     await testRequestCancellation();
+    await testTechnicianAssignment();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

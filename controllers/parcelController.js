@@ -1,5 +1,6 @@
 const { ObjectId } = require('mongodb');
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
+const { client } = require('../config/database');
 const { generateSecureTrackingId } = require('../utils/trackingId');
 const { logTracking } = require('../middleware/logging');
 const { VALID_STATUSES, isValidTransition } = require('../utils/parcelStatus');
@@ -177,44 +178,123 @@ class ParcelController {
         }
     }
 
+    // Admin-only technician assignment. Request update, technician
+    // workStatus update, and the assignment tracking log are one
+    // transactionally consistent operation - all three commit together or
+    // none do. Previously these were three independent writes; if
+    // Rider.updateWorkStatus or the tracking insert failed after the parcel
+    // update had already committed, the request ended up assigned with no
+    // matching technician/tracking state and the caller saw a misleading
+    // 500. Cheap validation (ObjectId shape, existence, approval) happens
+    // before the transaction opens, purely to produce fast 400/404s - the
+    // actual concurrency guarantee comes from the guarded updates inside the
+    // transaction, never from these preliminary reads alone.
     async assignRiderToParcel(req, res) {
         try {
-            const { riderId, riderName, riderEmail, trackingId } = req.body;
-            const id = req.params.id;
+            const parcelId = req.params.id;
+            const { riderId } = req.body;
 
-            const updatedDoc = {
-                deliveryStatus: 'driver_assigned',
-                riderId: riderId,
-                riderName: riderName,
-                riderEmail: riderEmail
-            };
-
-            // Guarded atomically against a concurrent customer cancellation -
-            // the query condition itself is the race-resolver, not a
-            // read-then-write check. If cancellation already committed (or
-            // wins the race), matchedCount is 0 and neither the technician's
-            // work status nor a tracking log is touched.
-            const result = await this.collections.parcels.updateOne(
-                {
-                    _id: new ObjectId(id),
-                    $or: [
-                        { deliveryStatus: { $exists: false } },
-                        { deliveryStatus: 'pending-pickup' }
-                    ]
-                },
-                { $set: updatedDoc }
-            );
-
-            if (result.matchedCount === 0) {
-                return res.status(409).send({ message: 'this repair request can no longer be assigned', code: 'REQUEST_NOT_ASSIGNABLE' });
+            if (!ObjectId.isValid(parcelId)) {
+                return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
+            }
+            if (!riderId || !ObjectId.isValid(riderId)) {
+                return res.status(400).send({ message: 'invalid technician id', code: 'INVALID_TECHNICIAN_ID' });
             }
 
-            await this.Rider.updateWorkStatus(riderId, 'in_delivery');
-            logTracking(this.collections.trackings, trackingId, 'driver_assigned');
+            const parcel = await this.Parcel.findById(parcelId);
+            if (!parcel) {
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+            }
 
-            res.send(result);
+            const technician = await this.Rider.findById(riderId);
+            if (!technician) {
+                return res.status(404).send({ message: 'technician not found', code: 'TECHNICIAN_NOT_FOUND' });
+            }
+            if (technician.status !== 'approved') {
+                return res.status(409).send({ message: 'technician is not approved', code: 'TECHNICIAN_NOT_APPROVED' });
+            }
+
+            const mongoSession = client.startSession();
+            let conflict = false;
+            try {
+                await mongoSession.withTransaction(async () => {
+                    // Guarded atomically against a concurrent customer
+                    // cancellation or a competing assignment - the query
+                    // condition itself is the race-resolver, not a
+                    // read-then-write check. Technician identity is always
+                    // the server-validated document above, never trusted
+                    // client-supplied name/email fields.
+                    const parcelUpdateResult = await this.collections.parcels.updateOne(
+                        {
+                            _id: parcel._id,
+                            $or: [
+                                { deliveryStatus: { $exists: false } },
+                                { deliveryStatus: 'pending-pickup' }
+                            ]
+                        },
+                        {
+                            $set: {
+                                deliveryStatus: 'driver_assigned',
+                                riderId: technician._id.toString(),
+                                riderName: technician.name,
+                                riderEmail: technician.email
+                            }
+                        },
+                        { session: mongoSession }
+                    );
+
+                    if (parcelUpdateResult.matchedCount === 0) {
+                        conflict = true;
+                        return;
+                    }
+
+                    // Re-guards the technician's approval status atomically
+                    // at write time, not just at the preliminary read above.
+                    const riderUpdateResult = await this.collections.riders.updateOne(
+                        { _id: technician._id, status: 'approved' },
+                        { $set: { workStatus: 'in_delivery' } },
+                        { session: mongoSession }
+                    );
+
+                    if (riderUpdateResult.matchedCount === 0) {
+                        // The technician stopped being approved between the
+                        // preliminary check and this write - abort the whole
+                        // transaction (including the parcel update above)
+                        // rather than leave a request assigned to a
+                        // technician whose own state update never happened.
+                        throw Object.assign(new Error('technician update failed during assignment'), { code: 'TECHNICIAN_UPDATE_FAILED' });
+                    }
+
+                    await logTracking(this.collections.trackings, parcel.trackingId, 'driver_assigned', mongoSession);
+                });
+            } finally {
+                await mongoSession.endSession();
+            }
+
+            if (conflict) {
+                // Determine the transaction-bound current reason for an
+                // accurate, controlled response.
+                const latest = await this.Parcel.findById(parcelId);
+                if (!latest) {
+                    return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+                }
+                if (latest.deliveryStatus === 'cancelled') {
+                    return res.status(409).send({ message: 'this request has been cancelled', code: 'REQUEST_CANCELLED' });
+                }
+                if (latest.deliveryStatus && latest.deliveryStatus !== 'pending-pickup') {
+                    return res.status(409).send({ message: 'this request has already been assigned', code: 'REQUEST_ALREADY_ASSIGNED' });
+                }
+                return res.status(409).send({ message: 'this request can no longer be assigned', code: 'ASSIGNMENT_NOT_ALLOWED' });
+            }
+
+            res.send({ acknowledged: true, matchedCount: 1, modifiedCount: 1, deliveryStatus: 'driver_assigned' });
         } catch (error) {
-            res.status(500).send({ message: 'Error assigning technician to repair request', error: error.message });
+            if (error.code === 'TECHNICIAN_UPDATE_FAILED') {
+                console.error('Assignment transaction aborted: technician update failed');
+                return res.status(500).send({ message: 'Error updating technician during assignment', code: 'TECHNICIAN_UPDATE_FAILED' });
+            }
+            console.error('Assignment transaction aborted:', error.message);
+            res.status(500).send({ message: 'Error assigning technician to repair request', code: 'ASSIGNMENT_FAILED' });
         }
     }
 
