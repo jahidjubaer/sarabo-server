@@ -111,7 +111,28 @@ The server provides various endpoints for:
 - Payment processing (`/payments/*`)
 - Tracking (`/trackings/*`)
 
-All endpoints (except the root) require Firebase authentication via the `Authorization` header.
+Most endpoints require Firebase authentication via the `Authorization` header.
+Exceptions: the root health check, the Stripe webhook (`POST /stripe-webhook`,
+authenticated by its Stripe signature instead), and the public repair-tracking
+endpoint below.
+
+### Public repair tracking
+
+`GET /public/trackings/:trackingCode` is intentionally unauthenticated -
+tracking codes are designed as bearer-style lookup keys, safe to share as a
+link. It returns only a sanitized progress view (current status, a status
+timeline, created/updated timestamps) and never customer or technician
+identity, payment data, or the MongoDB document ID. It is rate-limited
+per-IP and does not support search, listing, or partial-code matching -
+only an exact tracking-code match resolves. The existing
+`GET /trackings/:trackingId/logs` remains the authenticated, detailed
+endpoint for signed-in owners/technicians/admins and is unchanged.
+
+New repair requests receive a tracking code in the format `SRB-<random>`
+(128 bits of cryptographically random entropy) rather than the older,
+weaker `PRCL-YYYYMMDD-XXXXXX` format - existing codes in that older format
+continue to resolve normally, they are simply no longer generated for new
+requests.
 
 ## Troubleshooting
 

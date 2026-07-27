@@ -21,6 +21,19 @@ class ParcelModel {
         return await this.collection.findOne(query);
     }
 
+    // Explicit allow-list projection for the unauthenticated public tracking
+    // endpoint - only these fields are ever allowed to leave MongoDB for
+    // that path, independent of whatever the response-building code does
+    // with them. See controllers/trackingController.js's getPublicTracking.
+    async findPublicProjectionByTrackingId(trackingId) {
+        const query = { trackingId };
+        // MongoDB includes _id by default even in an inclusion projection -
+        // exclude it explicitly, since the public contract must never
+        // expose the real MongoDB ObjectId.
+        const projection = { _id: 0, trackingId: 1, deliveryStatus: 1, createdAt: 1 };
+        return await this.collection.findOne(query, { projection });
+    }
+
     async create(parcelData) {
         parcelData.createdAt = new Date();
         const result = await this.collection.insertOne(parcelData);

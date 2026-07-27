@@ -14,6 +14,7 @@ const paymentRoutes = require('./routes/payments');
 const { registerPaymentWebhookRoute } = require('./routes/paymentWebhook');
 const riderRoutes = require('./routes/riders');
 const trackingRoutes = require('./routes/trackings');
+const publicTrackingRoutes = require('./routes/publicTracking');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -62,6 +63,7 @@ parcelRoutes(app, controllers);
 paymentRoutes(app, controllers);
 riderRoutes(app, controllers);
 trackingRoutes(app, controllers);
+publicTrackingRoutes(app, controllers);
 
 // Start server (only for local/traditional hosting - Vercel invokes the
 // exported app directly per request and does not use a listening port)

@@ -1495,14 +1495,22 @@ async function testDuplicateCheckoutPrevention() {
             'GET / still responds normally (non-payment routes unaffected)'
         );
     } finally {
+        // Items 11/12 above genuinely record a payment via the real
+        // processVerifiedCheckoutSession path (webhook/browser reconciliation
+        // tests), which also writes a 'parcel_paid' tracking log - collect
+        // each parcel's trackingId before deleting it so that log gets
+        // cleaned up too, not just the parcel/payment/checkout rows.
+        const trackingIdsToClean = [];
         for (const id of createdParcelIds) {
+            const parcel = await collections.parcels.findOne({ _id: new ObjectId(id) }, { projection: { trackingId: 1 } });
+            if (parcel) trackingIdsToClean.push(parcel.trackingId);
             await collections.parcels.deleteOne({ _id: new ObjectId(id) });
         }
         await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds } });
-        // Items 11/12 above genuinely record a payment via the real
-        // processVerifiedCheckoutSession path (webhook/browser reconciliation
-        // tests) - clean those up too, not just the parcel and checkout rows.
         await collections.payments.deleteMany({ parcelId: { $in: createdParcelIds } });
+        if (trackingIdsToClean.length) {
+            await collections.trackings.deleteMany({ trackingId: { $in: trackingIdsToClean } });
+        }
     }
 
     console.log('');
@@ -1706,11 +1714,299 @@ async function testCurrencyAndEligibility() {
             'Currency/eligibility changes only gate NEW checkout creation - processVerifiedCheckoutSession and its idempotency guarantees are unchanged (covered fully by section 15)'
         );
     } finally {
+        // Several cases above genuinely record a payment via the real
+        // processVerifiedCheckoutSession path, which also writes a
+        // 'parcel_paid' tracking log - collect each parcel's trackingId
+        // before deleting it so that log gets cleaned up too.
+        const trackingIdsToClean = [];
         for (const id of createdParcelIds) {
+            const parcel = await collections.parcels.findOne({ _id: new ObjectId(id) }, { projection: { trackingId: 1 } });
+            if (parcel) trackingIdsToClean.push(parcel.trackingId);
             await collections.parcels.deleteOne({ _id: new ObjectId(id) });
         }
         await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds } });
         await collections.payments.deleteMany({ parcelId: { $in: createdParcelIds } });
+        if (trackingIdsToClean.length) {
+            await collections.trackings.deleteMany({ trackingId: { $in: trackingIdsToClean } });
+        }
+    }
+
+    console.log('');
+}
+
+// Confirms Phase 2.4 Unit 2 (public-by-link repair tracking): the new
+// unauthenticated GET /public/trackings/:trackingCode returns only an
+// explicit, sanitized allow-list of fields, the existing authenticated
+// GET /trackings/:trackingId/logs is completely unaffected, and secure
+// tracking-code generation/collision-retry works as designed. Never a real
+// Stripe call - this section doesn't touch payments at all.
+async function testPublicTracking() {
+    console.log('18. Testing Public Repair Tracking');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+    const { generateSecureTrackingId } = require('./utils/trackingId');
+
+    const createdParcelIds = [];
+    const createdTrackingIds = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            headers: {},
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            set(name, value) { this.headers[name] = value; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    // Small raw-HTTP helper (distinct from the shared makeRequest above)
+    // that also exposes response headers, needed for the no-store /
+    // rate-limit assertions below.
+    function rawRequest(path) {
+        return new Promise(resolve => {
+            const req = http.request({ hostname: 'localhost', port: 3000, path, method: 'GET' }, res => {
+                let data = '';
+                res.on('data', chunk => { data += chunk; });
+                res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, data }));
+            });
+            req.on('error', err => resolve({ status: 0, headers: {}, data: '', error: err.message }));
+            req.end();
+        });
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const trackingController = controllers.tracking;
+        const parcelController = controllers.parcel;
+
+        async function createTestParcel(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, riderEmail, deliveryStatus, trackingId } = {}) {
+            const doc = {
+                parcelName: marker,
+                cost,
+                senderEmail,
+                senderPhone: '01700000000',
+                senderAddress: '123 Test Street',
+                trackingId: trackingId || `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                createdAt: new Date()
+            };
+            if (riderEmail) doc.riderEmail = riderEmail;
+            if (deliveryStatus) doc.deliveryStatus = deliveryStatus;
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            createdTrackingIds.push(doc.trackingId);
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        async function addLog(trackingId, status, createdAt) {
+            const log = { trackingId, status, details: status.split('_').join(' '), createdAt: createdAt || new Date() };
+            await collections.trackings.insertOne(log);
+        }
+
+        function callPublic(trackingCode) {
+            const res = fakeRes();
+            return trackingController.getPublicTracking({ params: { trackingCode } }, res).then(() => res);
+        }
+
+        function callPrivate(trackingId, decoded_email) {
+            const res = fakeRes();
+            return trackingController.getTrackingLogs({ params: { trackingId }, decoded_email }, res).then(() => res);
+        }
+
+        // --- 1. Public endpoint requires no Firebase token (real HTTP, no Authorization header). ---
+        const p1 = await createTestParcel(`TEST-TRACK-BASIC-${Date.now()}`, { riderEmail: RIDER_EMAIL, deliveryStatus: 'driver_assigned' });
+        await addLog(p1.trackingId, 'parcel_created');
+        await addLog(p1.trackingId, 'driver_assigned');
+        {
+            const httpRes = await rawRequest(`/public/trackings/${p1.trackingId}`);
+            logTest('Public endpoint requires no Firebase token', httpRes.status === 200);
+        }
+
+        // --- 2, 3, 4. Sanitized response shape - only approved top-level and timeline keys. ---
+        let res = await callPublic(p1.trackingId);
+        logTest(
+            'Exact valid code returns a sanitized response',
+            res.statusCode === 200 && res.body.trackingCode === p1.trackingId
+        );
+        logTest(
+            'Response contains only approved top-level keys',
+            JSON.stringify(Object.keys(res.body).sort()) === JSON.stringify(['createdAt', 'currentStatus', 'timeline', 'trackingCode', 'updatedAt'].sort())
+        );
+        logTest(
+            'Timeline entries contain only approved keys',
+            res.body.timeline.every(entry => JSON.stringify(Object.keys(entry).sort()) === JSON.stringify(['status', 'timestamp'].sort()))
+        );
+
+        // --- 5-11. No private/sensitive data anywhere in the response. ---
+        const serialized = JSON.stringify(res.body);
+        logTest('Customer email not exposed', !serialized.includes(CUSTOMER_EMAIL));
+        logTest('Customer phone not exposed', !serialized.includes(p1.senderPhone));
+        logTest('Full address not exposed', !serialized.includes(p1.senderAddress));
+        logTest('Technician email not exposed', !serialized.includes(RIDER_EMAIL));
+        logTest(
+            'Payment data not exposed (no cost/amount/paymentStatus/session/transaction keys)',
+            !/cost|amount|paymentStatus|sessionId|transactionId/i.test(serialized)
+        );
+        logTest('MongoDB parcel _id not exposed', !serialized.includes(p1.id));
+        logTest(
+            'Private notes / internal fields not exposed (only the approved key set)',
+            !('senderEmail' in res.body) && !('riderEmail' in res.body) && !('notes' in res.body)
+        );
+
+        // --- 12, 13. Invalid shape and unknown code both rejected safely, same generic message. ---
+        res = await callPublic('a b'); // spaces are outside the allowed charset
+        const invalidBody = JSON.stringify(res.body);
+        logTest('Invalid tracking-code shape rejected safely', res.statusCode === 404);
+
+        res = await callPublic('SRB-doesNotExist00000000000');
+        logTest(
+            'Unknown tracking code returns the same generic 404 message as an invalid shape',
+            res.statusCode === 404 && JSON.stringify(res.body) === invalidBody
+        );
+
+        // --- 14. Database failure returns a safe 500, no raw error leaked. ---
+        {
+            const original = models.Parcel.findPublicProjectionByTrackingId.bind(models.Parcel);
+            models.Parcel.findPublicProjectionByTrackingId = () => { throw new Error('simulated database outage - do not leak this text'); };
+            res = await callPublic(p1.trackingId);
+            models.Parcel.findPublicProjectionByTrackingId = original;
+            logTest(
+                'Database failure returns a safe 500 with no internal leakage',
+                res.statusCode === 500 && !JSON.stringify(res.body).includes('simulated database outage')
+            );
+        }
+
+        // --- 15. Timeline entries are returned in chronological order. ---
+        const p2 = await createTestParcel(`TEST-TRACK-ORDER-${Date.now()}`);
+        const now = Date.now();
+        await addLog(p2.trackingId, 'parcel_delivered', new Date(now + 3000));
+        await addLog(p2.trackingId, 'parcel_created', new Date(now));
+        await addLog(p2.trackingId, 'parcel_picked_up', new Date(now + 2000));
+        await addLog(p2.trackingId, 'driver_assigned', new Date(now + 1000));
+        res = await callPublic(p2.trackingId);
+        logTest(
+            'Timeline entries are returned in chronological order',
+            res.body.timeline.map(e => e.status).join(',') === 'pending-pickup,driver_assigned,parcel_picked_up,parcel_delivered'
+        );
+
+        // --- 16. Missing logs handled safely - current status still returned, empty timeline. ---
+        const p3 = await createTestParcel(`TEST-TRACK-NOLOGS-${Date.now()}`);
+        res = await callPublic(p3.trackingId);
+        logTest(
+            'A tracking code with no logs yet returns current status and an empty timeline',
+            res.statusCode === 200 && res.body.currentStatus === 'pending-pickup' && Array.isArray(res.body.timeline) && res.body.timeline.length === 0
+        );
+
+        // --- 17. Duplicate consecutive identical-status logs are collapsed into one entry. ---
+        const p4 = await createTestParcel(`TEST-TRACK-DUP-${Date.now()}`);
+        await addLog(p4.trackingId, 'parcel_created', new Date(now));
+        await addLog(p4.trackingId, 'driver_assigned', new Date(now + 1000));
+        await addLog(p4.trackingId, 'driver_assigned', new Date(now + 1500)); // retried/duplicate
+        res = await callPublic(p4.trackingId);
+        logTest(
+            'Duplicate consecutive identical-status entries are collapsed into one',
+            res.body.timeline.length === 2 && res.body.timeline[1].status === 'driver_assigned'
+        );
+
+        // --- 19. No prefix/partial matching - a substring of a real code must not resolve. ---
+        const prefix = p1.trackingId.slice(0, Math.floor(p1.trackingId.length / 2));
+        res = await callPublic(prefix);
+        logTest('A prefix of a real tracking code does not resolve (no partial matching)', res.statusCode === 404);
+
+        // --- 20, 21, 22, 23. Existing private endpoint is completely unaffected. ---
+        {
+            const httpRes = await rawRequest(`/trackings/${p1.trackingId}/logs`);
+            logTest('Private endpoint still requires 401 for an anonymous caller', httpRes.status === 401);
+        }
+        res = await callPrivate(p1.trackingId, CUSTOMER_EMAIL);
+        logTest('Owner still accesses the private endpoint', res.statusCode === 200 && Array.isArray(res.body));
+        res = await callPrivate(p1.trackingId, RIDER_EMAIL);
+        logTest('Assigned technician still accesses the private endpoint', res.statusCode === 200);
+        res = await callPrivate(p1.trackingId, ADMIN_EMAIL);
+        logTest('Admin still accesses the private endpoint', res.statusCode === 200);
+        const unrelatedParcel = await createTestParcel(`TEST-TRACK-UNRELATED-${Date.now()}`, { senderEmail: 'unrelated-customer@example.com' });
+        res = await callPrivate(unrelatedParcel.trackingId, CUSTOMER_EMAIL);
+        logTest('Unrelated customer still receives 403 on the private endpoint', res.statusCode === 403);
+
+        // --- 24. Secure tracking-code generation has the expected format/entropy. ---
+        const secureCode = generateSecureTrackingId();
+        logTest(
+            'Secure tracking-code generation matches SRB-<128-bit base64url> format',
+            /^SRB-[A-Za-z0-9_-]{22}$/.test(secureCode)
+        );
+
+        // --- 25. A simulated tracking-code collision is retried and still succeeds. ---
+        {
+            const originalCreate = models.Parcel.create.bind(models.Parcel);
+            let createCallCount = 0;
+            models.Parcel.create = async parcelData => {
+                createCallCount++;
+                if (createCallCount === 1) {
+                    const err = new Error('E11000 duplicate key error simulated');
+                    err.code = 11000;
+                    throw err;
+                }
+                return originalCreate(parcelData);
+            };
+            const createRes = fakeRes();
+            await parcelController.createParcel(
+                { body: { parcelName: `TEST-TRACK-COLLISION-${Date.now()}`, cost: 25 }, decoded_email: CUSTOMER_EMAIL },
+                createRes
+            );
+            models.Parcel.create = originalCreate;
+            if (createRes.body && createRes.body.insertedId) {
+                createdParcelIds.push(createRes.body.insertedId.toString());
+                const created = await models.Parcel.findById(createRes.body.insertedId.toString());
+                if (created) createdTrackingIds.push(created.trackingId);
+            }
+            logTest(
+                'A simulated tracking-code collision is retried and the request still succeeds',
+                createRes.statusCode === 200 && !!createRes.body.insertedId && createCallCount === 2
+            );
+        }
+
+        // --- 26. Existing legacy-format tracking codes still resolve through the public endpoint. ---
+        const legacyCode = `PRCL-19990101-${Math.random().toString(16).slice(2, 8).toUpperCase()}`;
+        const legacyParcel = await createTestParcel(`TEST-TRACK-LEGACY-${Date.now()}`, { trackingId: legacyCode });
+        await addLog(legacyCode, 'parcel_created');
+        res = await callPublic(legacyCode);
+        logTest('Existing legacy-format (PRCL-...) tracking codes still resolve', res.statusCode === 200 && res.body.trackingCode === legacyCode);
+
+        // --- 27. New public endpoint sets no-store caching (real HTTP, real headers). ---
+        {
+            const httpRes = await rawRequest(`/public/trackings/${p1.trackingId}`);
+            logTest(
+                'Public endpoint response sets Cache-Control: no-store',
+                httpRes.headers['cache-control'] === 'no-store' && httpRes.headers['x-content-type-options'] === 'nosniff'
+            );
+        }
+
+        // --- 18. Rate limit returns 429 - real HTTP burst, run last so it
+        // doesn't interfere with the correctness tests above (all of which
+        // call the controller in-process and never touch the rate-limit
+        // middleware, which is only attached to the real Express route). ---
+        {
+            const burst = await Promise.all(
+                Array.from({ length: 25 }, () => rawRequest(`/public/trackings/${p1.trackingId}`))
+            );
+            logTest(
+                'Excessive requests from the same caller are rate-limited (429)',
+                burst.some(r => r.status === 429)
+            );
+        }
+    } finally {
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        if (createdTrackingIds.length) {
+            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
     }
 
     console.log('');
@@ -1900,6 +2196,7 @@ async function runAllTests() {
     await testStripeWebhook();
     await testDuplicateCheckoutPrevention();
     await testCurrencyAndEligibility();
+    await testPublicTracking();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

@@ -1,4 +1,4 @@
-const { generateTrackingId } = require('../utils/trackingId');
+const { generateSecureTrackingId } = require('../utils/trackingId');
 const { logTracking } = require('../middleware/logging');
 const { VALID_STATUSES, isValidTransition } = require('../utils/parcelStatus');
 
@@ -89,15 +89,31 @@ class ParcelController {
     async createParcel(req, res) {
         try {
             const parcel = req.body;
-            const trackingId = generateTrackingId();
             parcel.createdAt = new Date();
-            parcel.trackingId = trackingId;
             parcel.senderEmail = req.decoded_email;
             parcel.deliveryStatus = 'pending-pickup';
 
-            logTracking(this.collections.trackings, trackingId, 'parcel_created');
+            // Collision retry: astronomically unlikely at 128 bits of
+            // randomness, but the unique index on trackingId
+            // (config/database.js) is the real guard - a duplicate-key
+            // error here just means try again with a fresh code, the same
+            // pattern already used for payments/checkoutSessions elsewhere
+            // in this codebase.
+            const MAX_TRACKING_ID_ATTEMPTS = 5;
+            let result;
+            for (let attempt = 1; attempt <= MAX_TRACKING_ID_ATTEMPTS; attempt++) {
+                parcel.trackingId = generateSecureTrackingId();
+                try {
+                    result = await this.Parcel.create(parcel);
+                    break;
+                } catch (error) {
+                    if (error.code === 11000 && attempt < MAX_TRACKING_ID_ATTEMPTS) continue;
+                    throw error;
+                }
+            }
 
-            const result = await this.Parcel.create(parcel);
+            logTracking(this.collections.trackings, parcel.trackingId, 'parcel_created');
+
             res.send(result);
         } catch (error) {
             res.status(500).send({ message: 'Error creating repair request', error: error.message });

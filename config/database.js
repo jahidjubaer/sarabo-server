@@ -51,6 +51,12 @@ async function connectDatabase() {
                     { parcelId: 1 },
                     { unique: true, partialFilterExpression: { active: true } }
                 );
+                // Enforces uniqueness of trackingId at the database level -
+                // this is also the public tracking lookup key (see
+                // controllers/trackingController.js's getPublicTracking), so
+                // two repair requests must never be able to collide onto the
+                // same code.
+                await collections.parcels.createIndex({ trackingId: 1 }, { unique: true });
                 return { db, collections };
             })
             .catch((error) => {
