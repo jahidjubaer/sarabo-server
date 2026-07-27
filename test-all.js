@@ -22,6 +22,11 @@ const capturedStripeSessionParams = [];
 // sessionId, since `stripe.checkout.sessions.retrieve` is mocked to look up
 // this map instead of calling the real Stripe API.
 const stripeSessionFixtures = new Map();
+// Lets the duplicate-checkout-session tests (section 16) simulate a single
+// Stripe outage on the very next sessions.create() call without needing a
+// second stripe module mock - reset to false by the mock itself once fired.
+let forceNextCreateFailure = false;
+let createdSessionCounter = 0;
 const stripeModulePath = require.resolve('stripe');
 require.cache[stripeModulePath] = {
     id: stripeModulePath,
@@ -31,9 +36,31 @@ require.cache[stripeModulePath] = {
         return {
             checkout: {
                 sessions: {
-                    create: async (params) => {
+                    create: async (params, options = {}) => {
                         capturedStripeSessionParams.push(params);
-                        return { url: 'https://checkout.stripe.com/pay/cs_test_fake_session', id: 'cs_test_fake_session' };
+                        if (forceNextCreateFailure) {
+                            forceNextCreateFailure = false;
+                            throw new Error('simulated Stripe outage during session creation');
+                        }
+                        createdSessionCounter += 1;
+                        const sid = `cs_test_created_${Date.now()}_${createdSessionCounter}`;
+                        const lineItem = params.line_items[0];
+                        const fixture = {
+                            id: sid,
+                            url: `https://checkout.stripe.com/pay/${sid}`,
+                            status: 'open',
+                            mode: params.mode,
+                            payment_status: 'unpaid',
+                            payment_intent: null,
+                            customer_email: params.customer_email,
+                            amount_total: lineItem.price_data.unit_amount,
+                            currency: lineItem.price_data.currency,
+                            metadata: params.metadata,
+                            expires_at: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
+                            idempotencyKey: options.idempotencyKey
+                        };
+                        stripeSessionFixtures.set(sid, fixture);
+                        return fixture;
                     },
                     retrieve: async (sessionId) => {
                         const fixture = stripeSessionFixtures.get(sessionId);
@@ -452,6 +479,7 @@ async function testSecureCheckoutSession() {
         for (const id of createdParcelIds) {
             await collections.parcels.deleteOne({ _id: new ObjectId(id) });
         }
+        await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds } });
     }
 
     console.log('');
@@ -1218,6 +1246,268 @@ async function testStripeWebhook() {
     console.log('');
 }
 
+// Confirms server-side duplicate Stripe Checkout Session prevention (Phase
+// 2.3 Unit 1): at most one active, reusable Checkout Session exists per
+// parcel at a time. The real guard is the unique partial index on
+// checkoutSessions.parcelId (active:true, see config/database.js) combined
+// with claiming that slot before any Stripe API call is made (see
+// services/checkoutSessionManager.js and controllers/paymentController.js) -
+// never a real Stripe call, and never an in-memory-only mutex.
+async function testDuplicateCheckoutPrevention() {
+    console.log('16. Testing Duplicate Checkout Session Prevention');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+
+    const createdParcelIds = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const paymentController = controllers.payment;
+
+        async function createTestParcel(marker, cost = 30) {
+            const doc = {
+                parcelName: marker,
+                cost,
+                senderEmail: CUSTOMER_EMAIL,
+                trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                createdAt: new Date()
+            };
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function checkout(id, decoded_email, extraBody = {}) {
+            const res = fakeRes();
+            return paymentController.createCheckoutSession(
+                { body: { parcelId: id, ...extraBody }, decoded_email },
+                res
+            ).then(() => res);
+        }
+
+        function activeRowFor(parcelId) {
+            return collections.checkoutSessions.findOne({ parcelId, active: true });
+        }
+
+        function callWebhookWithSession(sessionObject, type = 'checkout.session.completed') {
+            const event = { id: `evt_test_dupchk_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, type, data: { object: sessionObject } };
+            const res = fakeRes();
+            return paymentController.handleStripeWebhook(
+                { headers: { 'stripe-signature': 'test_valid_signature' }, body: Buffer.from(JSON.stringify(event)) },
+                res
+            ).then(() => res);
+        }
+
+        // --- 1. First checkout creates one session, with a checkout row
+        // recorded (open, sessionId only - never a persisted URL). ---
+        const p1 = await createTestParcel(`TEST-DUPCHK-FIRST-${Date.now()}`, 40);
+        let sessionsBefore = capturedStripeSessionParams.length;
+        let res = await checkout(p1.id, CUSTOMER_EMAIL);
+        logTest(
+            'First checkout creates one Stripe session',
+            res.statusCode === 200 && !!res.body.url && res.body.reused === false &&
+            capturedStripeSessionParams.length === sessionsBefore + 1
+        );
+        const row1 = await activeRowFor(p1.id);
+        logTest(
+            'A single active checkout row is recorded (open, sessionId only, no URL persisted)',
+            !!row1 && row1.status === 'open' && typeof row1.sessionId === 'string' &&
+            !('checkoutUrl' in row1) && !('url' in row1)
+        );
+
+        // --- 2 & 3. Two concurrent calls create only one Stripe session; both
+        // callers receive the same reusable session or a controlled conflict. ---
+        const p2 = await createTestParcel(`TEST-DUPCHK-CONCURRENT-${Date.now()}`, 55);
+        sessionsBefore = capturedStripeSessionParams.length;
+        const [ra, rb] = await Promise.all([checkout(p2.id, CUSTOMER_EMAIL), checkout(p2.id, CUSTOMER_EMAIL)]);
+        logTest(
+            'Two concurrent checkout calls for the same parcel create only one Stripe session',
+            capturedStripeSessionParams.length === sessionsBefore + 1
+        );
+        const successes = [ra, rb].filter(r => r.statusCode === 200);
+        const conflicts = [ra, rb].filter(r => r.statusCode === 409 && r.body.code === 'CHECKOUT_CREATION_IN_PROGRESS');
+        logTest(
+            'Both concurrent callers receive the same reusable session or a controlled conflict',
+            successes.length + conflicts.length === 2 && successes.length >= 1 &&
+            new Set(successes.map(r => r.body.url)).size === 1
+        );
+
+        // --- 4. Same owner retry reuses the now-settled active session. ---
+        sessionsBefore = capturedStripeSessionParams.length;
+        const firstUrl = successes[0].body.url;
+        res = await checkout(p2.id, CUSTOMER_EMAIL);
+        logTest(
+            'Same owner retry reuses the active session (no new Stripe session, same URL)',
+            res.statusCode === 200 && res.body.reused === true && res.body.url === firstUrl &&
+            capturedStripeSessionParams.length === sessionsBefore
+        );
+
+        // --- 5. A different user cannot access or reuse another owner's session. ---
+        res = await checkout(p2.id, RIDER_EMAIL);
+        logTest("Different user cannot access another owner's checkout session", res.statusCode === 403);
+
+        // --- 6. Paid parcel rejected, no checkout row created. ---
+        const paidParcel = await createTestParcel(`TEST-DUPCHK-PAID-${Date.now()}`, 20);
+        await collections.parcels.updateOne({ _id: new ObjectId(paidParcel.id) }, { $set: { paymentStatus: 'paid' } });
+        res = await checkout(paidParcel.id, CUSTOMER_EMAIL);
+        const paidRow = await activeRowFor(paidParcel.id);
+        logTest(
+            'Paid parcel rejected with a controlled conflict and no checkout row created',
+            res.statusCode === 409 && res.body.code === 'ALREADY_PAID' && !paidRow
+        );
+
+        // --- 7. Expired session can be replaced. ---
+        const p3 = await createTestParcel(`TEST-DUPCHK-EXPIRED-${Date.now()}`, 33);
+        res = await checkout(p3.id, CUSTOMER_EMAIL);
+        const openRow = await activeRowFor(p3.id);
+        await collections.checkoutSessions.updateOne({ _id: openRow._id }, { $set: { expiresAt: new Date(Date.now() - 1000) } });
+        sessionsBefore = capturedStripeSessionParams.length;
+        res = await checkout(p3.id, CUSTOMER_EMAIL);
+        const newRow = await activeRowFor(p3.id);
+        logTest(
+            'Expired session is replaced by a fresh Stripe session',
+            res.statusCode === 200 && res.body.reused === false &&
+            capturedStripeSessionParams.length === sessionsBefore + 1 &&
+            !!newRow && newRow.sessionId !== openRow.sessionId
+        );
+
+        // --- 8. A failed Stripe creation attempt releases the lock instead
+        // of permanently locking the parcel out of future checkout attempts. ---
+        const p4 = await createTestParcel(`TEST-DUPCHK-STRIPEFAIL-${Date.now()}`, 15);
+        forceNextCreateFailure = true;
+        res = await checkout(p4.id, CUSTOMER_EMAIL);
+        const failedRow = await activeRowFor(p4.id);
+        logTest(
+            'A failed Stripe creation attempt returns a safe error and releases the lock',
+            res.statusCode === 500 && !failedRow
+        );
+        res = await checkout(p4.id, CUSTOMER_EMAIL);
+        logTest('A checkout attempt after a released lock succeeds normally', res.statusCode === 200 && !!res.body.url);
+
+        // --- 9 & 10. Invalid stored amount rejected (no checkout row
+        // created); a client-supplied fake amount is still ignored. ---
+        const zeroCost = await createTestParcel(`TEST-DUPCHK-ZERO-${Date.now()}`, 0);
+        res = await checkout(zeroCost.id, CUSTOMER_EMAIL);
+        const zeroRow = await activeRowFor(zeroCost.id);
+        logTest('Invalid stored amount rejected with no checkout row created', res.statusCode === 400 && !zeroRow);
+
+        const p5 = await createTestParcel(`TEST-DUPCHK-FAKEAMOUNT-${Date.now()}`, 60);
+        sessionsBefore = capturedStripeSessionParams.length;
+        res = await checkout(p5.id, CUSTOMER_EMAIL, { cost: 1 });
+        const captured = capturedStripeSessionParams[capturedStripeSessionParams.length - 1];
+        logTest(
+            'Client-supplied fake amount is ignored (server-stored cost used)',
+            res.statusCode === 200 && capturedStripeSessionParams.length === sessionsBefore + 1 &&
+            captured.line_items[0].price_data.unit_amount === 6000
+        );
+
+        // --- 11. Webhook completion reconciles the active checkout state. ---
+        const p6 = await createTestParcel(`TEST-DUPCHK-WEBHOOKRECON-${Date.now()}`, 70);
+        res = await checkout(p6.id, CUSTOMER_EMAIL);
+        const p6Row = await activeRowFor(p6.id);
+        const p6PaidSession = {
+            ...stripeSessionFixtures.get(p6Row.sessionId),
+            payment_status: 'paid',
+            status: 'complete',
+            payment_intent: `pi_test_dupchk_${p6.id}`
+        };
+        stripeSessionFixtures.set(p6Row.sessionId, p6PaidSession);
+        const hookRes = await callWebhookWithSession(p6PaidSession);
+        const p6RowAfter = await collections.checkoutSessions.findOne({ parcelId: p6.id });
+        logTest(
+            'Webhook completion reconciles the active checkout state to completed',
+            hookRes.statusCode === 200 && !!p6RowAfter && p6RowAfter.status === 'completed' && p6RowAfter.active === false
+        );
+
+        // --- 13. Duplicate webhook delivery does not corrupt checkout state. ---
+        const hookRes2 = await callWebhookWithSession(p6PaidSession);
+        const p6RowAfter2 = await collections.checkoutSessions.findOne({ parcelId: p6.id });
+        logTest(
+            'Duplicate webhook delivery does not corrupt checkout state',
+            hookRes2.statusCode === 200 && p6RowAfter2.status === 'completed' && p6RowAfter2.active === false
+        );
+
+        // A new checkout for the now-webhook-paid parcel must be rejected.
+        res = await checkout(p6.id, CUSTOMER_EMAIL);
+        logTest(
+            'A new checkout for an already-webhook-paid parcel is rejected',
+            res.statusCode === 409 && res.body.code === 'ALREADY_PAID'
+        );
+
+        // --- 12. Browser success fallback reconciles the active checkout state. ---
+        const p7 = await createTestParcel(`TEST-DUPCHK-BROWSERRECON-${Date.now()}`, 80);
+        res = await checkout(p7.id, CUSTOMER_EMAIL);
+        const p7Row = await activeRowFor(p7.id);
+        stripeSessionFixtures.set(p7Row.sessionId, {
+            ...stripeSessionFixtures.get(p7Row.sessionId),
+            payment_status: 'paid',
+            status: 'complete',
+            payment_intent: `pi_test_dupchk_browser_${p7.id}`
+        });
+        const browserRes = fakeRes();
+        await paymentController.handlePaymentSuccess(
+            { body: { sessionId: p7Row.sessionId }, decoded_email: CUSTOMER_EMAIL },
+            browserRes
+        );
+        const p7RowAfter = await collections.checkoutSessions.findOne({ parcelId: p7.id });
+        logTest(
+            'Browser success fallback reconciles the active checkout state to completed',
+            browserRes.statusCode === 200 && !!p7RowAfter && p7RowAfter.status === 'completed' && p7RowAfter.active === false
+        );
+
+        // --- 14. checkout.session.expired is safely ignored - this project
+        // deliberately does not subscribe to it; expiry is instead handled
+        // lazily, the next time a checkout attempt for that parcel is made
+        // (see findActive() in services/checkoutSessionManager.js). ---
+        const p8 = await createTestParcel(`TEST-DUPCHK-EXPIREDEVENT-${Date.now()}`, 45);
+        res = await checkout(p8.id, CUSTOMER_EMAIL);
+        const p8Row = await activeRowFor(p8.id);
+        const expiredRes = await callWebhookWithSession(
+            { ...stripeSessionFixtures.get(p8Row.sessionId), status: 'expired' },
+            'checkout.session.expired'
+        );
+        const p8RowAfter = await collections.checkoutSessions.findOne({ parcelId: p8.id });
+        logTest(
+            'checkout.session.expired is safely ignored (no mutation) - expiry is handled lazily on the next checkout attempt',
+            expiredRes.statusCode === 200 && expiredRes.body.ignored === true &&
+            p8RowAfter.status === 'open' && p8RowAfter.active === true
+        );
+
+        // --- 15. Existing non-payment routes remain unaffected. ---
+        await makeRequest(
+            { hostname: 'localhost', port: 3000, path: '/', method: 'GET' },
+            200,
+            'GET / still responds normally (non-payment routes unaffected)'
+        );
+    } finally {
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds } });
+        // Items 11/12 above genuinely record a payment via the real
+        // processVerifiedCheckoutSession path (webhook/browser reconciliation
+        // tests) - clean those up too, not just the parcel and checkout rows.
+        await collections.payments.deleteMany({ parcelId: { $in: createdParcelIds } });
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -1400,6 +1690,7 @@ async function runAllTests() {
     await testSecureCheckoutSession();
     await testSecurePaymentSuccess();
     await testStripeWebhook();
+    await testDuplicateCheckoutPrevention();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

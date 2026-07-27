@@ -1,6 +1,7 @@
 const { ObjectId } = require('mongodb');
 const { client } = require('../config/database');
 const { logTracking } = require('../middleware/logging');
+const { createCheckoutSessionManager } = require('./checkoutSessionManager');
 
 const EXPECTED_CURRENCY = 'usd';
 
@@ -25,6 +26,7 @@ function normalize(value) {
 // has no such identity and relies solely on Stripe/MongoDB agreement.
 function createPaymentProcessor(models, collections) {
     const { Parcel } = models;
+    const checkoutSessionManager = createCheckoutSessionManager(collections);
 
     return async function processVerifiedCheckoutSession({ session, source, callerEmail = null }) {
         const sessionId = session.id;
@@ -41,6 +43,11 @@ function createPaymentProcessor(models, collections) {
             if (normalizedCaller && normalize(parcel.senderEmail) !== normalizedCaller) {
                 return { code: 'OWNERSHIP_MISMATCH' };
             }
+            // Defensive reconciliation: the active checkout row (if any) for
+            // this parcel should already be completed from the first call
+            // that recorded this payment, but this keeps repeat/idempotent
+            // calls safe even if that earlier reconciliation did not run.
+            await checkoutSessionManager.completeByParcelId(existingPayment.parcelId);
             return {
                 code: 'OK',
                 alreadyProcessed: true,
@@ -93,7 +100,10 @@ function createPaymentProcessor(models, collections) {
 
         if (parcel.paymentStatus === 'paid') {
             // No payment record referenced this sessionId above, so this
-            // parcel was already paid through a different session.
+            // parcel was already paid through a different session. Reconcile
+            // defensively in case that other session's own completion never
+            // released the active checkout row.
+            await checkoutSessionManager.completeByParcelId(parcel._id.toString());
             return { code: 'ALREADY_PAID_OTHER_SESSION' };
         }
 
@@ -148,6 +158,12 @@ function createPaymentProcessor(models, collections) {
                     return;
                 }
 
+                // Same transaction as the payment insert + parcel update - the
+                // active checkout slot is released atomically with the payment
+                // becoming final, never left dangling as "in progress" once
+                // the parcel is actually paid.
+                await checkoutSessionManager.completeByParcelId(parcel._id.toString(), mongoSession);
+
                 committedPayment = { ...paymentRecord, _id: insertedId };
             });
         } finally {
@@ -157,6 +173,11 @@ function createPaymentProcessor(models, collections) {
         if (conflict) {
             const winner = await collections.payments.findOne({ sessionId });
             if (winner) {
+                // The concurrent call that actually committed already
+                // reconciled the checkout row in its own transaction - this
+                // is a defensive no-op unless that reconciliation somehow
+                // did not happen.
+                await checkoutSessionManager.completeByParcelId(winner.parcelId);
                 return {
                     code: 'OK',
                     alreadyProcessed: true,

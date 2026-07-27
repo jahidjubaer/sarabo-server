@@ -23,6 +23,7 @@ const collections = {
     payments: db.collection("payments"),
     riders: db.collection("riders"),
     trackings: db.collection("trackings"),
+    checkoutSessions: db.collection("checkoutSessions"),
 };
 
 let connectionPromise = null;
@@ -41,6 +42,15 @@ async function connectDatabase() {
                 // Session can only ever back one payment record, independent of
                 // any application-level race in handlePaymentSuccess.
                 await collections.payments.createIndex({ sessionId: 1 }, { unique: true });
+                // Enforces at the database level that a parcel can have at most
+                // one active (still-occupying-the-slot) checkout session row at
+                // a time - see services/checkoutSessionManager.js. Partial index
+                // filters support only simple equality, so `active` is a plain
+                // boolean rather than an enum of in-progress statuses.
+                await collections.checkoutSessions.createIndex(
+                    { parcelId: 1 },
+                    { unique: true, partialFilterExpression: { active: true } }
+                );
                 return { db, collections };
             })
             .catch((error) => {

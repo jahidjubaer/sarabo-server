@@ -1,6 +1,7 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const { ObjectId } = require('mongodb');
 const { createPaymentProcessor, normalize, EXPECTED_CURRENCY } = require('../services/paymentProcessor');
+const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
 
 // Stripe Checkout Session IDs are base62-ish (letters, digits, underscores).
 // A generous max length guards against pathological inputs without coupling
@@ -15,17 +16,20 @@ class PaymentController {
         // Shared with the Stripe webhook handler below - exactly one place
         // validates a Checkout Session and records a payment for it.
         this.processCheckoutSession = createPaymentProcessor(models, collections);
+        // Guards against duplicate concurrent Stripe Checkout Sessions for
+        // the same parcel - see services/checkoutSessionManager.js.
+        this.checkoutSessions = createCheckoutSessionManager(collections);
     }
 
     async createCheckoutSession(req, res) {
         try {
-            const { parcelId } = req.body;
+            const { parcelId: rawParcelId } = req.body;
 
-            if (!parcelId || !ObjectId.isValid(parcelId)) {
+            if (!rawParcelId || !ObjectId.isValid(rawParcelId)) {
                 return res.status(400).send({ message: 'invalid or missing parcelId' });
             }
 
-            const parcel = await this.Parcel.findById(parcelId);
+            const parcel = await this.Parcel.findById(rawParcelId);
             if (!parcel) {
                 return res.status(404).send({ message: 'parcel not found' });
             }
@@ -40,7 +44,7 @@ class PaymentController {
             }
 
             if (parcel.paymentStatus === 'paid') {
-                return res.status(409).send({ message: 'this request has already been paid for' });
+                return res.status(409).send({ message: 'this request has already been paid for', code: 'ALREADY_PAID' });
             }
 
             // The Stripe amount always comes from the trusted, server-stored
@@ -54,31 +58,105 @@ class PaymentController {
             // floating-point multiplication (e.g. 19.99 * 100) can produce
             // values like 1998.9999999999998.
             const unitAmount = Math.round(cost * 100);
+            const parcelId = parcel._id.toString();
 
-            const session = await stripe.checkout.sessions.create({
-                line_items: [
-                    {
-                        price_data: {
-                            currency: EXPECTED_CURRENCY,
-                            unit_amount: unitAmount,
-                            product_data: {
-                                name: `Repair request: ${parcel.parcelName}`
-                            }
-                        },
-                        quantity: 1,
-                    },
-                ],
-                mode: 'payment',
-                metadata: {
-                    parcelId: parcel._id.toString(),
-                    trackingId: parcel.trackingId
-                },
-                customer_email: req.decoded_email,
-                success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-                cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+            const conflictResponse = () => res.status(409).send({
+                message: 'a checkout session is already being created for this request, please try again shortly',
+                code: 'CHECKOUT_CREATION_IN_PROGRESS'
             });
 
-            res.send({ url: session.url });
+            // Reuse an existing, still-open Stripe Checkout Session for this
+            // parcel if one exists - this is what prevents multiple tabs,
+            // rapid retries, or concurrent requests from spawning multiple
+            // live Stripe sessions for the same repair request.
+            const activeRow = await this.checkoutSessions.findActive(parcelId);
+            if (activeRow) {
+                if (activeRow.status === 'creating') {
+                    return conflictResponse();
+                }
+                // status === 'open' - always retrieve the live session from
+                // Stripe itself (never a locally stored copy) both to obtain
+                // a fresh URL (never persisted at rest) and to double-check
+                // it is genuinely still open before reusing it.
+                try {
+                    const existingSession = await stripe.checkout.sessions.retrieve(activeRow.sessionId);
+                    if (existingSession.status === 'open' && existingSession.url) {
+                        return res.send({ url: existingSession.url, reused: true });
+                    }
+                } catch (stripeError) {
+                    console.error('Stripe session retrieval failed during reuse check:', stripeError.message);
+                }
+                // Stripe disagrees with our record (already completed/expired,
+                // or unreachable) - release the stale slot and fall through
+                // to create a fresh session below.
+                await this.checkoutSessions.markFailed(activeRow._id);
+            }
+
+            const claimResult = await this.checkoutSessions.claim({
+                parcelId, ownerEmail, amount: cost, currency: EXPECTED_CURRENCY
+            });
+            if (!claimResult.claimed) {
+                // Lost the race to another concurrent request between the
+                // findActive() check above and this claim attempt - the
+                // unique partial index on checkoutSessions is the real guard.
+                return conflictResponse();
+            }
+
+            let session;
+            try {
+                session = await stripe.checkout.sessions.create(
+                    {
+                        line_items: [
+                            {
+                                price_data: {
+                                    currency: EXPECTED_CURRENCY,
+                                    unit_amount: unitAmount,
+                                    product_data: {
+                                        name: `Repair request: ${parcel.parcelName}`
+                                    }
+                                },
+                                quantity: 1,
+                            },
+                        ],
+                        mode: 'payment',
+                        metadata: {
+                            parcelId,
+                            trackingId: parcel.trackingId
+                        },
+                        customer_email: req.decoded_email,
+                        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+                        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+                    },
+                    // Ties this Stripe API call to our own claim record, so a
+                    // network-level retry of this exact request (e.g. our own
+                    // process retrying after a timeout) reuses the same
+                    // Stripe session instead of creating a second one.
+                    { idempotencyKey: `checkout-create-${claimResult.id.toString()}` }
+                );
+            } catch (stripeError) {
+                console.error('Checkout session creation failed:', stripeError.message);
+                // Release the slot - a failed Stripe call must never
+                // permanently lock the parcel out of future checkout attempts.
+                await this.checkoutSessions.markFailed(claimResult.id);
+                return res.status(500).send({ message: 'Error creating checkout session' });
+            }
+
+            const expiresAt = session.expires_at
+                ? new Date(session.expires_at * 1000)
+                : new Date(Date.now() + 24 * 60 * 60 * 1000);
+            try {
+                await this.checkoutSessions.markOpen(claimResult.id, { sessionId: session.id, expiresAt });
+            } catch (dbError) {
+                // The Stripe session itself is real and valid regardless of
+                // whether we could record it - never block a customer from
+                // paying because of our own bookkeeping. The claim row stays
+                // 'creating' and will be reclaimed by the TTL check in
+                // findActive() once it goes stale, at worst allowing one
+                // extra session to be created next time.
+                console.error('Failed to persist checkout session record:', dbError.message);
+            }
+
+            res.send({ url: session.url, reused: false });
         } catch (error) {
             console.error('Checkout session creation failed:', error.message);
             res.status(500).send({ message: 'Error creating checkout session' });
