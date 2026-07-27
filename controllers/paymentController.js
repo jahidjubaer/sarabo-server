@@ -1,7 +1,9 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const { ObjectId } = require('mongodb');
-const { createPaymentProcessor, normalize, EXPECTED_CURRENCY } = require('../services/paymentProcessor');
+const { createPaymentProcessor, normalize } = require('../services/paymentProcessor');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
+const { getPaymentEligibility } = require('../services/paymentEligibility');
+const { PAYMENT_CURRENCY, toSmallestUnit } = require('../config/paymentConfig');
 
 // Stripe Checkout Session IDs are base62-ish (letters, digits, underscores).
 // A generous max length guards against pathological inputs without coupling
@@ -43,21 +45,26 @@ class PaymentController {
                 return res.status(403).send({ message: 'forbidden access' });
             }
 
-            if (parcel.paymentStatus === 'paid') {
-                return res.status(409).send({ message: 'this request has already been paid for', code: 'ALREADY_PAID' });
+            // Centralizes every parcel-state-only eligibility rule (already
+            // paid, permitted lifecycle status, valid stored cost) - see
+            // services/paymentEligibility.js. Must run before any checkout-
+            // session slot is claimed or Stripe is called, but this same
+            // check is never applied to webhook/browser-success completion,
+            // which must remain able to finalize a session created earlier
+            // even if the repair lifecycle has since moved on.
+            const eligibility = getPaymentEligibility(parcel);
+            if (!eligibility.eligible) {
+                const statusByCode = { ALREADY_PAID: 409, PAYMENT_NOT_AVAILABLE: 409, INVALID_PAYMENT_AMOUNT: 400 };
+                return res.status(statusByCode[eligibility.code] || 400).send({
+                    message: eligibility.reason,
+                    code: eligibility.code
+                });
             }
 
             // The Stripe amount always comes from the trusted, server-stored
             // cost - a client-supplied amount is never accepted or used.
-            const cost = Number(parcel.cost);
-            if (!Number.isFinite(cost) || cost <= 0) {
-                return res.status(400).send({ message: 'invalid stored amount for this request' });
-            }
-
-            // Controlled rounding to Stripe's smallest currency unit - raw
-            // floating-point multiplication (e.g. 19.99 * 100) can produce
-            // values like 1998.9999999999998.
-            const unitAmount = Math.round(cost * 100);
+            const cost = eligibility.cost;
+            const unitAmount = toSmallestUnit(cost);
             const parcelId = parcel._id.toString();
 
             const conflictResponse = () => res.status(409).send({
@@ -93,7 +100,7 @@ class PaymentController {
             }
 
             const claimResult = await this.checkoutSessions.claim({
-                parcelId, ownerEmail, amount: cost, currency: EXPECTED_CURRENCY
+                parcelId, ownerEmail, amount: cost, currency: PAYMENT_CURRENCY
             });
             if (!claimResult.claimed) {
                 // Lost the race to another concurrent request between the
@@ -109,7 +116,7 @@ class PaymentController {
                         line_items: [
                             {
                                 price_data: {
-                                    currency: EXPECTED_CURRENCY,
+                                    currency: PAYMENT_CURRENCY,
                                     unit_amount: unitAmount,
                                     product_data: {
                                         name: `Repair request: ${parcel.parcelName}`

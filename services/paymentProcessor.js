@@ -2,8 +2,7 @@ const { ObjectId } = require('mongodb');
 const { client } = require('../config/database');
 const { logTracking } = require('../middleware/logging');
 const { createCheckoutSessionManager } = require('./checkoutSessionManager');
-
-const EXPECTED_CURRENCY = 'usd';
+const { PAYMENT_CURRENCY, toSmallestUnit, isValidStoredCost } = require('../config/paymentConfig');
 
 function normalize(value) {
     return (value || '').trim().toLowerCase();
@@ -87,14 +86,14 @@ function createPaymentProcessor(models, collections) {
         }
 
         const cost = Number(parcel.cost);
-        if (!Number.isFinite(cost) || cost <= 0) {
+        if (!isValidStoredCost(cost)) {
             return { code: 'INVALID_STORED_COST' };
         }
-        const expectedAmount = Math.round(cost * 100);
+        const expectedAmount = toSmallestUnit(cost);
         if (session.amount_total !== expectedAmount) {
             return { code: 'AMOUNT_MISMATCH' };
         }
-        if (normalize(session.currency) !== EXPECTED_CURRENCY) {
+        if (normalize(session.currency) !== PAYMENT_CURRENCY) {
             return { code: 'CURRENCY_MISMATCH' };
         }
 
@@ -116,7 +115,7 @@ function createPaymentProcessor(models, collections) {
             trackingId,
             customerEmail: ownerEmail,
             amount: cost,
-            currency: EXPECTED_CURRENCY,
+            currency: PAYMENT_CURRENCY,
             paymentStatus: 'paid',
             // Operational traceability only - never used for authorization
             // or uniqueness (sessionId alone remains the idempotency key).
@@ -199,4 +198,4 @@ function createPaymentProcessor(models, collections) {
     };
 }
 
-module.exports = { createPaymentProcessor, normalize, EXPECTED_CURRENCY };
+module.exports = { createPaymentProcessor, normalize };

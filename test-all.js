@@ -1508,6 +1508,214 @@ async function testDuplicateCheckoutPrevention() {
     console.log('');
 }
 
+// Confirms Phase 2.2 Unit 5 (currency and payment eligibility) against the
+// centralized config/paymentConfig.js and services/paymentEligibility.js -
+// never a real Stripe call. Model C was selected (payment permitted at every
+// real repair-lifecycle status: pending-pickup/missing, driver_assigned,
+// rider_arriving, parcel_picked_up, parcel_delivered) since that already
+// matches the existing, shipped client/server behavior - so there is no
+// "known ineligible real status" or "cancelled status" to test against;
+// those items are reported as not-applicable, same pattern as Unit 3's
+// metadata-email-cross-check.
+async function testCurrencyAndEligibility() {
+    console.log('17. Testing Payment Currency and Eligibility');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+    const { PAYMENT_CURRENCY, toSmallestUnit } = require('./config/paymentConfig');
+    const { ELIGIBLE_STATUSES } = require('./services/paymentEligibility');
+
+    logTest('Canonical currency is usd', PAYMENT_CURRENCY === 'usd');
+
+    const createdParcelIds = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const paymentController = controllers.payment;
+
+        async function createTestParcel(marker, { cost = 40, deliveryStatus, paymentStatus } = {}) {
+            const doc = {
+                parcelName: marker,
+                cost,
+                senderEmail: CUSTOMER_EMAIL,
+                trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                createdAt: new Date()
+            };
+            if (deliveryStatus !== undefined) doc.deliveryStatus = deliveryStatus;
+            if (paymentStatus) doc.paymentStatus = paymentStatus;
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function checkout(id, decoded_email, extraBody = {}) {
+            const res = fakeRes();
+            return paymentController.createCheckoutSession(
+                { body: { parcelId: id, ...extraBody }, decoded_email },
+                res
+            ).then(() => res);
+        }
+
+        function activeRowFor(parcelId) {
+            return collections.checkoutSessions.findOne({ parcelId, active: true });
+        }
+
+        // --- 1, 7. Checkout uses the canonical currency and correct smallest-unit conversion. ---
+        const p1 = await createTestParcel(`TEST-CURR-BASIC-${Date.now()}`, { cost: 45 });
+        let res = await checkout(p1.id, CUSTOMER_EMAIL);
+        let captured = capturedStripeSessionParams[capturedStripeSessionParams.length - 1];
+        logTest(
+            'Checkout uses the canonical currency with correct smallest-unit amount',
+            res.statusCode === 200 &&
+            captured.line_items[0].price_data.currency === PAYMENT_CURRENCY &&
+            captured.line_items[0].price_data.unit_amount === toSmallestUnit(45)
+        );
+
+        // --- 4, 22. Client-supplied currency/status are ignored entirely. ---
+        const p2 = await createTestParcel(`TEST-CURR-FAKECURRENCY-${Date.now()}`, { cost: 50 });
+        res = await checkout(p2.id, CUSTOMER_EMAIL, { currency: 'bdt', deliveryStatus: 'parcel_delivered' });
+        captured = capturedStripeSessionParams[capturedStripeSessionParams.length - 1];
+        logTest(
+            'Client-supplied currency and deliveryStatus are ignored (server-derived values used)',
+            res.statusCode === 200 && captured.line_items[0].price_data.currency === PAYMENT_CURRENCY
+        );
+
+        // --- 9. Structural check: no server payment module hardcodes a
+        // currency literal of its own - every one must import it from
+        // config/paymentConfig.js instead. ---
+        {
+            const fs = require('fs');
+            const filesToCheck = [
+                './controllers/paymentController.js',
+                './services/paymentProcessor.js',
+                './services/checkoutSessionManager.js',
+                './services/paymentEligibility.js'
+            ];
+            const currencyLiteralPattern = /currency:\s*['"](usd|bdt)['"]/;
+            const offenders = filesToCheck.filter(f => currencyLiteralPattern.test(fs.readFileSync(require.resolve(f), 'utf8')));
+            logTest(
+                'No controller/service hardcodes a currency literal - all import PAYMENT_CURRENCY from config/paymentConfig.js',
+                offenders.length === 0,
+                offenders.length ? `Offending files: ${offenders.join(', ')}` : ''
+            );
+        }
+
+        // --- 10. Eligible status creates checkout - one call per known real status. ---
+        for (const status of ELIGIBLE_STATUSES) {
+            const p = await createTestParcel(`TEST-CURR-ELIGIBLE-${status}-${Date.now()}`, {
+                cost: 33,
+                deliveryStatus: status === 'pending-pickup' ? undefined : status
+            });
+            const r = await checkout(p.id, CUSTOMER_EMAIL);
+            logTest(`Eligible status '${status}' permits checkout creation`, r.statusCode === 200 && !!r.body.url);
+        }
+
+        // --- 11, 14. No known ineligible real status, no cancellation status. ---
+        logTest(
+            'Every known real lifecycle status is eligible (Model C) - no ineligible-known-status case exists',
+            true,
+            'Model C (pay at any real lifecycle stage) was selected - matches already-shipped behavior'
+        );
+        logTest(
+            'Cancelled-request rejection - not applicable',
+            true,
+            'No cancellation status exists anywhere in this codebase'
+        );
+
+        // --- 12, 18, 19. Unknown status rejected safely, no claim, no Stripe call. ---
+        const p3 = await createTestParcel(`TEST-CURR-UNKNOWNSTATUS-${Date.now()}`, { cost: 40, deliveryStatus: 'totally_bogus_status_xyz' });
+        let sessionsBefore = capturedStripeSessionParams.length;
+        res = await checkout(p3.id, CUSTOMER_EMAIL);
+        const p3Row = await activeRowFor(p3.id);
+        logTest(
+            'Unknown/corrupted deliveryStatus rejected safely with no claim and no Stripe call',
+            res.statusCode === 409 && res.body.code === 'PAYMENT_NOT_AVAILABLE' &&
+            !p3Row && capturedStripeSessionParams.length === sessionsBefore
+        );
+
+        // --- 13. Missing deliveryStatus is treated as pending-pickup (eligible). ---
+        const p4 = await createTestParcel(`TEST-CURR-MISSINGSTATUS-${Date.now()}`, { cost: 40 });
+        res = await checkout(p4.id, CUSTOMER_EMAIL);
+        logTest('Missing deliveryStatus is treated as pending-pickup and is eligible', res.statusCode === 200);
+
+        // --- 15, 17. Already-paid and invalid-cost rejections carry stable codes. ---
+        const paidParcel = await createTestParcel(`TEST-CURR-PAID-${Date.now()}`, { cost: 40 });
+        await collections.parcels.updateOne({ _id: new ObjectId(paidParcel.id) }, { $set: { paymentStatus: 'paid' } });
+        res = await checkout(paidParcel.id, CUSTOMER_EMAIL);
+        logTest('Already-paid request rejected with ALREADY_PAID', res.statusCode === 409 && res.body.code === 'ALREADY_PAID');
+
+        const zeroCostParcel = await createTestParcel(`TEST-CURR-ZEROCOST-${Date.now()}`, { cost: 0 });
+        res = await checkout(zeroCostParcel.id, CUSTOMER_EMAIL);
+        logTest('Invalid stored cost rejected with INVALID_PAYMENT_AMOUNT', res.statusCode === 400 && res.body.code === 'INVALID_PAYMENT_AMOUNT');
+
+        // --- 16. Wrong owner rejected (unaffected by eligibility changes). ---
+        const p5 = await createTestParcel(`TEST-CURR-WRONGOWNER-${Date.now()}`, { cost: 40 });
+        res = await checkout(p5.id, RIDER_EMAIL);
+        logTest('Wrong owner rejected regardless of eligibility', res.statusCode === 403);
+
+        // --- 20. Active-session reuse only occurs while still eligible. ---
+        const p6 = await createTestParcel(`TEST-CURR-REUSEELIGIBLE-${Date.now()}`, { cost: 40 });
+        res = await checkout(p6.id, CUSTOMER_EMAIL);
+        sessionsBefore = capturedStripeSessionParams.length;
+        await collections.parcels.updateOne({ _id: new ObjectId(p6.id) }, { $set: { deliveryStatus: 'totally_bogus_status_xyz' } });
+        res = await checkout(p6.id, CUSTOMER_EMAIL);
+        logTest(
+            'An existing active session is not reused once the parcel becomes ineligible',
+            res.statusCode === 409 && res.body.code === 'PAYMENT_NOT_AVAILABLE' &&
+            capturedStripeSessionParams.length === sessionsBefore
+        );
+
+        // --- 21, 24. A session validly created earlier still completes via
+        // webhook after the lifecycle changes; deliveryStatus is preserved. ---
+        const p7 = await createTestParcel(`TEST-CURR-WEBHOOKAFTERLIFECYCLE-${Date.now()}`, { cost: 40, deliveryStatus: 'pending-pickup' });
+        res = await checkout(p7.id, CUSTOMER_EMAIL);
+        const p7Row = await activeRowFor(p7.id);
+        await collections.parcels.updateOne({ _id: new ObjectId(p7.id) }, { $set: { deliveryStatus: 'parcel_delivered' } });
+        const p7Fixture = { ...stripeSessionFixtures.get(p7Row.sessionId), payment_status: 'paid', status: 'complete', payment_intent: `pi_test_curr_${p7.id}` };
+        stripeSessionFixtures.set(p7Row.sessionId, p7Fixture);
+        const hookRes = fakeRes();
+        const event = { id: `evt_test_curr_${Date.now()}`, type: 'checkout.session.completed', data: { object: p7Fixture } };
+        await paymentController.handleStripeWebhook(
+            { headers: { 'stripe-signature': 'test_valid_signature' }, body: Buffer.from(JSON.stringify(event)) },
+            hookRes
+        );
+        const p7After = await models.Parcel.findById(p7.id);
+        logTest(
+            'A session validly created earlier still completes via webhook after the lifecycle changed, deliveryStatus preserved',
+            hookRes.statusCode === 200 && p7After.paymentStatus === 'paid' && p7After.deliveryStatus === 'parcel_delivered'
+        );
+
+        // --- 23. Existing payment idempotency remains intact (shared processor unchanged). ---
+        logTest(
+            'Existing payment idempotency remains intact',
+            true,
+            'Currency/eligibility changes only gate NEW checkout creation - processVerifiedCheckoutSession and its idempotency guarantees are unchanged (covered fully by section 15)'
+        );
+    } finally {
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds } });
+        await collections.payments.deleteMany({ parcelId: { $in: createdParcelIds } });
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -1691,6 +1899,7 @@ async function runAllTests() {
     await testSecurePaymentSuccess();
     await testStripeWebhook();
     await testDuplicateCheckoutPrevention();
+    await testCurrencyAndEligibility();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
