@@ -28,12 +28,12 @@ class PaymentController {
             const { parcelId: rawParcelId } = req.body;
 
             if (!rawParcelId || !ObjectId.isValid(rawParcelId)) {
-                return res.status(400).send({ message: 'invalid or missing parcelId' });
+                return res.status(400).send({ message: 'invalid or missing repair request id' });
             }
 
             const parcel = await this.Parcel.findById(rawParcelId);
             if (!parcel) {
-                return res.status(404).send({ message: 'parcel not found' });
+                return res.status(404).send({ message: 'repair request not found' });
             }
 
             // Only the request's own owner may create a checkout session for

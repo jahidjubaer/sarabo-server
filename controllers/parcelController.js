@@ -31,7 +31,7 @@ class ParcelController {
             const result = await this.Parcel.findAll(query);
             res.send(result);
         } catch (error) {
-            res.status(500).send({ message: 'Error fetching parcels', error: error.message });
+            res.status(500).send({ message: 'Error fetching repair requests', error: error.message });
         }
     }
 
@@ -49,7 +49,7 @@ class ParcelController {
             const result = await this.Parcel.findAll(query);
             res.send(result);
         } catch (error) {
-            res.status(500).send({ message: 'Error fetching rider parcels', error: error.message });
+            res.status(500).send({ message: 'Error fetching technician repair requests', error: error.message });
         }
     }
 
@@ -59,7 +59,7 @@ class ParcelController {
             const parcel = await this.Parcel.findById(id);
             
             if (!parcel) {
-                return res.status(404).send({ message: 'parcel not found' });
+                return res.status(404).send({ message: 'repair request not found' });
             }
             
             const currentUser = await this.User.findByEmail(req.decoded_email);
@@ -73,7 +73,7 @@ class ParcelController {
             
             res.send(parcel);
         } catch (error) {
-            res.status(500).send({ message: 'Error fetching parcel', error: error.message });
+            res.status(500).send({ message: 'Error fetching repair request', error: error.message });
         }
     }
 
@@ -82,7 +82,7 @@ class ParcelController {
             const result = await this.Parcel.getDeliveryStatusStats();
             res.send(result);
         } catch (error) {
-            res.status(500).send({ message: 'Error fetching delivery status stats', error: error.message });
+            res.status(500).send({ message: 'Error fetching repair status stats', error: error.message });
         }
     }
 
@@ -100,7 +100,7 @@ class ParcelController {
             const result = await this.Parcel.create(parcel);
             res.send(result);
         } catch (error) {
-            res.status(500).send({ message: 'Error creating parcel', error: error.message });
+            res.status(500).send({ message: 'Error creating repair request', error: error.message });
         }
     }
 
@@ -111,7 +111,7 @@ class ParcelController {
             
             const parcel = await this.Parcel.findById(id);
             if (!parcel) {
-                return res.status(404).send({ message: 'parcel not found' });
+                return res.status(404).send({ message: 'repair request not found' });
             }
             
             const currentUser = await this.User.findByEmail(req.decoded_email);
@@ -125,7 +125,7 @@ class ParcelController {
             }
 
             if (!VALID_STATUSES.includes(deliveryStatus)) {
-                return res.status(400).send({ message: 'invalid delivery status' });
+                return res.status(400).send({ message: 'invalid repair status' });
             }
 
             if (deliveryStatus === parcel.deliveryStatus) {
@@ -148,7 +148,7 @@ class ParcelController {
 
             res.send(result);
         } catch (error) {
-            res.status(500).send({ message: 'Error updating parcel status', error: error.message });
+            res.status(500).send({ message: 'Error updating repair status', error: error.message });
         }
     }
 
@@ -170,7 +170,7 @@ class ParcelController {
 
             res.send(result);
         } catch (error) {
-            res.status(500).send({ message: 'Error assigning rider to parcel', error: error.message });
+            res.status(500).send({ message: 'Error assigning technician to repair request', error: error.message });
         }
     }
 
@@ -180,7 +180,7 @@ class ParcelController {
             const result = await this.Parcel.delete(id);
             res.send(result);
         } catch (error) {
-            res.status(500).send({ message: 'Error deleting parcel', error: error.message });
+            res.status(500).send({ message: 'Error deleting repair request', error: error.message });
         }
     }
 }

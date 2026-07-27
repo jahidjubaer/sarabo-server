@@ -24,7 +24,7 @@ class RiderController {
             const result = await this.Rider.findAll(query);
             res.send(result);
         } catch (error) {
-            res.status(500).send({ message: 'Error fetching riders', error: error.message });
+            res.status(500).send({ message: 'Error fetching technicians', error: error.message });
         }
     }
 
@@ -75,7 +75,7 @@ class RiderController {
             const result = await this.collections.parcels.aggregate(pipeline).toArray();
             res.send(result);
         } catch (error) {
-            res.status(500).send({ message: 'Error fetching delivery stats', error: error.message });
+            res.status(500).send({ message: 'Error fetching repair stats', error: error.message });
         }
     }
 
@@ -85,7 +85,7 @@ class RiderController {
             const result = await this.Rider.create(rider);
             res.send(result);
         } catch (error) {
-            res.status(500).send({ message: 'Error creating rider', error: error.message });
+            res.status(500).send({ message: 'Error creating technician application', error: error.message });
         }
     }
 
@@ -103,7 +103,7 @@ class RiderController {
 
             res.send(result);
         } catch (error) {
-            res.status(500).send({ message: 'Error updating rider status', error: error.message });
+            res.status(500).send({ message: 'Error updating technician status', error: error.message });
         }
     }
 }
