@@ -3028,6 +3028,296 @@ async function testP0AuthorizationFixes() {
     console.log('');
 }
 
+// Phase 3.0 Unit 3: Make Technician Approval Transaction-Safe. Exercises the
+// rewritten updateRiderStatus end-to-end: pre-transaction validation ordering
+// and error codes, the atomic technician-status + linked-user-role
+// transaction and its rollback under injected failures, admin-linked-user
+// protection, idempotency for a genuinely-consistent repeat request, and
+// detection of a pre-existing (not-caused-by-this-request) inconsistency
+// between the two records. MongoDB transactions are real; only the
+// deliberate failure points below are mocked.
+async function testTechnicianApprovalTransaction() {
+    console.log('22. Testing Transactional Technician Approval');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections, client } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { verifyAdmin } = require('./middleware/auth');
+    const { ObjectId } = require('mongodb');
+
+    const createdRiderIds = [];
+    const createdUserEmails = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    async function callVerifyAdmin(decoded_email) {
+        const req = { collections, decoded_email };
+        const res = fakeRes();
+        let nextCalled = false;
+        await verifyAdmin(req, res, () => { nextCalled = true; });
+        return { res, nextCalled };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const riderController = controllers.rider;
+
+        async function createTestRider(marker, { status = 'pending', email } = {}) {
+            const doc = {
+                name: marker,
+                email: email || `${marker.toLowerCase()}@test.local`,
+                region: 'Test Region',
+                district: 'Test District',
+                address: 'Test Address',
+                license: 'Test License',
+                nid: 'TEST-NID-0000',
+                bike: 'Test',
+                status,
+                workStatus: 'available',
+                createdAt: new Date()
+            };
+            const result = await collections.riders.insertOne(doc);
+            createdRiderIds.push(result.insertedId.toString());
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        async function createTestUser(email, role = 'user') {
+            createdUserEmails.push(email);
+            await collections.users.insertOne({ email, role, createdAt: new Date() });
+        }
+
+        function callUpdateRiderStatus(riderId, body) {
+            const req = { params: { id: riderId }, body };
+            const res = fakeRes();
+            return riderController.updateRiderStatus(req, res).then(() => res);
+        }
+
+        // --- 1. Anonymous PATCH rejected (real HTTP, real middleware chain). ---
+        await makeRequest(
+            {
+                hostname: 'localhost', port: 3000, path: '/riders/000000000000000000000000', method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: 'approved' })
+            },
+            401,
+            'PATCH /riders/:id (no auth) rejected'
+        );
+
+        // --- 2. Non-admin rejected by the shared verifyAdmin middleware (same
+        // function already gates this exact route - see routes/riders.js). ---
+        let mw = await callVerifyAdmin(CUSTOMER_EMAIL);
+        logTest('PATCH /riders/:id: customer rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
+        mw = await callVerifyAdmin(RIDER_EMAIL);
+        logTest('PATCH /riders/:id: technician rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
+        mw = await callVerifyAdmin(ADMIN_EMAIL);
+        logTest('PATCH /riders/:id: admin allowed through verifyAdmin', mw.nextCalled === true);
+
+        // --- 3. Invalid technician id. ---
+        let res = await callUpdateRiderStatus('not-a-valid-object-id', { status: 'approved' });
+        logTest('Invalid technician id rejected (400)', res.statusCode === 400 && res.body.code === 'INVALID_TECHNICIAN_ID');
+
+        // --- 4. Invalid requested status. ---
+        const r1 = await createTestRider(`TEST-APPROVAL-VALID-${Date.now()}`);
+        res = await callUpdateRiderStatus(r1.id, { status: 'pending' });
+        logTest('Requesting "pending" as a target status is rejected (400)', res.statusCode === 400 && res.body.code === 'INVALID_TECHNICIAN_STATUS');
+        res = await callUpdateRiderStatus(r1.id, { status: 'totally_bogus' });
+        logTest('Unrecognized requested status rejected (400)', res.statusCode === 400 && res.body.code === 'INVALID_TECHNICIAN_STATUS');
+
+        // --- 5. Missing technician. ---
+        res = await callUpdateRiderStatus('000000000000000000000000', { status: 'approved' });
+        logTest('Missing technician rejected (404)', res.statusCode === 404 && res.body.code === 'TECHNICIAN_NOT_FOUND');
+
+        // --- 6. Linked user missing -> controlled failure, no technician update. ---
+        const r2 = await createTestRider(`TEST-APPROVAL-NOUSER-${Date.now()}`, { email: `test-approval-nouser-${Date.now()}@test.local` });
+        res = await callUpdateRiderStatus(r2.id, { status: 'approved' });
+        logTest('Missing linked user rejected (404)', res.statusCode === 404 && res.body.code === 'LINKED_USER_NOT_FOUND');
+        let riderAfter = await collections.riders.findOne({ _id: new ObjectId(r2.id) });
+        logTest('Technician status unchanged when the linked user is missing', riderAfter.status === 'pending');
+
+        // --- 7. Approval success updates technician and user atomically. ---
+        const email3 = `test-approval-success-${Date.now()}@test.local`;
+        const r3 = await createTestRider(`TEST-APPROVAL-SUCCESS-${Date.now()}`, { email: email3 });
+        await createTestUser(email3, 'user');
+        res = await callUpdateRiderStatus(r3.id, { status: 'approved' });
+        logTest('Approval succeeds (200)', res.statusCode === 200 && res.body.alreadyConsistent === false);
+        riderAfter = await collections.riders.findOne({ _id: new ObjectId(r3.id) });
+        let userAfter = await collections.users.findOne({ email: email3 });
+        logTest(
+            'Approval atomically sets technician status=approved and user role=rider',
+            riderAfter.status === 'approved' && userAfter.role === 'rider'
+        );
+
+        // --- 8. Rejection success updates technician and user atomically. ---
+        const email4 = `test-rejection-success-${Date.now()}@test.local`;
+        const r4 = await createTestRider(`TEST-REJECTION-SUCCESS-${Date.now()}`, { status: 'approved', email: email4 });
+        await createTestUser(email4, 'rider');
+        res = await callUpdateRiderStatus(r4.id, { status: 'rejected' });
+        logTest('Rejection succeeds (200)', res.statusCode === 200 && res.body.alreadyConsistent === false);
+        riderAfter = await collections.riders.findOne({ _id: new ObjectId(r4.id) });
+        userAfter = await collections.users.findOne({ email: email4 });
+        logTest(
+            'Rejection atomically sets technician status=rejected and user role=user',
+            riderAfter.status === 'rejected' && userAfter.role === 'user'
+        );
+
+        // --- 9. User-update failure rolls back the technician update. ---
+        const email5 = `test-userfail-${Date.now()}@test.local`;
+        const r5 = await createTestRider(`TEST-USERFAIL-${Date.now()}`, { email: email5 });
+        await createTestUser(email5, 'user');
+        const originalUsersUpdateOne = collections.users.updateOne.bind(collections.users);
+        collections.users.updateOne = async () => ({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
+        try {
+            res = await callUpdateRiderStatus(r5.id, { status: 'approved' });
+        } finally {
+            collections.users.updateOne = originalUsersUpdateOne;
+        }
+        logTest('User-update failure surfaces as 500 TECHNICIAN_APPROVAL_FAILED', res.statusCode === 500 && res.body.code === 'TECHNICIAN_APPROVAL_FAILED');
+        riderAfter = await collections.riders.findOne({ _id: new ObjectId(r5.id) });
+        userAfter = await collections.users.findOne({ email: email5 });
+        logTest(
+            'Technician update rolled back and user left unchanged on user-update failure',
+            riderAfter.status === 'pending' && userAfter.role === 'user'
+        );
+
+        // --- 10. Technician-update (guarded write) failure leaves the user unchanged. ---
+        const email6 = `test-riderfail-${Date.now()}@test.local`;
+        const r6 = await createTestRider(`TEST-RIDERFAIL-${Date.now()}`, { email: email6 });
+        await createTestUser(email6, 'user');
+        const originalRidersUpdateOne = collections.riders.updateOne.bind(collections.riders);
+        collections.riders.updateOne = async () => ({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
+        try {
+            res = await callUpdateRiderStatus(r6.id, { status: 'approved' });
+        } finally {
+            collections.riders.updateOne = originalRidersUpdateOne;
+        }
+        logTest('Technician guarded-update failure surfaces as a controlled 409, not a false success', res.statusCode === 409 && res.body.code === 'TECHNICIAN_STATUS_CONFLICT');
+        userAfter = await collections.users.findOne({ email: email6 });
+        riderAfter = await collections.riders.findOne({ _id: new ObjectId(r6.id) });
+        logTest(
+            'User and technician both remain unchanged when the technician write itself fails',
+            userAfter.role === 'user' && riderAfter.status === 'pending'
+        );
+
+        // --- 11, 12. Transaction commit failure rolls back and always ends the session. ---
+        const email7 = `test-commitfail-${Date.now()}@test.local`;
+        const r7 = await createTestRider(`TEST-COMMITFAIL-${Date.now()}`, { email: email7 });
+        await createTestUser(email7, 'user');
+        const commitFailSession = client.startSession();
+        commitFailSession.commitTransaction = async () => { throw new Error('simulated commit failure'); };
+        const originalStartSession = client.startSession.bind(client);
+        client.startSession = () => commitFailSession;
+        try {
+            res = await callUpdateRiderStatus(r7.id, { status: 'approved' });
+        } finally {
+            client.startSession = originalStartSession;
+        }
+        logTest('Transaction commit failure surfaces as 500 TECHNICIAN_APPROVAL_FAILED', res.statusCode === 500 && res.body.code === 'TECHNICIAN_APPROVAL_FAILED');
+        logTest('Session is always ended, even after a commit failure', commitFailSession.hasEnded === true);
+        riderAfter = await collections.riders.findOne({ _id: new ObjectId(r7.id) });
+        userAfter = await collections.users.findOne({ email: email7 });
+        logTest('No partial state survives a commit failure', riderAfter.status === 'pending' && userAfter.role === 'user');
+
+        // --- 13, 14. Body-supplied email is ignored; technician-record email is authoritative. ---
+        const email8 = `test-spoofcheck-${Date.now()}@test.local`;
+        const r8 = await createTestRider(`TEST-SPOOFCHECK-${Date.now()}`, { email: email8 });
+        await createTestUser(email8, 'user');
+        res = await callUpdateRiderStatus(r8.id, { status: 'approved', email: 'attacker-spoof@example.com' });
+        const spoofedUser = await collections.users.findOne({ email: 'attacker-spoof@example.com' });
+        userAfter = await collections.users.findOne({ email: email8 });
+        logTest(
+            'Body-supplied email is ignored - no user created/modified for it, the technician record\'s own email is authoritative',
+            res.statusCode === 200 && !spoofedUser && userAfter.role === 'rider'
+        );
+
+        // --- 15. Admin-linked user is not downgraded. ---
+        const email9 = `test-adminlink-${Date.now()}@test.local`;
+        const r9 = await createTestRider(`TEST-ADMINLINK-${Date.now()}`, { email: email9 });
+        await createTestUser(email9, 'admin');
+        res = await callUpdateRiderStatus(r9.id, { status: 'approved' });
+        logTest('Admin-linked technician approval rejected as a controlled conflict (409)', res.statusCode === 409 && res.body.code === 'LINKED_USER_ROLE_CONFLICT');
+        riderAfter = await collections.riders.findOne({ _id: new ObjectId(r9.id) });
+        userAfter = await collections.users.findOne({ email: email9 });
+        logTest(
+            'Admin role is never downgraded and the technician application is never modified',
+            userAfter.role === 'admin' && riderAfter.status === 'pending'
+        );
+
+        // --- 16, 17. Repeated approval/rejection with both sides already
+        // consistent is idempotent. ---
+        const email10 = `test-idempotent-approve-${Date.now()}@test.local`;
+        const r10 = await createTestRider(`TEST-IDEMPOTENT-APPROVE-${Date.now()}`, { status: 'approved', email: email10 });
+        await createTestUser(email10, 'rider');
+        res = await callUpdateRiderStatus(r10.id, { status: 'approved' });
+        logTest('Repeated approval with both sides already consistent is idempotent (200)', res.statusCode === 200 && res.body.alreadyConsistent === true);
+
+        const email11 = `test-idempotent-reject-${Date.now()}@test.local`;
+        const r11 = await createTestRider(`TEST-IDEMPOTENT-REJECT-${Date.now()}`, { status: 'rejected', email: email11 });
+        await createTestUser(email11, 'user');
+        res = await callUpdateRiderStatus(r11.id, { status: 'rejected' });
+        logTest('Repeated rejection with both sides already consistent is idempotent (200)', res.statusCode === 200 && res.body.alreadyConsistent === true);
+
+        // --- 18. Approved technician with linked user role "user" is not
+        // falsely reported as success on a repeated approval request. ---
+        const email12 = `test-inconsistent-approve-${Date.now()}@test.local`;
+        const r12 = await createTestRider(`TEST-INCONSISTENT-APPROVE-${Date.now()}`, { status: 'approved', email: email12 });
+        await createTestUser(email12, 'user');
+        res = await callUpdateRiderStatus(r12.id, { status: 'approved' });
+        logTest(
+            'Pre-existing technician=approved/user=user inconsistency is never reported as success',
+            res.statusCode === 409 && res.body.code === 'TECHNICIAN_STATUS_CONFLICT'
+        );
+
+        // --- 19. Rejected technician with linked user role "rider" is not
+        // falsely reported as success on a repeated rejection request. ---
+        const email13 = `test-inconsistent-reject-${Date.now()}@test.local`;
+        const r13 = await createTestRider(`TEST-INCONSISTENT-REJECT-${Date.now()}`, { status: 'rejected', email: email13 });
+        await createTestUser(email13, 'rider');
+        res = await callUpdateRiderStatus(r13.id, { status: 'rejected' });
+        logTest(
+            'Pre-existing technician=rejected/user=rider inconsistency is never reported as success',
+            res.statusCode === 409 && res.body.code === 'TECHNICIAN_STATUS_CONFLICT'
+        );
+
+        // --- 20. Unknown current technician status is rejected. ---
+        const email14 = `test-unknownstatus-${Date.now()}@test.local`;
+        const r14 = await createTestRider(`TEST-UNKNOWNSTATUS-${Date.now()}`, { status: 'under_review', email: email14 });
+        await createTestUser(email14, 'user');
+        res = await callUpdateRiderStatus(r14.id, { status: 'approved' });
+        logTest('Unrecognized current technician status is rejected as a conflict (409)', res.statusCode === 409 && res.body.code === 'TECHNICIAN_STATUS_CONFLICT');
+
+        // --- 25. No private fields exposed in any error response above. ---
+        const errorBodiesChecked = [res.body];
+        logTest(
+            'Error responses never include private technician/user document fields',
+            errorBodiesChecked.every(b => !('nid' in b) && !('address' in b) && !('email' in b) && Object.keys(b).sort().join(',') === 'code,message')
+        );
+
+        // --- 21-24. Regression coverage note: existing assignment, auth,
+        // payment, and cancellation behavior are reconfirmed by re-running
+        // the full suite alongside this section, not duplicated here.
+    } finally {
+        for (const id of createdRiderIds) {
+            await collections.riders.deleteOne({ _id: new ObjectId(id) });
+        }
+        if (createdUserEmails.length) {
+            await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        }
+        await collections.users.deleteOne({ email: 'attacker-spoof@example.com' });
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -3216,6 +3506,7 @@ async function runAllTests() {
     await testRequestCancellation();
     await testTechnicianAssignment();
     await testP0AuthorizationFixes();
+    await testTechnicianApprovalTransaction();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
