@@ -97,6 +97,16 @@ function createPaymentProcessor(models, collections) {
             return { code: 'CURRENCY_MISMATCH' };
         }
 
+        // A cancelled request must never become paid, regardless of whether
+        // the Stripe session itself is genuinely valid - the customer's
+        // cancellation decision is authoritative. This is the common,
+        // non-racing case (cancellation already committed well before this
+        // call); the transaction's guarded update below additionally covers
+        // the true concurrent race (Phase 2.5 Unit 1, Case 3).
+        if (parcel.deliveryStatus === 'cancelled') {
+            return { code: 'REQUEST_CANCELLED' };
+        }
+
         if (parcel.paymentStatus === 'paid') {
             // No payment record referenced this sessionId above, so this
             // parcel was already paid through a different session. Reconcile
@@ -142,10 +152,16 @@ function createPaymentProcessor(models, collections) {
                     throw insertError;
                 }
 
-                // deliveryStatus is intentionally untouched - payment and
-                // repair-lifecycle status are independent concerns.
+                // deliveryStatus is intentionally left untouched by a normal
+                // payment completion - payment and repair-lifecycle status
+                // are independent concerns. The one exception is 'cancelled':
+                // this guard ensures a customer cancellation that commits
+                // concurrently with this very transaction still wins - the
+                // query condition itself is the race-resolver, not a
+                // read-then-write check (the early check above only catches
+                // the non-racing case).
                 const updateResult = await collections.parcels.updateOne(
-                    { _id: parcel._id, paymentStatus: { $ne: 'paid' } },
+                    { _id: parcel._id, paymentStatus: { $ne: 'paid' }, deliveryStatus: { $ne: 'cancelled' } },
                     { $set: { paymentStatus: 'paid' } },
                     { session: mongoSession }
                 );
@@ -183,6 +199,13 @@ function createPaymentProcessor(models, collections) {
                     transactionId: winner.transactionId,
                     trackingId: winner.trackingId
                 };
+            }
+            // No payment ever recorded for this sessionId, yet the guarded
+            // update still lost - a concurrent cancellation, not a
+            // concurrent payment, must have won the race (Case 3).
+            const latestParcel = await Parcel.findById(parcel._id.toString());
+            if (latestParcel && latestParcel.deliveryStatus === 'cancelled') {
+                return { code: 'REQUEST_CANCELLED' };
             }
             return { code: 'ALREADY_PAID_OTHER_SESSION' };
         }

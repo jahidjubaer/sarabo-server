@@ -4,7 +4,7 @@
 // a generic "payment received" form. 'parcel_created' is normalized to
 // 'pending-pickup' since they represent the same starting point and only the
 // latter is understood by the client's repair-status label mapping.
-const PUBLIC_TIMELINE_STATUSES = new Set(['parcel_created', 'driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered']);
+const PUBLIC_TIMELINE_STATUSES = new Set(['parcel_created', 'driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered', 'cancelled']);
 
 // Tracking codes are exact-matched bearer-style lookup keys (see
 // utils/trackingId.js) - this also doubles as a cheap format guard so an

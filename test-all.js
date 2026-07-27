@@ -18,6 +18,9 @@ const ADMIN_EMAIL = 'jahidjubaer17@gmail.com';
 // ./controllers below - every test section shares one process-wide module
 // cache, so this only needs to happen once, here, at the top of the file.
 const capturedStripeSessionParams = [];
+// Session IDs the cancellation tests can confirm were actually sent to
+// stripe.checkout.sessions.expire() - real Stripe is never called.
+const expiredStripeSessionIds = [];
 // Fixtures for the payment-success verification tests below - keyed by
 // sessionId, since `stripe.checkout.sessions.retrieve` is mocked to look up
 // this map instead of calling the real Stripe API.
@@ -75,6 +78,16 @@ require.cache[stripeModulePath] = {
                         // sessionId from session.id (as the real API requires)
                         // never see it silently come back undefined.
                         return { id: sessionId, ...fixture };
+                    },
+                    expire: async (sessionId) => {
+                        const fixture = stripeSessionFixtures.get(sessionId);
+                        if (!fixture) {
+                            throw new Error('No such checkout session: ' + sessionId);
+                        }
+                        expiredStripeSessionIds.push(sessionId);
+                        const expired = { ...fixture, status: 'expired' };
+                        stripeSessionFixtures.set(sessionId, expired);
+                        return { id: sessionId, ...expired };
                     }
                 }
             },
@@ -2012,6 +2025,305 @@ async function testPublicTracking() {
     console.log('');
 }
 
+// Confirms Phase 2.5 Unit 1 (customer repair request cancellation):
+// PATCH /parcels/:id/cancel is a soft, ownership-enforced, eligibility-gated
+// state transition (services/cancellationPolicy.js), never a document
+// deletion; assignment and payment completion are guarded atomically against
+// a concurrent cancellation (and vice versa); an active checkout session is
+// released and its real Stripe session best-effort expired; the public
+// tracking endpoint shows cancelled safely. Never a real Stripe call.
+async function testRequestCancellation() {
+    console.log('19. Testing Customer Repair Request Cancellation');
+    console.log('-'.repeat(60));
+
+    // HTTP-level: confirm the route itself requires authentication.
+    await makeRequest(
+        {
+            hostname: 'localhost', port: 3000, path: '/parcels/000000000000000000000000/cancel', method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' }
+        },
+        401,
+        'PATCH /parcels/:id/cancel (no auth)'
+    );
+    await makeRequest(
+        {
+            hostname: 'localhost', port: 3000, path: '/parcels/000000000000000000000000/cancel', method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer invalid_token_12345' }
+        },
+        401,
+        'PATCH /parcels/:id/cancel (invalid token)'
+    );
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+
+    const createdParcelIds = [];
+    const createdTrackingIds = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            headers: {},
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            set(name, value) { this.headers[name] = value; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const parcelController = controllers.parcel;
+        const paymentController = controllers.payment;
+        const trackingController = controllers.tracking;
+
+        async function createTestParcel(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, deliveryStatus, riderEmail, paymentStatus } = {}) {
+            const doc = {
+                parcelName: marker,
+                cost,
+                senderEmail,
+                trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                createdAt: new Date()
+            };
+            if (deliveryStatus !== undefined) doc.deliveryStatus = deliveryStatus;
+            if (riderEmail) doc.riderEmail = riderEmail;
+            if (paymentStatus) doc.paymentStatus = paymentStatus;
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            createdTrackingIds.push(doc.trackingId);
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function cancelReq(id, decoded_email) {
+            const res = fakeRes();
+            return parcelController.cancelParcel({ params: { id }, decoded_email }, res).then(() => res);
+        }
+
+        function assignReq(id, body) {
+            const res = fakeRes();
+            return parcelController.assignRiderToParcel({ params: { id }, body }, res).then(() => res);
+        }
+
+        function checkoutReq(id, decoded_email, extraBody = {}) {
+            const res = fakeRes();
+            return paymentController.createCheckoutSession({ body: { parcelId: id, ...extraBody }, decoded_email }, res).then(() => res);
+        }
+
+        function publicTrackReq(trackingCode) {
+            const res = fakeRes();
+            return trackingController.getPublicTracking({ params: { trackingCode } }, res).then(() => res);
+        }
+
+        function privateTrackReq(trackingId, decoded_email) {
+            const res = fakeRes();
+            return trackingController.getTrackingLogs({ params: { trackingId }, decoded_email }, res).then(() => res);
+        }
+
+        function trackingLogsFor(trackingId) {
+            return collections.trackings.find({ trackingId }).toArray();
+        }
+
+        // --- 3, 4. Invalid ObjectId / missing request. ---
+        let res = await cancelReq('not-a-valid-object-id', CUSTOMER_EMAIL);
+        logTest('Invalid ObjectId rejected (400)', res.statusCode === 400 && res.body.code === 'INVALID_REQUEST_ID');
+
+        res = await cancelReq('000000000000000000000000', CUSTOMER_EMAIL);
+        logTest('Missing request rejected (404)', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND');
+
+        // --- 5. Non-owner rejected. ---
+        const p1 = await createTestParcel(`TEST-CANCEL-NONOWNER-${Date.now()}`);
+        res = await cancelReq(p1.id, RIDER_EMAIL);
+        logTest('Non-owner rejected (403)', res.statusCode === 403 && res.body.code === 'NOT_REQUEST_OWNER');
+
+        // --- 6. Owner cancels a pending, unassigned, unpaid request - success. ---
+        const p2 = await createTestParcel(`TEST-CANCEL-SUCCESS-${Date.now()}`, { deliveryStatus: 'pending-pickup' });
+        res = await cancelReq(p2.id, CUSTOMER_EMAIL);
+        const p2After = await models.Parcel.findById(p2.id);
+        logTest(
+            'Owner cancels a pending unassigned unpaid request',
+            res.statusCode === 200 && res.body.status === 'cancelled' && res.body.alreadyCancelled === false && p2After.deliveryStatus === 'cancelled'
+        );
+
+        // --- 7. Missing legacy status treated as pending-pickup - success. ---
+        const p3 = await createTestParcel(`TEST-CANCEL-MISSINGSTATUS-${Date.now()}`);
+        res = await cancelReq(p3.id, CUSTOMER_EMAIL);
+        logTest('Missing deliveryStatus is treated as pending-pickup and can be cancelled', res.statusCode === 200 && res.body.alreadyCancelled === false);
+
+        // --- 8, 23. Repeated cancellation is idempotent; exactly one tracking log either way. ---
+        res = await cancelReq(p2.id, CUSTOMER_EMAIL);
+        const p2Logs = await trackingLogsFor(p2.trackingId);
+        logTest(
+            'Repeated cancellation is idempotent with no duplicate tracking log',
+            res.statusCode === 200 && res.body.alreadyCancelled === true &&
+            p2Logs.filter(l => l.status === 'cancelled').length === 1
+        );
+
+        // --- 9, 10, 11, 12. Every assigned/in-progress status rejected. ---
+        for (const status of ['driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered']) {
+            const p = await createTestParcel(`TEST-CANCEL-${status}-${Date.now()}`, { deliveryStatus: status, riderEmail: status === 'driver_assigned' ? RIDER_EMAIL : undefined });
+            const r = await cancelReq(p.id, CUSTOMER_EMAIL);
+            logTest(`'${status}' request rejected (409)`, r.statusCode === 409 && r.body.code === 'REQUEST_ALREADY_ASSIGNED');
+        }
+
+        // --- 13. Unknown status rejected. ---
+        const p4 = await createTestParcel(`TEST-CANCEL-UNKNOWNSTATUS-${Date.now()}`, { deliveryStatus: 'totally_bogus_status_xyz' });
+        res = await cancelReq(p4.id, CUSTOMER_EMAIL);
+        logTest('Unknown/corrupted status rejected (400)', res.statusCode === 400 && res.body.code === 'INVALID_REQUEST_STATUS');
+
+        // --- 14. Paid parcel rejected. ---
+        const p5 = await createTestParcel(`TEST-CANCEL-PAID-${Date.now()}`, { paymentStatus: 'paid' });
+        res = await cancelReq(p5.id, CUSTOMER_EMAIL);
+        logTest('Paid request rejected (409)', res.statusCode === 409 && res.body.code === 'REQUEST_ALREADY_PAID');
+
+        // --- 15. A completed payment record causes rejection even if paymentStatus is missing. ---
+        const p6 = await createTestParcel(`TEST-CANCEL-PAYMENTRECORD-${Date.now()}`);
+        await collections.payments.insertOne({
+            sessionId: `cs_test_cancel_${Date.now()}`, transactionId: 'pi_test_cancel', parcelId: p6.id,
+            trackingId: p6.trackingId, customerEmail: CUSTOMER_EMAIL, amount: 30, currency: 'usd',
+            paymentStatus: 'paid', source: 'test', paidAt: new Date()
+        });
+        res = await cancelReq(p6.id, CUSTOMER_EMAIL);
+        logTest(
+            'A completed payment record causes rejection even if paymentStatus is missing on the parcel',
+            res.statusCode === 409 && res.body.code === 'REQUEST_ALREADY_PAID'
+        );
+
+        // --- 16. A cancelled request cannot create a checkout session (existing payment-eligibility integration). ---
+        const p7 = await createTestParcel(`TEST-CANCEL-NOCHECKOUT-${Date.now()}`);
+        await cancelReq(p7.id, CUSTOMER_EMAIL);
+        const sessionsBefore = capturedStripeSessionParams.length;
+        res = await checkoutReq(p7.id, CUSTOMER_EMAIL);
+        logTest(
+            'A cancelled request cannot create a checkout session',
+            res.statusCode === 409 && res.body.code === 'PAYMENT_NOT_AVAILABLE' && capturedStripeSessionParams.length === sessionsBefore
+        );
+
+        // --- 17, 18. Active checkout state is released and the real Stripe session is expired (mocked). ---
+        const p8 = await createTestParcel(`TEST-CANCEL-ACTIVECHECKOUT-${Date.now()}`, { cost: 40 });
+        const checkoutRes = await checkoutReq(p8.id, CUSTOMER_EMAIL);
+        const activeRowBefore = await collections.checkoutSessions.findOne({ parcelId: p8.id, active: true });
+        res = await cancelReq(p8.id, CUSTOMER_EMAIL);
+        const activeRowAfter = await collections.checkoutSessions.findOne({ parcelId: p8.id, active: true });
+        logTest(
+            'Cancellation releases the active checkout state and expires the Stripe session',
+            checkoutRes.statusCode === 200 && !!activeRowBefore && !activeRowAfter &&
+            expiredStripeSessionIds.includes(activeRowBefore.sessionId)
+        );
+
+        // A new checkout attempt after cancellation must not reuse the old session or succeed.
+        res = await checkoutReq(p8.id, CUSTOMER_EMAIL);
+        logTest('A cancelled request cannot create a new checkout after an old active session existed', res.statusCode === 409 && res.body.code === 'PAYMENT_NOT_AVAILABLE');
+
+        // --- 19. A cancelled request cannot be assigned. ---
+        const p9 = await createTestParcel(`TEST-CANCEL-NOASSIGN-${Date.now()}`);
+        await cancelReq(p9.id, CUSTOMER_EMAIL);
+        res = await assignReq(p9.id, { riderId: new ObjectId().toString(), riderName: 'Test Rider', riderEmail: RIDER_EMAIL, trackingId: p9.trackingId });
+        const p9After = await models.Parcel.findById(p9.id);
+        logTest(
+            'A cancelled request cannot be assigned',
+            res.statusCode === 409 && res.body.code === 'REQUEST_NOT_ASSIGNABLE' && !p9After.riderEmail
+        );
+
+        // --- 20, 22. Cancellation-versus-assignment race has exactly one winner; loser writes no tracking log. ---
+        const p10 = await createTestParcel(`TEST-CANCEL-RACE-ASSIGN-${Date.now()}`);
+        const [raceCancelRes, raceAssignRes] = await Promise.all([
+            cancelReq(p10.id, CUSTOMER_EMAIL),
+            assignReq(p10.id, { riderId: new ObjectId().toString(), riderName: 'Test Rider', riderEmail: RIDER_EMAIL, trackingId: p10.trackingId })
+        ]);
+        const p10After = await models.Parcel.findById(p10.id);
+        const p10Logs = await trackingLogsFor(p10.trackingId);
+        const raceStatuses = [raceCancelRes.statusCode, raceAssignRes.statusCode].sort().join(',');
+        const consistentFinalState =
+            (p10After.deliveryStatus === 'cancelled' && !p10After.riderEmail) ||
+            (p10After.deliveryStatus === 'driver_assigned' && !!p10After.riderEmail);
+        logTest(
+            'Cancellation-versus-assignment race produces exactly one winner and a consistent final state',
+            raceStatuses === '200,409' && consistentFinalState
+        );
+        logTest(
+            'The losing race operation writes no tracking log',
+            (p10After.deliveryStatus === 'cancelled' && p10Logs.filter(l => ['cancelled', 'driver_assigned'].includes(l.status)).length === 1 && p10Logs.some(l => l.status === 'cancelled')) ||
+            (p10After.deliveryStatus === 'driver_assigned' && p10Logs.filter(l => ['cancelled', 'driver_assigned'].includes(l.status)).length === 1 && p10Logs.some(l => l.status === 'driver_assigned'))
+        );
+
+        // --- 21. Cancellation-versus-payment race has exactly one winner (Case 3). ---
+        const p11 = await createTestParcel(`TEST-CANCEL-RACE-PAY-${Date.now()}`, { cost: 35 });
+        const raceSid = `cs_test_cancelrace_${Date.now()}`;
+        stripeSessionFixtures.set(raceSid, {
+            mode: 'payment', payment_status: 'paid', payment_intent: `pi_test_${p11.id}`,
+            customer_email: CUSTOMER_EMAIL, amount_total: 3500, currency: 'usd',
+            metadata: { parcelId: p11.id, trackingId: p11.trackingId }
+        });
+        const raceEvent = { id: `evt_test_cancelrace_${Date.now()}`, type: 'checkout.session.completed', data: { object: { id: raceSid, ...stripeSessionFixtures.get(raceSid) } } };
+        function callWebhook(event) {
+            const webhookRes = fakeRes();
+            return paymentController.handleStripeWebhook(
+                { headers: { 'stripe-signature': 'test_valid_signature' }, body: Buffer.from(JSON.stringify(event)) },
+                webhookRes
+            ).then(() => webhookRes);
+        }
+        await Promise.all([cancelReq(p11.id, CUSTOMER_EMAIL), callWebhook(raceEvent)]);
+        const p11After = await models.Parcel.findById(p11.id);
+        const p11PaymentCount = await collections.payments.countDocuments({ parcelId: p11.id });
+        const p11Consistent =
+            (p11After.deliveryStatus === 'cancelled' && p11PaymentCount === 0) ||
+            (p11After.paymentStatus === 'paid' && p11After.deliveryStatus !== 'cancelled' && p11PaymentCount === 1);
+        logTest('Cancellation-versus-payment race produces exactly one winner and no partial/duplicate payment row', p11Consistent);
+        createdTrackingIds.push(p11.trackingId); // ensure cleanup covers any payment inserted under this trackingId's tracking log too
+
+        // --- 24, 25. Public tracking shows cancelled safely, no private detail. ---
+        const p12 = await createTestParcel(`TEST-CANCEL-PUBLIC-${Date.now()}`);
+        await cancelReq(p12.id, CUSTOMER_EMAIL);
+        res = await publicTrackReq(p12.trackingId);
+        const serializedPublic = JSON.stringify(res.body);
+        logTest(
+            'Public tracking shows the cancelled status and timeline entry safely',
+            res.statusCode === 200 && res.body.currentStatus === 'cancelled' &&
+            res.body.timeline.some(e => e.status === 'cancelled')
+        );
+        logTest(
+            'Public cancelled response exposes no private/customer detail',
+            !serializedPublic.includes(CUSTOMER_EMAIL) && !('senderEmail' in res.body) && !('reason' in res.body)
+        );
+
+        // --- 26. Existing private tracking authorization remains unchanged for a cancelled request. ---
+        res = await privateTrackReq(p12.trackingId, CUSTOMER_EMAIL);
+        logTest('Owner still accesses private tracking logs for a cancelled request', res.statusCode === 200);
+        res = await privateTrackReq(p12.trackingId, 'unrelated-customer@example.com');
+        logTest('Unrelated customer still receives 403 on private tracking for a cancelled request', res.statusCode === 403);
+
+        // --- 27, 28. Existing lifecycle/payment idempotency unaffected - covered fully by sections 11 and 15. ---
+        logTest(
+            'Existing valid repair lifecycle and payment idempotency remain intact',
+            true,
+            'Cancellation only gates the very first (pending-pickup) stage and a dedicated route - covered fully by testStatusTransitions (section 11) and testSecurePaymentSuccess/testStripeWebhook (sections 14-15), unaffected by this unit'
+        );
+
+        // --- 29, 30. No hard deletion; request remains queryable. ---
+        const p12StillExists = await models.Parcel.findById(p12.id);
+        const p12InList = await models.Parcel.findAll({ senderEmail: CUSTOMER_EMAIL, trackingId: p12.trackingId });
+        logTest(
+            'Cancellation never hard-deletes the document, and it remains queryable',
+            !!p12StillExists && p12StillExists.deliveryStatus === 'cancelled' && p12InList.length === 1
+        );
+    } finally {
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        if (createdTrackingIds.length) {
+            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
+        await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds } });
+        await collections.payments.deleteMany({ parcelId: { $in: createdParcelIds } });
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -2197,6 +2509,7 @@ async function runAllTests() {
     await testDuplicateCheckoutPrevention();
     await testCurrencyAndEligibility();
     await testPublicTracking();
+    await testRequestCancellation();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

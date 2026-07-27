@@ -111,7 +111,23 @@ function createCheckoutSessionManager(collections) {
         );
     }
 
-    return { findActive, claim, markOpen, markFailed, completeByParcelId };
+    // Called when a customer cancels a repair request - releases the active
+    // slot so an old checkout URL can never be reused to reach a valid paid
+    // state, regardless of whether the real Stripe session itself can also
+    // be expired (see controllers/parcelController.js's cancelParcel, which
+    // uses the returned row's sessionId to best-effort expire it). Returns
+    // the row that was active (with its sessionId), or null if none existed.
+    async function cancelByParcelId(parcelId) {
+        const row = await checkoutSessions.findOne({ parcelId, active: true });
+        if (!row) return null;
+        await checkoutSessions.updateOne(
+            { _id: row._id, active: true },
+            { $set: { status: 'cancelled', active: false, updatedAt: new Date() } }
+        );
+        return row;
+    }
+
+    return { findActive, claim, markOpen, markFailed, completeByParcelId, cancelByParcelId };
 }
 
 module.exports = { createCheckoutSessionManager, CREATING_CLAIM_TTL_MS };

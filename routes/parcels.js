@@ -22,6 +22,12 @@ function parcelRoutes(app, controllers) {
     // Update repair request status
     app.patch('/parcels/:id/status', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.updateParcelStatus(req, res));
 
+    // Customer-initiated soft cancellation - ownership is enforced inside
+    // the controller (never delegated to route middleware alone), so any
+    // authenticated caller may reach this route but only the request's own
+    // owner can actually cancel it.
+    app.patch('/parcels/:id/cancel', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.cancelParcel(req, res));
+
     // Assign technician to repair request (admin only)
     app.patch('/parcels/:id', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.assignRiderToParcel(req, res));
 

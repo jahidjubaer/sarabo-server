@@ -228,6 +228,8 @@ class PaymentController {
                     return res.status(409).send({ message: 'payment currency does not match this request' });
                 case 'ALREADY_PAID_OTHER_SESSION':
                     return res.status(409).send({ message: 'this request has already been paid for' });
+                case 'REQUEST_CANCELLED':
+                    return res.status(409).send({ message: 'this request has been cancelled and cannot be paid for', code: 'REQUEST_CANCELLED' });
                 default:
                     return res.status(500).send({ message: 'Error processing payment success' });
             }
