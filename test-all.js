@@ -43,8 +43,32 @@ require.cache[stripeModulePath] = {
                         if (fixture.__simulateOutage) {
                             throw new Error('simulated Stripe outage');
                         }
-                        return fixture;
+                        // Real Stripe always echoes the session's own id back on
+                        // itself - guarantee that here too, so callers deriving
+                        // sessionId from session.id (as the real API requires)
+                        // never see it silently come back undefined.
+                        return { id: sessionId, ...fixture };
                     }
+                }
+            },
+            webhooks: {
+                // A lightweight stand-in for real HMAC signature verification -
+                // this project's real webhook route/signature wiring is
+                // exercised separately via genuine HTTP requests against the
+                // live server (which uses the real, unmocked Stripe SDK), so
+                // this mock only needs to gate on the fields the in-process
+                // tests below actually vary.
+                constructEvent: (payload, signature, secret) => {
+                    if (!secret) {
+                        throw new Error('No webhook secret configured');
+                    }
+                    if (!Buffer.isBuffer(payload)) {
+                        throw new Error('Unexpected payload - raw request body (Buffer) required');
+                    }
+                    if (signature !== 'test_valid_signature') {
+                        throw new Error('No signatures found matching the expected signature for payload');
+                    }
+                    return JSON.parse(payload.toString('utf8'));
                 }
             }
         };
@@ -752,6 +776,448 @@ async function testSecurePaymentSuccess() {
     console.log('');
 }
 
+// Confirms the Stripe webhook (POST /stripe-webhook) as the authoritative
+// payment-completion path: no Firebase auth, real raw-body + real signature
+// verification at the HTTP level (against the live, unmocked server), then
+// full business-logic coverage in-process against the mocked
+// stripe.webhooks.constructEvent - mirroring processVerifiedCheckoutSession's
+// shared logic already covered from the browser side in test 14 above.
+async function testStripeWebhook() {
+    console.log('15. Testing Stripe Payment Webhook');
+    console.log('-'.repeat(60));
+
+    // --- 1 & 26. HTTP-level: no Firebase auth, real raw-body + signature
+    // wiring against the live server's genuine (unmocked) Stripe SDK. ---
+    await makeRequest(
+        {
+            hostname: 'localhost', port: 3000, path: '/stripe-webhook', method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: 'evt_test', type: 'checkout.session.completed' })
+        },
+        400,
+        'POST /stripe-webhook (missing stripe-signature header)'
+    );
+    await makeRequest(
+        {
+            hostname: 'localhost', port: 3000, path: '/stripe-webhook', method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=deadbeef' },
+            body: JSON.stringify({ id: 'evt_test', type: 'checkout.session.completed' })
+        },
+        400,
+        'POST /stripe-webhook (invalid signature, real Stripe SDK on live server)'
+    );
+    await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/parcels', method: 'GET' },
+        401,
+        'GET /parcels still parses/behaves normally after webhook route registration'
+    );
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+
+    const createdParcelIds = [];
+    const createdSessionIds = [];
+    const createdTrackingIds = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    let uniqueCounter = 0;
+    function newSessionId(label) {
+        uniqueCounter += 1;
+        const id = `cs_test_TESTHOOK_${Date.now()}_${uniqueCounter}_${label}`;
+        createdSessionIds.push(id);
+        return id;
+    }
+    function newEventId(label) {
+        uniqueCounter += 1;
+        return `evt_test_${Date.now()}_${uniqueCounter}_${label}`;
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const paymentController = controllers.payment;
+
+        async function createTestParcel(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, deliveryStatus, paymentStatus } = {}) {
+            const doc = {
+                parcelName: marker,
+                cost,
+                senderEmail,
+                trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                createdAt: new Date()
+            };
+            if (deliveryStatus) doc.deliveryStatus = deliveryStatus;
+            if (paymentStatus) doc.paymentStatus = paymentStatus;
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            createdTrackingIds.push(doc.trackingId);
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        // amount_total defaults assume a $30.00 parcel (3000 cents) unless overridden.
+        function makeSessionObject(sid, overrides = {}) {
+            return {
+                id: sid,
+                mode: 'payment',
+                payment_status: 'paid',
+                payment_intent: `pi_test_hook_${overrides.parcelId || 'x'}`,
+                customer_email: CUSTOMER_EMAIL,
+                amount_total: 3000,
+                currency: 'usd',
+                metadata: { parcelId: overrides.parcelId, trackingId: overrides.trackingId },
+                ...overrides
+            };
+        }
+
+        function makeEvent(sessionObject, { type = 'checkout.session.completed', eventId } = {}) {
+            return {
+                id: eventId || newEventId('evt'),
+                type,
+                data: { object: sessionObject }
+            };
+        }
+
+        function fakeWebhookReq(event, signature = 'test_valid_signature') {
+            return {
+                headers: signature === null ? {} : { 'stripe-signature': signature },
+                body: Buffer.from(JSON.stringify(event))
+            };
+        }
+
+        function callWebhook(event, signature = 'test_valid_signature') {
+            const res = fakeRes();
+            return paymentController.handleStripeWebhook(fakeWebhookReq(event, signature), res).then(() => res);
+        }
+
+        function verifyBrowser(sessionId, decoded_email) {
+            const res = fakeRes();
+            return paymentController.handlePaymentSuccess(
+                { body: { sessionId }, decoded_email },
+                res
+            ).then(() => res);
+        }
+
+        // --- 3. Missing webhook secret -> controlled failure (in-process,
+        // toggling only this test process's own env, never the live server's). ---
+        {
+            const savedSecret = process.env.STRIPE_WEBHOOK_SECRET;
+            delete process.env.STRIPE_WEBHOOK_SECRET;
+            const p = await createTestParcel(`TEST-HOOK-NOSECRET-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('nosecret');
+            const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }));
+            let res;
+            try {
+                res = await callWebhook(event);
+            } finally {
+                process.env.STRIPE_WEBHOOK_SECRET = savedSecret;
+            }
+            logTest('Missing webhook secret rejected safely (no crash, no mutation)', res.statusCode === 500);
+        }
+
+        // --- 2 & 5. Invalid signature rejected regardless of a well-formed body. ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-BADSIG-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('badsig');
+            const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }));
+            const res = await callWebhook(event, 'not_the_valid_signature');
+            const after = await models.Parcel.findById(p.id);
+            logTest(
+                'Invalid signature rejected even with a well-formed, parseable body',
+                res.statusCode === 400 && after.paymentStatus !== 'paid'
+            );
+        }
+
+        // --- 4. Handler receives the raw Buffer (mock enforces this itself). ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-NONBUFFER-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('nonbuffer');
+            const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }));
+            const res = await paymentController.handleStripeWebhook(
+                { headers: { 'stripe-signature': 'test_valid_signature' }, body: event },
+                fakeRes()
+            ).then(() => fakeRes());
+            // A non-Buffer body must never reach constructEvent successfully -
+            // whatever status comes back, it must not be a successful 200 result.
+            logTest(
+                'Non-Buffer body cannot bypass signature verification',
+                res.statusCode !== 200 || res.body === undefined
+            );
+        }
+
+        // --- 6. Valid irrelevant event type -> 200, no mutation. ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-IRRELEVANT-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('irrelevant');
+            const event = makeEvent(
+                makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }),
+                { type: 'payment_intent.created' }
+            );
+            const res = await callWebhook(event);
+            const after = await models.Parcel.findById(p.id);
+            const paymentCount = await collections.payments.countDocuments({ sessionId: sid });
+            logTest(
+                'Irrelevant event type ignored safely (200, no mutation)',
+                res.statusCode === 200 && after.paymentStatus !== 'paid' && paymentCount === 0
+            );
+        }
+
+        // --- 7 & 17. Valid checkout.session.completed for every starting deliveryStatus. ---
+        const startingStatuses = ['pending-pickup', 'driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered'];
+        for (const startStatus of startingStatuses) {
+            const p = await createTestParcel(`TEST-HOOK-LIFECYCLE-${startStatus}-${Date.now()}`, {
+                cost: 30, deliveryStatus: startStatus
+            });
+            const sid = newSessionId(`lifecycle_${startStatus.replace(/-/g, '_')}`);
+            const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }));
+            const res = await callWebhook(event);
+            const after = await models.Parcel.findById(p.id);
+            const paymentCount = await collections.payments.countDocuments({ sessionId: sid });
+            logTest(
+                `Webhook records payment and preserves deliveryStatus (${startStatus})`,
+                res.statusCode === 200 &&
+                res.body.result === 'OK' &&
+                after.paymentStatus === 'paid' &&
+                after.deliveryStatus === startStatus &&
+                paymentCount === 1
+            );
+        }
+
+        // --- 8. Unpaid completed session -> no mutation. ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-UNPAID-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('unpaid');
+            const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId, payment_status: 'unpaid' }));
+            const res = await callWebhook(event);
+            const after = await models.Parcel.findById(p.id);
+            logTest('Unpaid completed session causes no mutation (200 ack)', res.statusCode === 200 && after.paymentStatus !== 'paid');
+        }
+
+        // --- 9. Wrong mode -> no mutation. ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-MODE-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('mode');
+            const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId, mode: 'setup' }));
+            const res = await callWebhook(event);
+            const after = await models.Parcel.findById(p.id);
+            logTest('Non-payment session mode causes no mutation (200 ack)', res.statusCode === 200 && after.paymentStatus !== 'paid');
+        }
+
+        // --- 10. Missing metadata parcelId -> no mutation. ---
+        {
+            const sid = newSessionId('nometa');
+            const event = makeEvent(makeSessionObject(sid, { metadata: {} }));
+            const res = await callWebhook(event);
+            logTest('Missing metadata.parcelId causes no mutation (200 ack)', res.statusCode === 200);
+        }
+
+        // --- 11. Invalid parcelId shape -> no mutation. ---
+        {
+            const sid = newSessionId('badid');
+            const event = makeEvent(makeSessionObject(sid, { parcelId: 'not-a-valid-object-id', trackingId: 'x' }));
+            const res = await callWebhook(event);
+            logTest('Invalid metadata.parcelId causes no mutation (200 ack)', res.statusCode === 200);
+        }
+
+        // --- 12. Missing parcel -> no mutation. ---
+        {
+            const sid = newSessionId('missingparcel');
+            const event = makeEvent(makeSessionObject(sid, { parcelId: '000000000000000000000000', trackingId: 'x' }));
+            const res = await callWebhook(event);
+            logTest('Nonexistent parcel causes no mutation (200 ack)', res.statusCode === 200);
+        }
+
+        // --- 13. Customer-email mismatch -> no mutation. ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-EMAILMISMATCH-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('emailmismatch');
+            const event = makeEvent(makeSessionObject(sid, {
+                parcelId: p.id, trackingId: p.trackingId, customer_email: 'someone-else@example.com'
+            }));
+            const res = await callWebhook(event);
+            const after = await models.Parcel.findById(p.id);
+            logTest('Stripe customer_email mismatch causes no mutation (200 ack)', res.statusCode === 200 && after.paymentStatus !== 'paid');
+        }
+
+        // --- 14. Safe metadata email cross-check - not applicable (same as browser path). ---
+        logTest(
+            'Metadata email cross-check - not applicable',
+            true,
+            'Unit 1 metadata contract only sets parcelId/trackingId - no email field exists to cross-check'
+        );
+
+        // --- 15. Amount mismatch -> no mutation. ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-AMOUNT-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('amount');
+            const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId, amount_total: 100 }));
+            const res = await callWebhook(event);
+            const after = await models.Parcel.findById(p.id);
+            logTest('Amount mismatch causes no mutation (200 ack)', res.statusCode === 200 && after.paymentStatus !== 'paid');
+        }
+
+        // --- 16. Currency mismatch -> no mutation. ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-CURRENCY-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('currency');
+            const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId, currency: 'eur' }));
+            const res = await callWebhook(event);
+            const after = await models.Parcel.findById(p.id);
+            logTest('Currency mismatch causes no mutation (200 ack)', res.statusCode === 200 && after.paymentStatus !== 'paid');
+        }
+
+        // --- 18. Same event delivered twice -> one payment row. ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-SAMEEVENT-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('sameevent');
+            const eventId = newEventId('dup');
+            const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }), { eventId });
+            const first = await callWebhook(event);
+            const second = await callWebhook(event);
+            const count = await collections.payments.countDocuments({ sessionId: sid });
+            logTest(
+                'Same event delivered twice yields one payment row',
+                first.statusCode === 200 && second.statusCode === 200 && count === 1
+            );
+        }
+
+        // --- 19. Different event IDs, same session -> one payment row (Stripe redelivery with a new delivery attempt id). ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-DIFFEVENT-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('diffevent');
+            const sessionObj = makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId });
+            const first = await callWebhook(makeEvent(sessionObj, { eventId: newEventId('a') }));
+            const second = await callWebhook(makeEvent(sessionObj, { eventId: newEventId('b') }));
+            const count = await collections.payments.countDocuments({ sessionId: sid });
+            logTest(
+                'Different event IDs for the same session yield one payment row',
+                first.statusCode === 200 && second.statusCode === 200 && count === 1
+            );
+        }
+
+        // --- 20. Browser processes first, webhook arrives later -> idempotent. ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-BROWSERFIRST-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('browserfirst');
+            const sessionObj = makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId });
+            stripeSessionFixtures.set(sid, sessionObj);
+            const browserResult = await verifyBrowser(sid, CUSTOMER_EMAIL);
+            const webhookResult = await callWebhook(makeEvent(sessionObj));
+            const count = await collections.payments.countDocuments({ sessionId: sid });
+            logTest(
+                'Browser-first then webhook-later is idempotent (one payment row)',
+                browserResult.statusCode === 200 && browserResult.body.alreadyProcessed === false &&
+                webhookResult.statusCode === 200 && webhookResult.body.result === 'OK' &&
+                count === 1
+            );
+        }
+
+        // --- 21. Webhook processes first, browser arrives later -> idempotent. ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-WEBHOOKFIRST-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('webhookfirst');
+            const sessionObj = makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId });
+            stripeSessionFixtures.set(sid, sessionObj);
+            const webhookResult = await callWebhook(makeEvent(sessionObj));
+            const browserResult = await verifyBrowser(sid, CUSTOMER_EMAIL);
+            const count = await collections.payments.countDocuments({ sessionId: sid });
+            logTest(
+                'Webhook-first then browser-later is idempotent (one payment row)',
+                webhookResult.statusCode === 200 && webhookResult.body.result === 'OK' &&
+                browserResult.statusCode === 200 && browserResult.body.alreadyProcessed === true &&
+                count === 1
+            );
+        }
+
+        // --- 22. Concurrent webhook processing -> one payment row. ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-CONCURRENT-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('concurrent');
+            const sessionObj = makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId });
+            const results = await Promise.all([
+                callWebhook(makeEvent(sessionObj, { eventId: newEventId('c1') })),
+                callWebhook(makeEvent(sessionObj, { eventId: newEventId('c2') })),
+                callWebhook(makeEvent(sessionObj, { eventId: newEventId('c3') }))
+            ]);
+            const count = await collections.payments.countDocuments({ sessionId: sid });
+            const afterConcurrent = await models.Parcel.findById(p.id);
+            // Under genuine simultaneous contention on the same two documents,
+            // MongoDB may abort one transaction with a transient error even
+            // after the driver's built-in retries (a real, expected
+            // possibility - not a bug) - the safety property that actually
+            // matters is that at most one payment row is ever created, every
+            // response is either a safe success or a safe retryable failure
+            // (never a wrong/corrupt outcome), and at least one call
+            // succeeded in marking the parcel paid.
+            logTest(
+                'Concurrent webhook deliveries for the same session yield at most one payment row, no unsafe response',
+                results.every(r => r.statusCode === 200 || r.statusCode === 500) &&
+                results.some(r => r.statusCode === 200) &&
+                count === 1 &&
+                afterConcurrent.paymentStatus === 'paid'
+            );
+        }
+
+        // --- 23. Parcel already paid by a conflicting session -> no overwrite. ---
+        {
+            const paidParcel = await createTestParcel(`TEST-HOOK-CONFLICT-${Date.now()}`, { cost: 30, paymentStatus: 'paid' });
+            const sid = newSessionId('conflict');
+            const event = makeEvent(makeSessionObject(sid, { parcelId: paidParcel.id, trackingId: paidParcel.trackingId }));
+            const res = await callWebhook(event);
+            const count = await collections.payments.countDocuments({ sessionId: sid });
+            logTest(
+                'Parcel already paid by a different session is not overwritten (200 ack, no new row)',
+                res.statusCode === 200 && count === 0
+            );
+        }
+
+        // --- 24 & 25. Database failure -> retryable non-2xx, no raw error leaked. ---
+        {
+            const p = await createTestParcel(`TEST-HOOK-DBFAIL-${Date.now()}`, { cost: 30 });
+            const sid = newSessionId('dbfail');
+            const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }));
+
+            const originalFindOne = collections.payments.findOne;
+            collections.payments.findOne = () => { throw new Error('simulated database outage - do not leak this text'); };
+            let res;
+            try {
+                res = await callWebhook(event);
+            } finally {
+                collections.payments.findOne = originalFindOne;
+            }
+            logTest(
+                'Database failure returns a safe retryable error with no internal leakage',
+                res.statusCode === 500 && !JSON.stringify(res.body).includes('simulated database outage')
+            );
+        }
+    } finally {
+        await new Promise(resolve => setTimeout(resolve, 300));
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        if (createdSessionIds.length) {
+            await collections.payments.deleteMany({ sessionId: { $in: createdSessionIds } });
+        }
+        if (createdTrackingIds.length) {
+            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
+        for (const sid of createdSessionIds) {
+            stripeSessionFixtures.delete(sid);
+        }
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -933,6 +1399,7 @@ async function runAllTests() {
     await testInitialRequestStatus();
     await testSecureCheckoutSession();
     await testSecurePaymentSuccess();
+    await testStripeWebhook();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

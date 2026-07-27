@@ -1,23 +1,20 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const { ObjectId } = require('mongodb');
-const { logTracking } = require('../middleware/logging');
-const { client } = require('../config/database');
+const { createPaymentProcessor, normalize, EXPECTED_CURRENCY } = require('../services/paymentProcessor');
 
-const EXPECTED_CURRENCY = 'usd';
 // Stripe Checkout Session IDs are base62-ish (letters, digits, underscores).
 // A generous max length guards against pathological inputs without coupling
 // to Stripe's exact internal ID format.
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_]{1,500}$/;
-
-function normalize(value) {
-    return (value || '').trim().toLowerCase();
-}
 
 class PaymentController {
     constructor(models, collections) {
         this.Payment = models.Payment;
         this.Parcel = models.Parcel;
         this.collections = collections;
+        // Shared with the Stripe webhook handler below - exactly one place
+        // validates a Checkout Session and records a payment for it.
+        this.processCheckoutSession = createPaymentProcessor(models, collections);
     }
 
     async createCheckoutSession(req, res) {
@@ -92,6 +89,9 @@ class PaymentController {
     // corresponding request paid. The browser only ever supplies the
     // sessionId - every other fact (owner, amount, currency, parcel state)
     // is re-derived from Stripe and MongoDB, never trusted from the client.
+    // This remains a transitional fallback alongside the Stripe webhook
+    // (handleStripeWebhook below), which is the authoritative completion
+    // path - both funnel into the same idempotent processCheckoutSession.
     async handlePaymentSuccess(req, res) {
         try {
             const rawSessionId = req.body.sessionId;
@@ -104,24 +104,6 @@ class PaymentController {
                 return res.status(400).send({ message: 'invalid or missing sessionId' });
             }
 
-            const callerEmail = normalize(req.decoded_email);
-
-            // Fast idempotent path: if this exact session was already recorded,
-            // return the same result without re-verifying or re-mutating.
-            const existingPayment = await this.collections.payments.findOne({ sessionId });
-            if (existingPayment) {
-                const parcel = await this.Parcel.findById(existingPayment.parcelId);
-                if (!parcel || normalize(parcel.senderEmail) !== callerEmail) {
-                    return res.status(403).send({ message: 'forbidden access' });
-                }
-                return res.send({
-                    success: true,
-                    alreadyProcessed: true,
-                    transactionId: existingPayment.transactionId,
-                    trackingId: existingPayment.trackingId
-                });
-            }
-
             let session;
             try {
                 session = await stripe.checkout.sessions.retrieve(sessionId);
@@ -130,127 +112,95 @@ class PaymentController {
                 return res.status(404).send({ message: 'payment session not found' });
             }
 
-            if (session.mode !== 'payment') {
-                return res.status(409).send({ message: 'payment session is not in a valid state' });
-            }
-            if (session.payment_status !== 'paid') {
-                return res.status(409).send({ message: 'payment has not been completed' });
-            }
+            const result = await this.processCheckoutSession({
+                session,
+                source: 'browser-verification',
+                callerEmail: req.decoded_email
+            });
 
-            const parcelId = session.metadata && session.metadata.parcelId;
-            if (!parcelId || !ObjectId.isValid(parcelId)) {
-                return res.status(404).send({ message: 'repair request could not be identified for this payment' });
-            }
-
-            const parcel = await this.Parcel.findById(parcelId);
-            if (!parcel) {
-                return res.status(404).send({ message: 'repair request not found' });
-            }
-
-            // Ownership: the authenticated caller, the stored request owner,
-            // and Stripe's own record of who paid must all agree.
-            const ownerEmail = normalize(parcel.senderEmail);
-            const stripeEmail = normalize(session.customer_email);
-            if (callerEmail !== ownerEmail || callerEmail !== stripeEmail) {
-                return res.status(403).send({ message: 'forbidden access' });
-            }
-
-            const cost = Number(parcel.cost);
-            if (!Number.isFinite(cost) || cost <= 0) {
-                return res.status(400).send({ message: 'invalid stored amount for this request' });
-            }
-            const expectedAmount = Math.round(cost * 100);
-            if (session.amount_total !== expectedAmount) {
-                return res.status(409).send({ message: 'payment amount does not match this request' });
-            }
-            if (normalize(session.currency) !== EXPECTED_CURRENCY) {
-                return res.status(409).send({ message: 'payment currency does not match this request' });
-            }
-
-            if (parcel.paymentStatus === 'paid') {
-                // No payment record referenced this sessionId above, so this
-                // parcel was already paid through a different session.
-                return res.status(409).send({ message: 'this request has already been paid for' });
-            }
-
-            const trackingId = parcel.trackingId;
-            const transactionId = session.payment_intent;
-            const paymentRecord = {
-                sessionId,
-                transactionId,
-                parcelId: parcel._id.toString(),
-                trackingId,
-                customerEmail: callerEmail,
-                amount: cost,
-                currency: EXPECTED_CURRENCY,
-                paymentStatus: 'paid'
-            };
-
-            const mongoSession = client.startSession();
-            let committedPayment = null;
-            let conflict = false;
-            try {
-                await mongoSession.withTransaction(async () => {
-                    let insertedId;
-                    try {
-                        paymentRecord.paidAt = new Date();
-                        const insertResult = await this.collections.payments.insertOne(paymentRecord, { session: mongoSession });
-                        insertedId = insertResult.insertedId;
-                    } catch (insertError) {
-                        if (insertError.code === 11000) {
-                            // A concurrent request already recorded this exact
-                            // session - treat this call as idempotent, not an error.
-                            conflict = true;
-                            return;
-                        }
-                        throw insertError;
-                    }
-
-                    // deliveryStatus is intentionally untouched - payment and
-                    // repair-lifecycle status are independent concerns.
-                    const updateResult = await this.collections.parcels.updateOne(
-                        { _id: parcel._id, paymentStatus: { $ne: 'paid' } },
-                        { $set: { paymentStatus: 'paid' } },
-                        { session: mongoSession }
-                    );
-                    if (updateResult.matchedCount === 0) {
-                        // Parcel became paid by a concurrent different-session
-                        // request between our earlier check and this write.
-                        conflict = true;
-                        await this.collections.payments.deleteOne({ _id: insertedId }, { session: mongoSession });
-                        return;
-                    }
-
-                    committedPayment = { ...paymentRecord, _id: insertedId };
-                });
-            } finally {
-                await mongoSession.endSession();
-            }
-
-            if (conflict) {
-                const winner = await this.collections.payments.findOne({ sessionId });
-                if (winner) {
+            switch (result.code) {
+                case 'OK':
                     return res.send({
                         success: true,
-                        alreadyProcessed: true,
-                        transactionId: winner.transactionId,
-                        trackingId: winner.trackingId
+                        alreadyProcessed: result.alreadyProcessed,
+                        transactionId: result.transactionId,
+                        trackingId: result.trackingId
                     });
-                }
-                return res.status(409).send({ message: 'this request has already been paid for' });
+                case 'OWNERSHIP_MISMATCH':
+                    return res.status(403).send({ message: 'forbidden access' });
+                case 'MISSING_METADATA':
+                case 'PARCEL_NOT_FOUND':
+                    return res.status(404).send({ message: 'repair request not found' });
+                case 'INVALID_STORED_COST':
+                    return res.status(400).send({ message: 'invalid stored amount for this request' });
+                case 'INVALID_SESSION_SHAPE':
+                    return res.status(409).send({ message: 'payment session is not in a valid state' });
+                case 'NOT_PAID':
+                    return res.status(409).send({ message: 'payment has not been completed' });
+                case 'AMOUNT_MISMATCH':
+                    return res.status(409).send({ message: 'payment amount does not match this request' });
+                case 'CURRENCY_MISMATCH':
+                    return res.status(409).send({ message: 'payment currency does not match this request' });
+                case 'ALREADY_PAID_OTHER_SESSION':
+                    return res.status(409).send({ message: 'this request has already been paid for' });
+                default:
+                    return res.status(500).send({ message: 'Error processing payment success' });
             }
-
-            logTracking(this.collections.trackings, trackingId, 'parcel_paid');
-
-            return res.send({
-                success: true,
-                alreadyProcessed: false,
-                transactionId: committedPayment.transactionId,
-                trackingId: committedPayment.trackingId
-            });
         } catch (error) {
             console.error('Payment success verification failed:', error.message);
             res.status(500).send({ message: 'Error processing payment success' });
+        }
+    }
+
+    // Authoritative payment-completion path: Stripe calls this directly,
+    // independent of whether the customer's browser ever reaches the success
+    // page. Authenticity comes entirely from the Stripe signature (never a
+    // Firebase token, never trusting the parsed JSON body itself), and
+    // req.body must still be the raw, unparsed Buffer express.raw() produced
+    // (see routes/paymentWebhook.js) - constructEvent recomputes the
+    // signature over these exact bytes.
+    async handleStripeWebhook(req, res) {
+        const signature = req.headers['stripe-signature'];
+        if (!signature) {
+            return res.status(400).send({ message: 'missing stripe-signature header' });
+        }
+        if (!process.env.STRIPE_WEBHOOK_SECRET) {
+            console.error('STRIPE_WEBHOOK_SECRET is not configured');
+            return res.status(500).send({ message: 'webhook not configured' });
+        }
+
+        let event;
+        try {
+            event = stripe.webhooks.constructEvent(req.body, signature, process.env.STRIPE_WEBHOOK_SECRET);
+        } catch (err) {
+            console.error('Stripe webhook signature verification failed:', err.message);
+            return res.status(400).send({ message: 'invalid signature' });
+        }
+
+        if (event.type !== 'checkout.session.completed') {
+            // Any other valid, signed event type is acknowledged and ignored -
+            // no mutation, no error. checkout.session.async_payment_succeeded
+            // is deliberately not handled: this project's Checkout Sessions
+            // never enable an async payment method, so Stripe cannot produce
+            // that event for a session created here.
+            return res.status(200).send({ received: true, ignored: true, type: event.type });
+        }
+
+        try {
+            const session = event.data.object;
+            const result = await this.processCheckoutSession({ session, source: 'webhook' });
+            console.log(`Stripe webhook ${event.id} (${event.type}) -> ${result.code}`);
+
+            // Every outcome here - success, idempotent replay, or a permanent
+            // business-data conflict (bad ownership/amount/currency/already
+            // paid) - is acknowledged with 200. None of these will ever
+            // change on retry, so asking Stripe to redeliver would only
+            // waste its retry budget. Only an unexpected/transient failure
+            // (caught below) asks for a retry.
+            return res.status(200).send({ received: true, result: result.code });
+        } catch (err) {
+            console.error('Stripe webhook processing failed:', err.message);
+            return res.status(500).send({ message: 'processing failed' });
         }
     }
 
@@ -277,4 +227,3 @@ class PaymentController {
 }
 
 module.exports = PaymentController;
-

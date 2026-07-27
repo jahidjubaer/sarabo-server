@@ -1,0 +1,181 @@
+const { ObjectId } = require('mongodb');
+const { client } = require('../config/database');
+const { logTracking } = require('../middleware/logging');
+
+const EXPECTED_CURRENCY = 'usd';
+
+function normalize(value) {
+    return (value || '').trim().toLowerCase();
+}
+
+// Single source of truth for turning an already-resolved, trusted Stripe
+// Checkout Session into a recorded payment - shared by the authenticated
+// browser-verification endpoint (Unit 2) and the Stripe webhook (Unit 3), so
+// there is exactly one place that validates ownership/amount/currency and
+// exactly one transaction that records a payment and marks a parcel paid.
+//
+// `session` must already be trusted by the caller: either freshly retrieved
+// from Stripe with a client-supplied sessionId (browser path - Stripe itself
+// is the source of truth for that session's contents), or the `data.object`
+// of a signature-verified webhook event (webhook path). This function never
+// contacts Stripe and never verifies a signature itself.
+//
+// `callerEmail` is only present for the browser path, where an authenticated
+// Firebase identity must additionally match the request owner. The webhook
+// has no such identity and relies solely on Stripe/MongoDB agreement.
+function createPaymentProcessor(models, collections) {
+    const { Parcel } = models;
+
+    return async function processVerifiedCheckoutSession({ session, source, callerEmail = null }) {
+        const sessionId = session.id;
+        const normalizedCaller = callerEmail ? normalize(callerEmail) : null;
+
+        // Fast idempotent path: this exact session was already recorded,
+        // by either source, on a previous call.
+        const existingPayment = await collections.payments.findOne({ sessionId });
+        if (existingPayment) {
+            const parcel = await Parcel.findById(existingPayment.parcelId);
+            if (!parcel) {
+                return { code: 'PARCEL_NOT_FOUND' };
+            }
+            if (normalizedCaller && normalize(parcel.senderEmail) !== normalizedCaller) {
+                return { code: 'OWNERSHIP_MISMATCH' };
+            }
+            return {
+                code: 'OK',
+                alreadyProcessed: true,
+                transactionId: existingPayment.transactionId,
+                trackingId: existingPayment.trackingId
+            };
+        }
+
+        if (session.mode !== 'payment') {
+            return { code: 'INVALID_SESSION_SHAPE' };
+        }
+        if (session.payment_status !== 'paid') {
+            return { code: 'NOT_PAID' };
+        }
+
+        const parcelId = session.metadata && session.metadata.parcelId;
+        if (!parcelId || !ObjectId.isValid(parcelId)) {
+            return { code: 'MISSING_METADATA' };
+        }
+
+        const parcel = await Parcel.findById(parcelId);
+        if (!parcel) {
+            return { code: 'PARCEL_NOT_FOUND' };
+        }
+
+        // Ownership: the stored request owner and Stripe's own record of who
+        // paid must agree - this holds regardless of source, since Unit 1
+        // always creates the session with customer_email set to the owner.
+        // The authenticated caller (browser path only) must also agree.
+        const ownerEmail = normalize(parcel.senderEmail);
+        const stripeEmail = normalize(session.customer_email);
+        if (ownerEmail !== stripeEmail) {
+            return { code: 'OWNERSHIP_MISMATCH' };
+        }
+        if (normalizedCaller && normalizedCaller !== ownerEmail) {
+            return { code: 'OWNERSHIP_MISMATCH' };
+        }
+
+        const cost = Number(parcel.cost);
+        if (!Number.isFinite(cost) || cost <= 0) {
+            return { code: 'INVALID_STORED_COST' };
+        }
+        const expectedAmount = Math.round(cost * 100);
+        if (session.amount_total !== expectedAmount) {
+            return { code: 'AMOUNT_MISMATCH' };
+        }
+        if (normalize(session.currency) !== EXPECTED_CURRENCY) {
+            return { code: 'CURRENCY_MISMATCH' };
+        }
+
+        if (parcel.paymentStatus === 'paid') {
+            // No payment record referenced this sessionId above, so this
+            // parcel was already paid through a different session.
+            return { code: 'ALREADY_PAID_OTHER_SESSION' };
+        }
+
+        const trackingId = parcel.trackingId;
+        const transactionId = session.payment_intent;
+        const paymentRecord = {
+            sessionId,
+            transactionId,
+            parcelId: parcel._id.toString(),
+            trackingId,
+            customerEmail: ownerEmail,
+            amount: cost,
+            currency: EXPECTED_CURRENCY,
+            paymentStatus: 'paid',
+            // Operational traceability only - never used for authorization
+            // or uniqueness (sessionId alone remains the idempotency key).
+            source
+        };
+
+        const mongoSession = client.startSession();
+        let committedPayment = null;
+        let conflict = false;
+        try {
+            await mongoSession.withTransaction(async () => {
+                let insertedId;
+                try {
+                    paymentRecord.paidAt = new Date();
+                    const insertResult = await collections.payments.insertOne(paymentRecord, { session: mongoSession });
+                    insertedId = insertResult.insertedId;
+                } catch (insertError) {
+                    if (insertError.code === 11000) {
+                        // A concurrent request (webhook, browser, or a Stripe
+                        // retry) already recorded this exact session.
+                        conflict = true;
+                        return;
+                    }
+                    throw insertError;
+                }
+
+                // deliveryStatus is intentionally untouched - payment and
+                // repair-lifecycle status are independent concerns.
+                const updateResult = await collections.parcels.updateOne(
+                    { _id: parcel._id, paymentStatus: { $ne: 'paid' } },
+                    { $set: { paymentStatus: 'paid' } },
+                    { session: mongoSession }
+                );
+                if (updateResult.matchedCount === 0) {
+                    // Parcel became paid by a concurrent different-session
+                    // request between our earlier check and this write.
+                    conflict = true;
+                    await collections.payments.deleteOne({ _id: insertedId }, { session: mongoSession });
+                    return;
+                }
+
+                committedPayment = { ...paymentRecord, _id: insertedId };
+            });
+        } finally {
+            await mongoSession.endSession();
+        }
+
+        if (conflict) {
+            const winner = await collections.payments.findOne({ sessionId });
+            if (winner) {
+                return {
+                    code: 'OK',
+                    alreadyProcessed: true,
+                    transactionId: winner.transactionId,
+                    trackingId: winner.trackingId
+                };
+            }
+            return { code: 'ALREADY_PAID_OTHER_SESSION' };
+        }
+
+        logTracking(collections.trackings, trackingId, 'parcel_paid');
+
+        return {
+            code: 'OK',
+            alreadyProcessed: false,
+            transactionId: committedPayment.transactionId,
+            trackingId: committedPayment.trackingId
+        };
+    };
+}
+
+module.exports = { createPaymentProcessor, normalize, EXPECTED_CURRENCY };
