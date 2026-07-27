@@ -4,8 +4,9 @@ const { ensureDatabaseReady } = require('../middleware/database');
 function riderRoutes(app, controllers) {
     const riderController = controllers.rider;
 
-    // Get all technicians
-    app.get('/riders', verifyFBToken, ensureDatabaseReady, (req, res) => riderController.getAllRiders(req, res));
+    // Get all technicians (admin only - includes full application detail
+    // such as NID/address, needed for the technician-approval review view)
+    app.get('/riders', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => riderController.getAllRiders(req, res));
 
     // Get job stats per day (technician only)
     app.get('/riders/delivery-per-day', verifyFBToken, ensureDatabaseReady, verifyRider, (req, res) => riderController.getDeliveryPerDay(req, res));

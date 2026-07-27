@@ -14,6 +14,7 @@ class PaymentController {
     constructor(models, collections) {
         this.Payment = models.Payment;
         this.Parcel = models.Parcel;
+        this.User = models.User;
         this.collections = collections;
         // Shared with the Stripe webhook handler below - exactly one place
         // validates a Checkout Session and records a payment for it.
@@ -291,24 +292,42 @@ class PaymentController {
         }
     }
 
+    // Non-admin callers are always scoped to their own identity - an
+    // omitted `email` query must never fall through to "every payment in
+    // the system" (that was the actual vulnerability: the old code only
+    // checked ownership when an email was supplied at all). Only an admin
+    // may see other customers' payments, optionally filtered by email.
     async getAllPayments(req, res) {
         try {
-            const email = req.query.email;
+            const requesterEmail = req.decoded_email;
+            const requestedEmail = req.query.email;
+            const currentUser = await this.User.findByEmail(requesterEmail);
+            const role = currentUser?.role;
+
+            if (role === 'rider') {
+                // No legitimate technician-facing view needs payment records.
+                return res.status(403).send({ message: 'forbidden access', code: 'FORBIDDEN' });
+            }
+
             const query = {};
-
-            if (email) {
-                query.customerEmail = email;
-
-                // check email address
-                if (email !== req.decoded_email) {
-                    return res.status(403).send({ message: 'forbidden access' });
+            if (role === 'admin') {
+                if (requestedEmail) {
+                    query.customerEmail = requestedEmail;
                 }
+            } else {
+                if (requestedEmail && requestedEmail !== requesterEmail) {
+                    return res.status(403).send({ message: 'forbidden access', code: 'FORBIDDEN' });
+                }
+                query.customerEmail = requesterEmail;
             }
 
             const result = await this.Payment.findAll(query);
-            res.send(result);
+            // The raw Stripe checkout session id is an internal reference no
+            // client consumer uses - never included in the response.
+            const sanitized = result.map(({ sessionId, ...rest }) => rest);
+            res.send(sanitized);
         } catch (error) {
-            res.status(500).send({ message: 'Error fetching payments', error: error.message });
+            res.status(500).send({ message: 'Error fetching payments', code: 'INTERNAL_ERROR' });
         }
     }
 }

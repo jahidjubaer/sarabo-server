@@ -28,7 +28,11 @@ class UserModel {
     }
 
     async create(userData) {
-        userData.role = userData.role || 'user';
+        // Role is always forced to 'user' here, regardless of anything the
+        // caller supplies - privileged roles are only ever granted through
+        // the dedicated admin-authorized role-update workflow
+        // (updateRole/updateRoleByEmail), never at creation time.
+        userData.role = 'user';
         userData.createdAt = new Date();
         const result = await this.collection.insertOne(userData);
         return result;

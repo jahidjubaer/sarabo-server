@@ -4,7 +4,7 @@ const verifyFBToken = async (req, res, next) => {
     const token = req.headers.authorization;
 
     if (!token) {
-        return res.status(401).send({ message: 'unauthorized access' })
+        return res.status(401).send({ message: 'unauthorized access', code: 'AUTHENTICATION_REQUIRED' })
     }
 
     try {
@@ -14,7 +14,7 @@ const verifyFBToken = async (req, res, next) => {
         next();
     }
     catch (err) {
-        return res.status(401).send({ message: 'unauthorized access' })
+        return res.status(401).send({ message: 'unauthorized access', code: 'AUTHENTICATION_REQUIRED' })
     }
 }
 
@@ -28,7 +28,7 @@ const verifyAdmin = async (req, res, next) => {
     const user = await userCollection.findOne(query);
 
     if (!user || user.role !== 'admin') {
-        return res.status(403).send({ message: 'forbidden access' });
+        return res.status(403).send({ message: 'forbidden access', code: 'FORBIDDEN' });
     }
 
     next();
@@ -44,7 +44,7 @@ const verifyRider = async (req, res, next) => {
     const user = await userCollection.findOne(query);
 
     if (!user || user.role !== 'rider') {
-        return res.status(403).send({ message: 'forbidden access' });
+        return res.status(403).send({ message: 'forbidden access', code: 'FORBIDDEN' });
     }
 
     next();

@@ -6,7 +6,19 @@ class RiderModel {
     }
 
     async findAll(filters = {}) {
-        const cursor = this.collection.find(filters);
+        // Explicit field allow-list rather than a bare find() - this route is
+        // admin-only (routes/riders.js), and every field listed here is
+        // actually rendered by an existing admin consumer: ApproveTechnicians'
+        // review modal needs the full application (including address/nid) to
+        // vet a technician; AssignTechnicians/AdminDashboardHome only need a
+        // subset. Listing them explicitly keeps the contract intentional
+        // instead of silently exposing any future field added to this
+        // collection.
+        const projection = {
+            name: 1, email: 1, region: 1, district: 1, address: 1,
+            license: 1, nid: 1, bike: 1, status: 1, workStatus: 1, createdAt: 1
+        };
+        const cursor = this.collection.find(filters, { projection });
         return await cursor.toArray();
     }
 

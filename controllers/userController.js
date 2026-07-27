@@ -56,20 +56,28 @@ class UserController {
         }
     }
 
+    // Syncs the currently-authenticated Firebase account into MongoDB after
+    // registration or a Google-login sync. Identity always comes from the
+    // verified token, never the request body - a caller cannot create a
+    // record for a different email, and cannot influence their own role.
+    // Only an explicit allowlist of safe profile fields is ever read from
+    // the body; anything else supplied (including `role`) is silently
+    // ignored, and `User.create` itself also forces role: 'user'
+    // unconditionally as a second layer.
     async createUser(req, res) {
         try {
-            const user = req.body;
-            const email = user.email;
+            const email = req.decoded_email;
+            const { displayName, photoURL } = req.body;
             const userExists = await this.User.exists(email);
 
             if (userExists) {
-                return res.send({ message: 'user exists' });
+                return res.send({ message: 'user exists', code: 'USER_ALREADY_EXISTS' });
             }
 
-            const result = await this.User.create(user);
+            const result = await this.User.create({ email, displayName, photoURL });
             res.send(result);
         } catch (error) {
-            res.status(500).send({ message: 'Error creating user', error: error.message });
+            res.status(500).send({ message: 'Error creating user', code: 'INTERNAL_ERROR' });
         }
     }
 
