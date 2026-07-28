@@ -44,6 +44,21 @@ FB_SERVICE_KEY=your_base64_encoded_firebase_service_account_key
 # Stripe Payment
 STRIPE_SECRET=your_stripe_secret_key
 
+# Stripe Webhook Signing Secret
+# Required to verify that POST /stripe-webhook requests genuinely came from
+# Stripe. Without it, the webhook endpoint refuses every event (500 "webhook
+# not configured") rather than trusting an unsigned/unverifiable request.
+# A local Stripe CLI session (`stripe listen --forward-to ...`) and a webhook
+# endpoint configured in the Stripe Dashboard are two DIFFERENT signing
+# secrets, even for the same Stripe account - use the one that matches
+# whichever endpoint is actually receiving events for this environment:
+#   - Local development: the secret printed by `stripe listen`
+#   - Deployed environment: the "Signing secret" shown for that specific
+#     endpoint URL under Stripe Dashboard > Developers > Webhooks
+# Keep Stripe test-mode and live-mode entirely separate: a test-mode secret
+# only verifies test-mode events, and vice versa.
+STRIPE_WEBHOOK_SECRET=your_stripe_webhook_signing_secret
+
 # Site Domain
 # The client origin, used for Stripe redirect URLs and for the server's CORS
 # allow-list. Must include the protocol (http:// or https://) and must not
@@ -62,6 +77,7 @@ SITE_DOMAIN=http://localhost:5173
 | `FB_SERVICE_KEY` | Base64-encoded Firebase Admin service account key, used to verify Firebase ID tokens. |
 | `MONGO_URI` | MongoDB connection string. |
 | `STRIPE_SECRET` | Stripe secret key, used to create checkout sessions. |
+| `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret, used to verify `POST /stripe-webhook` requests. The local Stripe CLI and a deployed Stripe Dashboard webhook endpoint each have their own distinct secret - use whichever one matches the endpoint actually receiving events in this environment, and never mix test-mode and live-mode secrets. |
 | `SITE_DOMAIN` | Client origin (protocol + host, no trailing path/slash) - the React client's dev server (`http://localhost:5173`) for local development, or the deployed client URL otherwise. Used for Stripe redirect URLs and allowed in the server's CORS policy. |
 
 No actual values are listed above - see your own `.env` file (never committed) for the real configuration.
@@ -115,6 +131,29 @@ Most endpoints require Firebase authentication via the `Authorization` header.
 Exceptions: the root health check, the Stripe webhook (`POST /stripe-webhook`,
 authenticated by its Stripe signature instead), and the public repair-tracking
 endpoint below.
+
+### Stripe webhook configuration
+
+The webhook endpoint is `POST /stripe-webhook`. It is authenticated entirely
+by the Stripe signature on the request (the `stripe-signature` header,
+verified against `STRIPE_WEBHOOK_SECRET`) - there is no Firebase token
+involved, and requests with a missing or invalid signature are rejected.
+
+To receive events locally, run the Stripe CLI and forward to this endpoint:
+
+```bash
+stripe listen --forward-to localhost:3000/stripe-webhook
+```
+
+The CLI prints its own signing secret when it starts - set that as
+`STRIPE_WEBHOOK_SECRET` for local development. This is a **different**
+secret from the one shown for any webhook endpoint configured in the Stripe
+Dashboard (Developers > Webhooks) for a deployed environment; each endpoint
+URL has its own signing secret. Always use the secret that matches the
+specific endpoint actually receiving events for the environment you're
+running, and keep Stripe test-mode and live-mode configuration (keys and
+webhook secrets) separate - a test-mode secret cannot verify a live-mode
+event or vice versa.
 
 ### Public repair tracking
 
