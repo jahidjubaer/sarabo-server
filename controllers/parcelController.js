@@ -130,51 +130,220 @@ class ParcelController {
         }
     }
 
+    // Non-completion status transitions (rider_arriving, parcel_picked_up)
+    // only ever touch the repair request itself, so a single guarded update
+    // is enough. The final parcel_delivered transition is different - it
+    // must also atomically reset the assigned technician and write exactly
+    // one completion tracking log, so it is handled separately by
+    // completeParcel below, which is the actual deliverable of this unit.
     async updateParcelStatus(req, res) {
         try {
-            const { deliveryStatus, riderId, trackingId } = req.body;
             const id = req.params.id;
-            
+            const requestedStatus = req.body.deliveryStatus;
+
+            if (!ObjectId.isValid(id)) {
+                return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
+            }
+            if (!VALID_STATUSES.includes(requestedStatus)) {
+                return res.status(400).send({ message: 'invalid repair status', code: 'INVALID_REPAIR_STATUS' });
+            }
+
             const parcel = await this.Parcel.findById(id);
             if (!parcel) {
-                return res.status(404).send({ message: 'repair request not found' });
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
-            
+
             const currentUser = await this.User.findByEmail(req.decoded_email);
             const isRider = currentUser && currentUser.role === 'rider';
             const isAdmin = currentUser && currentUser.role === 'admin';
             const isAssignedRider = parcel.riderEmail === req.decoded_email;
-            
+
             // Only the assigned technician or admins can update the repair request status
             if (!isAdmin && !(isRider && isAssignedRider)) {
-                return res.status(403).send({ message: 'forbidden access' });
+                return res.status(403).send({ message: 'forbidden access', code: isRider ? 'NOT_ASSIGNED_TECHNICIAN' : 'FORBIDDEN' });
             }
 
-            if (!VALID_STATUSES.includes(deliveryStatus)) {
-                return res.status(400).send({ message: 'invalid repair status' });
+            // The completion transition has its own transactional path - see
+            // completeParcel. Everything below only ever applies to the
+            // earlier, technician-only steps of the lifecycle.
+            if (requestedStatus === 'parcel_delivered') {
+                return this.completeParcel(res, parcel);
             }
 
-            if (deliveryStatus === parcel.deliveryStatus) {
+            if (requestedStatus === parcel.deliveryStatus) {
                 // Idempotent re-submission of the current status: nothing to
                 // persist, and no tracking log should be duplicated for it.
                 return res.send({ message: 'status unchanged', matchedCount: 1, modifiedCount: 0 });
             }
 
-            if (!isValidTransition(parcel.deliveryStatus, deliveryStatus)) {
-                return res.status(400).send({ message: 'invalid status transition' });
+            if (!isValidTransition(parcel.deliveryStatus, requestedStatus)) {
+                return res.status(409).send({ message: 'invalid status transition', code: 'STATUS_TRANSITION_NOT_ALLOWED' });
             }
 
-            const result = await this.Parcel.updateStatus(id, deliveryStatus);
+            // Guarded atomically against a concurrent status change landing
+            // between the read above and this write - the query condition
+            // itself is the race-resolver, not the read-then-write check.
+            const result = await this.collections.parcels.updateOne(
+                { _id: parcel._id, deliveryStatus: parcel.deliveryStatus },
+                { $set: { deliveryStatus: requestedStatus } }
+            );
 
-            if (deliveryStatus === 'parcel_delivered' && riderId) {
-                await this.Rider.updateWorkStatus(riderId, 'available');
+            if (result.matchedCount === 0) {
+                return res.status(409).send({ message: 'this request was updated concurrently', code: 'STATUS_TRANSITION_NOT_ALLOWED' });
             }
 
-            logTracking(this.collections.trackings, trackingId, deliveryStatus);
+            // The tracking log always uses the repair request's own
+            // trackingId, never a client-supplied value - trusting the body
+            // here would let a caller write a tracking event under an
+            // arbitrary/unrelated trackingId.
+            logTracking(this.collections.trackings, parcel.trackingId, requestedStatus);
 
             res.send(result);
         } catch (error) {
             res.status(500).send({ message: 'Error updating repair status', error: error.message });
+        }
+    }
+
+    // Final repair-completion transition. Atomically commits three things
+    // together: the repair request's deliveryStatus -> parcel_delivered, the
+    // assigned technician's workStatus -> available, and exactly one
+    // completion tracking log entry. Previously these were three independent
+    // writes (the last two using a client-supplied riderId/trackingId and
+    // not even awaited); if the technician reset or tracking insert failed
+    // after the request had already committed as delivered, the request was
+    // left "completed" while the technician stayed in_delivery, with no way
+    // for a retry to repair it. The assigned technician is always the one
+    // recorded on the repair request itself (parcel.riderId) - a
+    // client-supplied riderId is never trusted to select who gets reset.
+    async completeParcel(res, parcel) {
+        try {
+            if (!parcel.riderId || !ObjectId.isValid(parcel.riderId)) {
+                return res.status(409).send({ message: 'this request has no valid assigned technician', code: 'REQUEST_NOT_ASSIGNED' });
+            }
+
+            const mongoSession = client.startSession();
+            // Set exactly once inside the transaction, mirroring the
+            // assignment/approval transactions elsewhere in this file -
+            // either a genuine conflict/not-found (no throw, nothing was
+            // written) or a success/idempotent-success marker. A thrown
+            // error is reserved for a write actually failing after another
+            // write in the same transaction already succeeded, so the whole
+            // thing rolls back.
+            let outcome = null;
+            try {
+                await mongoSession.withTransaction(async () => {
+                    const freshParcel = await this.collections.parcels.findOne(
+                        { _id: parcel._id },
+                        { session: mongoSession }
+                    );
+                    if (!freshParcel) {
+                        outcome = { httpStatus: 404, code: 'REQUEST_NOT_FOUND', message: 'repair request not found' };
+                        return;
+                    }
+
+                    const currentStatus = freshParcel.deliveryStatus;
+                    const riderId = freshParcel.riderId;
+
+                    if (!riderId || !ObjectId.isValid(riderId)) {
+                        outcome = { httpStatus: 409, code: 'REQUEST_NOT_ASSIGNED', message: 'this request has no valid assigned technician' };
+                        return;
+                    }
+
+                    if (currentStatus === 'parcel_delivered') {
+                        // Same-status request - only a genuine no-op when the
+                        // assigned technician is already available too.
+                        // Otherwise this is a pre-existing inconsistency
+                        // between the request and the technician, which must
+                        // never be silently reported as success.
+                        const technician = await this.collections.riders.findOne(
+                            { _id: new ObjectId(riderId) },
+                            { session: mongoSession }
+                        );
+                        if (technician && technician.workStatus === 'available') {
+                            outcome = { idempotent: true };
+                            return;
+                        }
+                        outcome = {
+                            httpStatus: 409, code: 'COMPLETION_CONFLICT',
+                            message: 'this request is already completed but the technician state is inconsistent'
+                        };
+                        return;
+                    }
+
+                    if (currentStatus !== 'parcel_picked_up') {
+                        outcome = {
+                            httpStatus: 409, code: 'STATUS_TRANSITION_NOT_ALLOWED',
+                            message: currentStatus === 'cancelled' ? 'this request has been cancelled' : 'repair request is not ready to be completed'
+                        };
+                        return;
+                    }
+
+                    const technician = await this.collections.riders.findOne(
+                        { _id: new ObjectId(riderId) },
+                        { session: mongoSession }
+                    );
+                    if (!technician) {
+                        outcome = { httpStatus: 404, code: 'TECHNICIAN_NOT_FOUND', message: 'assigned technician not found' };
+                        return;
+                    }
+
+                    // Guarded atomically against a concurrent completion
+                    // attempt on the same request - re-verifies the status is
+                    // still what was just read, not just a read-then-write
+                    // check.
+                    const parcelUpdateResult = await this.collections.parcels.updateOne(
+                        { _id: freshParcel._id, deliveryStatus: 'parcel_picked_up' },
+                        { $set: { deliveryStatus: 'parcel_delivered' } },
+                        { session: mongoSession }
+                    );
+                    if (parcelUpdateResult.matchedCount === 0) {
+                        outcome = { httpStatus: 409, code: 'COMPLETION_CONFLICT', message: 'this request was updated concurrently' };
+                        return;
+                    }
+
+                    const riderUpdateResult = await this.collections.riders.updateOne(
+                        { _id: technician._id },
+                        { $set: { workStatus: 'available' } },
+                        { session: mongoSession }
+                    );
+                    if (riderUpdateResult.matchedCount === 0) {
+                        // The technician document vanished between the read
+                        // above and this write - abort the whole transaction
+                        // (including the parcel update above) rather than
+                        // leave the request completed with no matching
+                        // technician reset.
+                        throw Object.assign(new Error('technician reset failed during completion'), { code: 'COMPLETION_FAILED' });
+                    }
+
+                    const trackingResult = await this.collections.trackings.insertOne(
+                        {
+                            trackingId: freshParcel.trackingId,
+                            status: 'parcel_delivered',
+                            details: 'parcel delivered',
+                            createdAt: new Date()
+                        },
+                        { session: mongoSession }
+                    );
+                    if (!trackingResult.insertedId) {
+                        throw Object.assign(new Error('completion tracking log failed'), { code: 'COMPLETION_FAILED' });
+                    }
+
+                    outcome = { success: true };
+                });
+            } finally {
+                await mongoSession.endSession();
+            }
+
+            if (outcome.idempotent) {
+                return res.send({ message: 'repair already completed', deliveryStatus: 'parcel_delivered', alreadyCompleted: true });
+            }
+            if (outcome.success) {
+                return res.send({ message: 'repair completed', deliveryStatus: 'parcel_delivered', matchedCount: 1, modifiedCount: 1, alreadyCompleted: false });
+            }
+            return res.status(outcome.httpStatus).send({ message: outcome.message, code: outcome.code });
+        } catch (error) {
+            console.error('Completion transaction aborted:', error.message);
+            res.status(500).send({ message: 'Error completing repair request', code: 'COMPLETION_FAILED' });
         }
     }
 

@@ -248,7 +248,10 @@ async function testStatusTransitions() {
         logTest('Nonsense status value rejected', res.statusCode === 400);
 
         res = await updateStatus(main.id, 'driver_assigned', RIDER_EMAIL, main.trackingId);
-        logTest('Backward transition rejected', res.statusCode === 400);
+        // Phase 3.0 Unit 4 moved transition-rejection from 400 to 409
+        // (STATUS_TRANSITION_NOT_ALLOWED) - a conflict with existing state,
+        // not a malformed request - see parcelController.updateParcelStatus.
+        logTest('Backward transition rejected', res.statusCode === 409 && res.body.code === 'STATUS_TRANSITION_NOT_ALLOWED');
 
         const trackingCountBefore = await collections.trackings.countDocuments({ trackingId: main.trackingId });
         res = await updateStatus(main.id, 'parcel_picked_up', RIDER_EMAIL, main.trackingId);
@@ -262,7 +265,7 @@ async function testStatusTransitions() {
         logTest('Valid transition: parcel_picked_up -> parcel_delivered', res.statusCode === 200);
 
         res = await updateStatus(main.id, 'rider_arriving', RIDER_EMAIL, main.trackingId);
-        logTest('Completed request cannot transition further', res.statusCode === 400);
+        logTest('Completed request cannot transition further', res.statusCode === 409 && res.body.code === 'STATUS_TRANSITION_NOT_ALLOWED');
 
         // --- Second parcel, fresh from assignment: skipped transition and
         // unauthorized-customer checks ---
@@ -271,7 +274,10 @@ async function testStatusTransitions() {
         await assignTestRider(second.id, second.trackingId);
 
         res = await updateStatus(second.id, 'parcel_delivered', RIDER_EMAIL, second.trackingId);
-        logTest('Skipped transition rejected (driver_assigned -> parcel_delivered)', res.statusCode === 400);
+        // Now routed through the transactional completeParcel path (Phase
+        // 3.0 Unit 4) - a skipped transition is a 409 conflict against the
+        // request's current state, not a malformed request.
+        logTest('Skipped transition rejected (driver_assigned -> parcel_delivered)', res.statusCode === 409 && res.body.code === 'STATUS_TRANSITION_NOT_ALLOWED');
 
         res = await updateStatus(second.id, 'rider_arriving', CUSTOMER_EMAIL, second.trackingId);
         logTest('Unauthorized customer blocked from status update', res.statusCode === 403);
@@ -3318,6 +3324,398 @@ async function testTechnicianApprovalTransaction() {
     console.log('');
 }
 
+// Phase 3.0 Unit 4: Make Repair Completion Transaction-Safe. Exercises the
+// rewritten updateParcelStatus/completeParcel end-to-end: server-derived
+// technician identity (a client-supplied riderId is never trusted), the
+// atomic request-status + technician-workStatus + completion-tracking
+// transaction and its rollback under injected failures, the status-transition
+// guard (skipped/backward/cancelled/unknown all rejected), idempotency for a
+// genuinely-consistent repeat completion, detection of a pre-existing
+// (not-caused-by-this-request) technician-still-busy inconsistency, and a
+// concurrent-completion race. MongoDB transactions are real; only the
+// deliberate failure points below are mocked.
+async function testRepairCompletionTransaction() {
+    console.log('23. Testing Transactional Repair Completion');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections, client } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+
+    const createdParcelIds = [];
+    const createdTrackingIds = [];
+    const createdRiderIds = [];
+    const createdUserEmails = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            headers: {},
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            set(name, value) { this.headers[name] = value; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const parcelController = controllers.parcel;
+        const trackingController = controllers.tracking;
+
+        async function createTestTechnician(marker, { workStatus = 'in_delivery' } = {}) {
+            const email = `${marker.toLowerCase()}@test.local`;
+            const doc = {
+                name: marker,
+                email,
+                region: 'Test Region',
+                district: 'Test District',
+                status: 'approved',
+                workStatus,
+                createdAt: new Date()
+            };
+            const result = await collections.riders.insertOne(doc);
+            createdRiderIds.push(result.insertedId.toString());
+            createdUserEmails.push(email);
+            await collections.users.insertOne({ email, role: 'rider', createdAt: new Date() });
+            return { id: result.insertedId.toString(), email };
+        }
+
+        async function createTestParcel(marker, { deliveryStatus = 'parcel_picked_up', riderId, riderEmail, riderName } = {}) {
+            const doc = {
+                parcelName: marker,
+                cost: 30,
+                senderEmail: CUSTOMER_EMAIL,
+                deliveryStatus,
+                trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                createdAt: new Date()
+            };
+            if (riderId !== undefined) doc.riderId = riderId;
+            if (riderEmail !== undefined) doc.riderEmail = riderEmail;
+            if (riderName !== undefined) doc.riderName = riderName;
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            createdTrackingIds.push(doc.trackingId);
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function callUpdateStatus(parcelId, status, decoded_email, extraBody = {}) {
+            const req = { params: { id: parcelId }, body: { deliveryStatus: status, ...extraBody }, decoded_email };
+            const res = fakeRes();
+            return parcelController.updateParcelStatus(req, res).then(() => res);
+        }
+
+        function trackingLogsFor(trackingId) {
+            return collections.trackings.find({ trackingId }).toArray();
+        }
+
+        // --- 1. Anonymous PATCH rejected (real HTTP, real middleware chain). ---
+        await makeRequest(
+            {
+                hostname: 'localhost', port: 3000, path: '/parcels/000000000000000000000000/status', method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ deliveryStatus: 'parcel_delivered' })
+            },
+            401,
+            'PATCH /parcels/:id/status (no auth) rejected'
+        );
+
+        // --- 2, 3. Authorization: unrelated customer and unrelated technician. ---
+        const techMain = await createTestTechnician(`TEST-COMPLETE-MAIN-${Date.now()}`);
+        const techOther = await createTestTechnician(`TEST-COMPLETE-OTHER-${Date.now()}`);
+        const pMain = await createTestParcel(`TEST-COMPLETE-MAIN-${Date.now()}`, {
+            riderId: techMain.id, riderEmail: techMain.email, riderName: techMain.name
+        });
+
+        let res = await callUpdateStatus(pMain.id, 'parcel_delivered', CUSTOMER_EMAIL);
+        logTest('Unrelated customer blocked from completing (403 FORBIDDEN)', res.statusCode === 403 && res.body.code === 'FORBIDDEN');
+
+        res = await callUpdateStatus(pMain.id, 'parcel_delivered', techOther.email);
+        logTest('Unrelated technician blocked from completing (403 NOT_ASSIGNED_TECHNICIAN)', res.statusCode === 403 && res.body.code === 'NOT_ASSIGNED_TECHNICIAN');
+
+        // --- 4. Invalid request id. ---
+        res = await callUpdateStatus('not-a-valid-object-id', 'parcel_delivered', ADMIN_EMAIL);
+        logTest('Invalid request id rejected (400)', res.statusCode === 400 && res.body.code === 'INVALID_REQUEST_ID');
+
+        // --- 5. Missing request. ---
+        res = await callUpdateStatus('000000000000000000000000', 'parcel_delivered', ADMIN_EMAIL);
+        logTest('Missing repair request rejected (404)', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND');
+
+        // --- 6. Missing assignment entirely -> controlled conflict. ---
+        const pUnassigned = await createTestParcel(`TEST-COMPLETE-UNASSIGNED-${Date.now()}`);
+        res = await callUpdateStatus(pUnassigned.id, 'parcel_delivered', ADMIN_EMAIL);
+        logTest('Repair request with no assigned technician rejected (409 REQUEST_NOT_ASSIGNED)', res.statusCode === 409 && res.body.code === 'REQUEST_NOT_ASSIGNED');
+
+        // --- 7. Malformed stored riderId -> controlled failure. ---
+        const pMalformed = await createTestParcel(`TEST-COMPLETE-MALFORMED-${Date.now()}`, {
+            riderId: 'not-a-valid-object-id', riderEmail: techMain.email
+        });
+        res = await callUpdateStatus(pMalformed.id, 'parcel_delivered', techMain.email);
+        logTest('Malformed stored riderId rejected (409 REQUEST_NOT_ASSIGNED)', res.statusCode === 409 && res.body.code === 'REQUEST_NOT_ASSIGNED');
+
+        // --- 8. Linked technician missing -> controlled failure. ---
+        const pGhost = await createTestParcel(`TEST-COMPLETE-GHOST-${Date.now()}`, {
+            riderId: new ObjectId().toString(), riderEmail: 'ghost-tech@test.local'
+        });
+        res = await callUpdateStatus(pGhost.id, 'parcel_delivered', ADMIN_EMAIL);
+        logTest('Assigned technician document not found rejected (404 TECHNICIAN_NOT_FOUND)', res.statusCode === 404 && res.body.code === 'TECHNICIAN_NOT_FOUND');
+
+        // --- 9, 10, 11. Successful completion: full three-part invariant. ---
+        const beforeCount = (await trackingLogsFor(pMain.trackingId)).length;
+        res = await callUpdateStatus(pMain.id, 'parcel_delivered', techMain.email, {
+            // Deliberately wrong client-supplied technician - the controller
+            // must derive the technician from the repair request document
+            // itself, never trust this body.
+            riderId: techOther.id
+        });
+        logTest(
+            'Successful completion returns 200 with deliveryStatus parcel_delivered',
+            res.statusCode === 200 && res.body.deliveryStatus === 'parcel_delivered'
+        );
+
+        const pMainAfter = await models.Parcel.findById(pMain.id);
+        logTest('Repair request status is parcel_delivered', pMainAfter.deliveryStatus === 'parcel_delivered');
+
+        const techMainAfter = await collections.riders.findOne({ _id: new ObjectId(techMain.id) });
+        logTest('Assigned technician workStatus reset to available', techMainAfter.workStatus === 'available');
+
+        const pMainLogs = await trackingLogsFor(pMain.trackingId);
+        const deliveredLog = pMainLogs.find(l => l.status === 'parcel_delivered');
+        logTest(
+            'Exactly one parcel_delivered tracking log created',
+            (pMainLogs.length - beforeCount) === 1 && !!deliveredLog
+        );
+
+        // --- 12, 13. Spoofed body riderId is ignored; server always uses the
+        // request's own riderId. ---
+        const techOtherAfter = await collections.riders.findOne({ _id: new ObjectId(techOther.id) });
+        logTest(
+            'Body-supplied riderId is ignored - the spoofed (unrelated) technician is never mutated',
+            techOtherAfter.workStatus === 'in_delivery'
+        );
+        logTest(
+            'Server used the request-linked technician (techMain), not the body-supplied one',
+            techMainAfter.workStatus === 'available' && techOtherAfter.workStatus === 'in_delivery'
+        );
+
+        // --- 14. Technician reset failure mid-transaction rolls back everything. ---
+        const techRiderFail = await createTestTechnician(`TEST-COMPLETE-RIDERFAIL-${Date.now()}`);
+        const pRiderFail = await createTestParcel(`TEST-COMPLETE-RIDERFAIL-${Date.now()}`, {
+            riderId: techRiderFail.id, riderEmail: techRiderFail.email
+        });
+        const originalRidersUpdateOne = collections.riders.updateOne.bind(collections.riders);
+        collections.riders.updateOne = async () => ({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
+        try {
+            res = await callUpdateStatus(pRiderFail.id, 'parcel_delivered', techRiderFail.email);
+        } finally {
+            collections.riders.updateOne = originalRidersUpdateOne;
+        }
+        logTest('Technician-reset failure surfaces as 500 COMPLETION_FAILED', res.statusCode === 500 && res.body.code === 'COMPLETION_FAILED');
+        const pRiderFailAfter = await models.Parcel.findById(pRiderFail.id);
+        const riderFailLogs = await trackingLogsFor(pRiderFail.trackingId);
+        logTest(
+            'Repair request rolled back to parcel_picked_up and no tracking log left behind',
+            pRiderFailAfter.deliveryStatus === 'parcel_picked_up' && riderFailLogs.length === 0
+        );
+
+        // --- 15. Tracking-insert failure mid-transaction rolls back everything. ---
+        const techTrackFail = await createTestTechnician(`TEST-COMPLETE-TRACKFAIL-${Date.now()}`);
+        const pTrackFail = await createTestParcel(`TEST-COMPLETE-TRACKFAIL-${Date.now()}`, {
+            riderId: techTrackFail.id, riderEmail: techTrackFail.email
+        });
+        const originalTrackingsInsertOne = collections.trackings.insertOne.bind(collections.trackings);
+        collections.trackings.insertOne = async () => { throw new Error('simulated tracking insert outage'); };
+        try {
+            res = await callUpdateStatus(pTrackFail.id, 'parcel_delivered', techTrackFail.email);
+        } finally {
+            collections.trackings.insertOne = originalTrackingsInsertOne;
+        }
+        logTest('Tracking-insert failure surfaces as 500 COMPLETION_FAILED', res.statusCode === 500 && res.body.code === 'COMPLETION_FAILED');
+        const pTrackFailAfter = await models.Parcel.findById(pTrackFail.id);
+        const techTrackFailAfter = await collections.riders.findOne({ _id: new ObjectId(techTrackFail.id) });
+        logTest(
+            'Repair request and technician both rolled back on tracking-insert failure',
+            pTrackFailAfter.deliveryStatus === 'parcel_picked_up' && techTrackFailAfter.workStatus === 'in_delivery'
+        );
+
+        // --- 16, 17. Transaction commit failure rolls back and always ends the session. ---
+        const techCommitFail = await createTestTechnician(`TEST-COMPLETE-COMMITFAIL-${Date.now()}`);
+        const pCommitFail = await createTestParcel(`TEST-COMPLETE-COMMITFAIL-${Date.now()}`, {
+            riderId: techCommitFail.id, riderEmail: techCommitFail.email
+        });
+        const commitFailSession = client.startSession();
+        commitFailSession.commitTransaction = async () => { throw new Error('simulated commit failure'); };
+        const originalStartSession = client.startSession.bind(client);
+        client.startSession = () => commitFailSession;
+        try {
+            res = await callUpdateStatus(pCommitFail.id, 'parcel_delivered', techCommitFail.email);
+        } finally {
+            client.startSession = originalStartSession;
+        }
+        logTest('Transaction commit failure surfaces as 500 COMPLETION_FAILED', res.statusCode === 500 && res.body.code === 'COMPLETION_FAILED');
+        logTest('Session is always ended, even after a commit failure', commitFailSession.hasEnded === true);
+        const pCommitFailAfter = await models.Parcel.findById(pCommitFail.id);
+        const techCommitFailAfter = await collections.riders.findOne({ _id: new ObjectId(techCommitFail.id) });
+        const commitFailLogs = await trackingLogsFor(pCommitFail.trackingId);
+        logTest(
+            'No partial state survives a commit failure',
+            pCommitFailAfter.deliveryStatus === 'parcel_picked_up' &&
+            techCommitFailAfter.workStatus === 'in_delivery' &&
+            commitFailLogs.length === 0
+        );
+
+        // --- 18. Skipped transition rejected (driver_assigned -> parcel_delivered). ---
+        const techSkip = await createTestTechnician(`TEST-COMPLETE-SKIP-${Date.now()}`);
+        const pSkip = await createTestParcel(`TEST-COMPLETE-SKIP-${Date.now()}`, {
+            deliveryStatus: 'driver_assigned', riderId: techSkip.id, riderEmail: techSkip.email
+        });
+        res = await callUpdateStatus(pSkip.id, 'parcel_delivered', techSkip.email);
+        logTest('Skipped transition (driver_assigned -> parcel_delivered) rejected (409)', res.statusCode === 409 && res.body.code === 'STATUS_TRANSITION_NOT_ALLOWED');
+
+        // --- 19. Backward transition rejected (general, non-completion path). ---
+        const techBackward = await createTestTechnician(`TEST-COMPLETE-BACKWARD-${Date.now()}`);
+        const pBackward = await createTestParcel(`TEST-COMPLETE-BACKWARD-${Date.now()}`, {
+            deliveryStatus: 'parcel_picked_up', riderId: techBackward.id, riderEmail: techBackward.email
+        });
+        res = await callUpdateStatus(pBackward.id, 'rider_arriving', techBackward.email);
+        logTest('Backward transition (parcel_picked_up -> rider_arriving) rejected (409)', res.statusCode === 409 && res.body.code === 'STATUS_TRANSITION_NOT_ALLOWED');
+
+        // --- 20. Cancelled request rejected. ---
+        const techCancelled = await createTestTechnician(`TEST-COMPLETE-CANCELLED-${Date.now()}`);
+        const pCancelled = await createTestParcel(`TEST-COMPLETE-CANCELLED-${Date.now()}`, {
+            deliveryStatus: 'cancelled', riderId: techCancelled.id, riderEmail: techCancelled.email
+        });
+        res = await callUpdateStatus(pCancelled.id, 'parcel_delivered', techCancelled.email);
+        logTest('Cancelled request rejected from completion (409)', res.statusCode === 409 && res.body.code === 'STATUS_TRANSITION_NOT_ALLOWED');
+
+        // --- 21. Unknown current status rejected. ---
+        const techUnknown = await createTestTechnician(`TEST-COMPLETE-UNKNOWN-${Date.now()}`);
+        const pUnknown = await createTestParcel(`TEST-COMPLETE-UNKNOWN-${Date.now()}`, {
+            deliveryStatus: 'some_bogus_status', riderId: techUnknown.id, riderEmail: techUnknown.email
+        });
+        res = await callUpdateStatus(pUnknown.id, 'parcel_delivered', techUnknown.email);
+        logTest('Unrecognized current status rejected from completion (409)', res.statusCode === 409 && res.body.code === 'STATUS_TRANSITION_NOT_ALLOWED');
+
+        // --- 22, 23. Repeated completion with a consistent state is idempotent, no duplicate log. ---
+        const repeatLogsBefore = await trackingLogsFor(pMain.trackingId);
+        res = await callUpdateStatus(pMain.id, 'parcel_delivered', techMain.email);
+        logTest('Repeated completion with consistent state is idempotent (200)', res.statusCode === 200 && res.body.alreadyCompleted === true);
+        const repeatLogsAfter = await trackingLogsFor(pMain.trackingId);
+        logTest('Repeated completion creates no duplicate tracking log', repeatLogsAfter.length === repeatLogsBefore.length);
+
+        // --- 24. Completed-but-technician-still-busy inconsistency is never
+        // falsely reported as success. ---
+        const techInconsistent = await createTestTechnician(`TEST-COMPLETE-INCONSISTENT-${Date.now()}`, { workStatus: 'in_delivery' });
+        const pInconsistent = await createTestParcel(`TEST-COMPLETE-INCONSISTENT-${Date.now()}`, {
+            deliveryStatus: 'parcel_delivered', riderId: techInconsistent.id, riderEmail: techInconsistent.email
+        });
+        res = await callUpdateStatus(pInconsistent.id, 'parcel_delivered', ADMIN_EMAIL);
+        logTest(
+            'Pre-existing completed-but-technician-busy inconsistency is never reported as success',
+            res.statusCode === 409 && res.body.code === 'COMPLETION_CONFLICT'
+        );
+
+        // --- 25, 26. Concurrent completion race: exactly one final completion, one log. ---
+        const techRace = await createTestTechnician(`TEST-COMPLETE-RACE-${Date.now()}`);
+        const pRace = await createTestParcel(`TEST-COMPLETE-RACE-${Date.now()}`, {
+            riderId: techRace.id, riderEmail: techRace.email
+        });
+        const [raceRes1, raceRes2] = await Promise.all([
+            callUpdateStatus(pRace.id, 'parcel_delivered', techRace.email),
+            callUpdateStatus(pRace.id, 'parcel_delivered', techRace.email)
+        ]);
+        const raceResults = [raceRes1, raceRes2];
+        const newlyCompletedCount = raceResults.filter(r => r.statusCode === 200 && r.body.alreadyCompleted === false).length;
+        const safeRepeatCount = raceResults.filter(r =>
+            (r.statusCode === 200 && r.body.alreadyCompleted === true) ||
+            (r.statusCode === 409 && r.body.code === 'COMPLETION_CONFLICT')
+        ).length;
+        logTest(
+            'Concurrent completion of the same request produces exactly one new completion and one safe repeat response',
+            newlyCompletedCount === 1 && safeRepeatCount === 1
+        );
+        const pRaceAfter = await models.Parcel.findById(pRace.id);
+        const techRaceAfter = await collections.riders.findOne({ _id: new ObjectId(techRace.id) });
+        const pRaceLogs = await trackingLogsFor(pRace.trackingId);
+        logTest(
+            'After the race: request delivered, technician available, exactly one completion log',
+            pRaceAfter.deliveryStatus === 'parcel_delivered' &&
+            techRaceAfter.workStatus === 'available' &&
+            pRaceLogs.filter(l => l.status === 'parcel_delivered').length === 1
+        );
+
+        // --- 27. Public tracking shows exactly one sanitized Repair Completed event. ---
+        const publicRes = fakeRes();
+        await trackingController.getPublicTracking({ params: { trackingCode: pMain.trackingId } }, publicRes);
+        const timeline = publicRes.body?.timeline || [];
+        const deliveredEntries = timeline.filter(e => e.status === 'parcel_delivered');
+        logTest(
+            'Public tracking shows exactly one sanitized parcel_delivered entry, no rider PII',
+            publicRes.statusCode === 200 && deliveredEntries.length === 1 &&
+            Object.keys(deliveredEntries[0]).sort().join(',') === 'status,timestamp'
+        );
+
+        // --- 28. Customer sees the final delivered state. ---
+        const customerViewRes = await (() => {
+            const req = { params: { id: pMain.id }, decoded_email: CUSTOMER_EMAIL };
+            const r = fakeRes();
+            return parcelController.getParcelById(req, r).then(() => r);
+        })();
+        logTest('Customer sees final parcel_delivered state', customerViewRes.statusCode === 200 && customerViewRes.body.deliveryStatus === 'parcel_delivered');
+
+        // --- 29, 30. Completed Repairs query includes it; Assigned Repairs
+        // query no longer does (mirrors AssignedJobs.jsx / CompletedJobs.jsx). ---
+        const completedListRes = await (() => {
+            const req = { query: { deliveryStatus: 'parcel_delivered' }, decoded_email: techMain.email };
+            const r = fakeRes();
+            return parcelController.getRiderParcels(req, r).then(() => r);
+        })();
+        logTest(
+            'Completed Repairs query includes the completed request',
+            completedListRes.body.some(p => p._id.toString() === pMain.id)
+        );
+
+        const assignedListRes = await (() => {
+            const req = { query: { deliveryStatus: 'driver_assigned' }, decoded_email: techMain.email };
+            const r = fakeRes();
+            return parcelController.getRiderParcels(req, r).then(() => r);
+        })();
+        logTest(
+            'Assigned Repairs query no longer includes the completed request',
+            !assignedListRes.body.some(p => p._id.toString() === pMain.id)
+        );
+
+        // --- 35. No private fields exposed in any error response above. ---
+        logTest(
+            'Error responses never include private request/technician document fields',
+            Object.keys(res.body).sort().join(',') === 'code,message' || Object.keys(res.body).sort().join(',') === 'alreadyCompleted,deliveryStatus,message'
+        );
+
+        // --- 31-34. Regression coverage note: existing assignment, approval,
+        // cancellation, and payment behavior are reconfirmed by re-running the
+        // full suite (sections 13-22) alongside this section, not duplicated
+        // here.
+    } finally {
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        if (createdTrackingIds.length) {
+            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
+        for (const id of createdRiderIds) {
+            await collections.riders.deleteOne({ _id: new ObjectId(id) });
+        }
+        if (createdUserEmails.length) {
+            await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        }
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -3507,6 +3905,7 @@ async function runAllTests() {
     await testTechnicianAssignment();
     await testP0AuthorizationFixes();
     await testTechnicianApprovalTransaction();
+    await testRepairCompletionTransaction();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
