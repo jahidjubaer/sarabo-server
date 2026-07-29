@@ -7,6 +7,19 @@ const { VALID_STATUSES, isValidTransition } = require('../utils/parcelStatus');
 const { normalize } = require('../services/paymentProcessor');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
 const { getCancellationEligibility } = require('../services/cancellationPolicy');
+const { canAssignRequest } = require('../services/assignmentEligibility');
+const { escapeRegex, sanitizeSearchText } = require('../utils/searchSanitize');
+
+const ADMIN_LIST_DEFAULT_LIMIT = 10;
+const ADMIN_LIST_MAX_LIMIT = 50;
+const ADMIN_LIST_MAX_SEARCH_LENGTH = 100;
+// Every status the admin request-management filter accepts - deliberately
+// the same set utils/parcelStatus.js's VALID_STATUSES plus the two values
+// that can never appear in that list (the implicit initial 'pending-pickup'
+// and the terminal 'cancelled', neither of which is a client-settable
+// transition target for updateParcelStatus, but both of which are real,
+// filterable request states).
+const ADMIN_LIST_VALID_STATUSES = ['pending-pickup', 'driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered', 'cancelled'];
 
 class ParcelController {
     constructor(models, collections) {
@@ -93,6 +106,84 @@ class ParcelController {
             res.send(result);
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair status stats', error: error.message });
+        }
+    }
+
+    // Admin-only complete request-management view: paginated, searchable,
+    // filterable, and explicitly projected (see Parcel.findPaginated) so it
+    // never depends on the generic GET /parcels contract that MyRequests and
+    // AssignTechnicians already rely on. Every query parameter is validated
+    // against a fixed allow-list before being used to build the MongoDB
+    // filter - nothing from the client is ever passed through as a raw
+    // Mongo operator or field selector.
+    async getAdminParcels(req, res) {
+        try {
+            let { page, limit, search, status, paymentStatus, sort } = req.query;
+
+            page = parseInt(page, 10);
+            if (!Number.isInteger(page) || page < 1) {
+                page = 1;
+            }
+
+            limit = parseInt(limit, 10);
+            if (!Number.isInteger(limit) || limit < 1) {
+                limit = ADMIN_LIST_DEFAULT_LIMIT;
+            }
+            if (limit > ADMIN_LIST_MAX_LIMIT) {
+                limit = ADMIN_LIST_MAX_LIMIT;
+            }
+
+            const query = {};
+
+            if (status && status !== 'all' && ADMIN_LIST_VALID_STATUSES.includes(status)) {
+                query.deliveryStatus = status;
+            }
+
+            if (paymentStatus === 'paid') {
+                query.paymentStatus = 'paid';
+            } else if (paymentStatus === 'unpaid') {
+                query.paymentStatus = { $ne: 'paid' };
+            }
+
+            const searchText = sanitizeSearchText(search, ADMIN_LIST_MAX_SEARCH_LENGTH);
+            if (searchText) {
+                const pattern = { $regex: escapeRegex(searchText), $options: 'i' };
+                query.$or = [
+                    { trackingId: pattern },
+                    { senderEmail: pattern },
+                    { senderName: pattern },
+                    { parcelName: pattern }
+                ];
+            }
+
+            const sortDirection = sort === 'oldest' ? 1 : -1;
+
+            const { data, totalItems } = await this.Parcel.findPaginated(query, {
+                page,
+                limit,
+                sort: { createdAt: sortDirection }
+            });
+
+            const enrichedData = data.map(parcel => ({
+                ...parcel,
+                canAssign: canAssignRequest(parcel)
+            }));
+
+            const totalPages = Math.max(Math.ceil(totalItems / limit), 1);
+
+            res.send({
+                data: enrichedData,
+                pagination: {
+                    page,
+                    limit,
+                    totalItems,
+                    totalPages,
+                    hasNextPage: page < totalPages,
+                    hasPreviousPage: page > 1
+                }
+            });
+        } catch (error) {
+            res.status(500).send({ message: 'Error fetching admin repair requests', error: error.message });
         }
     }
 

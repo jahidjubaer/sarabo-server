@@ -16,6 +16,12 @@ function parcelRoutes(app, controllers) {
     // Get repair status stats (admin only)
     app.get('/parcels/delivery-status/stats', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.getDeliveryStatusStats(req, res));
 
+    // Admin request-management list - paginated/searchable/filterable,
+    // deliberately separate from GET /parcels above (whose flat-array
+    // response shape is already relied on by MyRequests and
+    // AssignTechnicians and is not changed by this route).
+    app.get('/admin/parcels', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.getAdminParcels(req, res));
+
     // Create new repair request
     app.post('/parcels', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.createParcel(req, res));
 

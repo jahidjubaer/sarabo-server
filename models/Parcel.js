@@ -11,6 +11,45 @@ class ParcelModel {
         return await cursor.toArray();
     }
 
+    // Explicit inclusion projection for the admin request-management list -
+    // only these fields are ever allowed to leave MongoDB for that view,
+    // independent of whatever else is later added to a repair-request
+    // document. Never includes Stripe/session internals, technician
+    // application fields (NID etc. live on the riders collection, never
+    // here), or unrelated address/notes detail - those remain available only
+    // through the existing single-request detail endpoint.
+    static ADMIN_LIST_PROJECTION = {
+        _id: 1,
+        trackingId: 1,
+        senderName: 1,
+        senderEmail: 1,
+        parcelName: 1,
+        deliveryStatus: 1,
+        paymentStatus: 1,
+        cost: 1,
+        riderName: 1,
+        riderEmail: 1,
+        createdAt: 1
+    };
+
+    // Paginated, projected, count-consistent list for the admin request
+    // management view. `query` must already be a safe, server-built filter
+    // (see controllers/parcelController.js's getAdminParcels) - this method
+    // never interprets or trusts raw client input itself.
+    async findPaginated(query, { page, limit, sort = { createdAt: -1 } }) {
+        const skip = (page - 1) * limit;
+        const [data, totalItems] = await Promise.all([
+            this.collection
+                .find(query, { projection: ParcelModel.ADMIN_LIST_PROJECTION })
+                .sort(sort)
+                .skip(skip)
+                .limit(limit)
+                .toArray(),
+            this.collection.countDocuments(query)
+        ]);
+        return { data, totalItems };
+    }
+
     async findById(id) {
         const query = { _id: new ObjectId(id) };
         return await this.collection.findOne(query);

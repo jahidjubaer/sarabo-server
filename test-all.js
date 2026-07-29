@@ -3716,6 +3716,265 @@ async function testRepairCompletionTransaction() {
     console.log('');
 }
 
+// Phase 4.0 Unit 1: Admin Manage Repair Requests. Exercises the new
+// GET /admin/parcels list - authorization (real HTTP anonymous rejection,
+// verifyAdmin role gating), pagination defaults/limits/invalid-input
+// handling, safe search (including regex-metacharacter escaping and length
+// capping), status/payment filters (valid, invalid, combined), response
+// projection, and the display-only canAssign flag. Fixtures are inserted
+// directly into the parcels collection (this is a pure read/list path, so a
+// full create->assign->pay lifecycle isn't needed to exercise it) and are
+// all tagged with one shared TEST- marker so `search: marker` scopes every
+// sub-test to exactly these fixtures, never real data.
+async function testAdminParcelsList() {
+    console.log('23. Testing Admin Manage Repair Requests List');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { verifyAdmin } = require('./middleware/auth');
+    const { ObjectId } = require('mongodb');
+
+    const marker = `TEST-ADMIN-LIST-${Date.now()}`;
+    const createdParcelIds = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    async function callVerifyAdmin(decoded_email) {
+        const req = { collections, decoded_email };
+        const res = fakeRes();
+        let nextCalled = false;
+        await verifyAdmin(req, res, () => { nextCalled = true; });
+        return { res, nextCalled };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const parcelController = controllers.parcel;
+
+        function callGetAdminParcels(query = {}) {
+            const req = { query, decoded_email: ADMIN_EMAIL };
+            const res = fakeRes();
+            return parcelController.getAdminParcels(req, res).then(() => res);
+        }
+
+        async function insertFixture(suffix, overrides = {}) {
+            const now = new Date();
+            const doc = {
+                parcelName: `${marker}-${suffix}`,
+                senderName: `${marker} Customer ${suffix}`,
+                senderEmail: `${marker.toLowerCase()}-${suffix.toLowerCase()}@example.com`,
+                trackingId: `${marker}-TRK-${suffix}`,
+                deliveryStatus: 'pending-pickup',
+                cost: 100,
+                createdAt: now,
+                ...overrides
+            };
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        // Staggered createdAt so newest-first sorting is actually verifiable
+        // (insertion order alone doesn't guarantee distinct timestamps).
+        const base = Date.now();
+        const f1 = await insertFixture('F1', { createdAt: new Date(base - 50000) }); // pending-pickup, unpaid, unassigned
+        const f2 = await insertFixture('F2', { createdAt: new Date(base - 40000), deliveryStatus: 'driver_assigned', riderName: 'Test Tech', riderEmail: RIDER_EMAIL }); // assigned
+        const f3 = await insertFixture('F3', { createdAt: new Date(base - 30000), deliveryStatus: 'parcel_delivered', paymentStatus: 'paid', riderName: 'Test Tech', riderEmail: RIDER_EMAIL }); // completed, paid
+        const f4 = await insertFixture('F4', { createdAt: new Date(base - 20000), deliveryStatus: 'cancelled' }); // cancelled
+        const f5 = await insertFixture('F5', { createdAt: new Date(base - 10000), paymentStatus: 'paid' }); // pending-pickup but already paid
+        const f6 = await insertFixture('REGEX-(SPECIAL)', { createdAt: new Date(base) }); // regex-metacharacter marker
+
+        // ===== Authorization =====
+
+        // --- 1. Anonymous rejected (real HTTP, real middleware chain). ---
+        await makeRequest(
+            { hostname: 'localhost', port: 3000, path: '/admin/parcels', method: 'GET' },
+            401,
+            'GET /admin/parcels (no auth) rejected'
+        );
+
+        // --- 2, 3, 4. Role enforcement via the real verifyAdmin middleware. ---
+        let mw = await callVerifyAdmin(CUSTOMER_EMAIL);
+        logTest('GET /admin/parcels: customer rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
+
+        mw = await callVerifyAdmin(RIDER_EMAIL);
+        logTest('GET /admin/parcels: technician rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
+
+        mw = await callVerifyAdmin(ADMIN_EMAIL);
+        logTest('GET /admin/parcels: admin allowed through verifyAdmin', mw.nextCalled === true);
+
+        // --- 5. Admin request succeeds end-to-end. ---
+        let res = await callGetAdminParcels({ search: marker });
+        logTest('Admin request returns 200 with data/pagination shape', Array.isArray(res.body?.data) && !!res.body?.pagination);
+
+        // ===== Sorting & pagination =====
+
+        // --- 6. Default newest-first sort. ---
+        const orderedIds = res.body.data.map(p => p._id.toString());
+        const expectedNewestFirst = [f6.id, f5.id, f4.id, f3.id, f2.id, f1.id];
+        logTest('Default sort is newest-first', JSON.stringify(orderedIds) === JSON.stringify(expectedNewestFirst));
+
+        // --- 7. Pagination defaults. ---
+        logTest('Pagination defaults to page 1, limit 10', res.body.pagination.page === 1 && res.body.pagination.limit === 10);
+
+        // --- 8. Maximum limit enforced. ---
+        res = await callGetAdminParcels({ search: marker, limit: 999 });
+        logTest('Limit above the cap is clamped to 50', res.body.pagination.limit === 50);
+
+        // --- 9. Invalid page controlled. ---
+        res = await callGetAdminParcels({ search: marker, page: 'not-a-number' });
+        logTest('Invalid page value defaults safely to page 1', res.body.pagination.page === 1);
+        res = await callGetAdminParcels({ search: marker, page: -5 });
+        logTest('Negative page value defaults safely to page 1', res.body.pagination.page === 1);
+
+        // --- 10. Invalid limit controlled. ---
+        res = await callGetAdminParcels({ search: marker, limit: 'not-a-number' });
+        logTest('Invalid limit value defaults safely to 10', res.body.pagination.limit === 10);
+        res = await callGetAdminParcels({ search: marker, limit: 0 });
+        logTest('Zero/invalid limit value defaults safely to 10', res.body.pagination.limit === 10);
+
+        // --- 11. Empty result controlled. ---
+        res = await callGetAdminParcels({ search: `${marker}-NO-SUCH-FIXTURE-EXISTS` });
+        logTest(
+            'Search with no matches returns an empty, well-formed result (no error)',
+            Array.isArray(res.body.data) && res.body.data.length === 0 && res.body.pagination.totalItems === 0
+        );
+
+        // ===== Search =====
+
+        // --- 12. Search by tracking code. ---
+        res = await callGetAdminParcels({ search: f1.trackingId });
+        logTest('Search by tracking code finds the matching request', res.body.data.some(p => p._id.toString() === f1.id));
+
+        // --- 13. Search by customer email. ---
+        res = await callGetAdminParcels({ search: f2.senderEmail });
+        logTest('Search by customer email finds the matching request', res.body.data.some(p => p._id.toString() === f2.id));
+
+        // --- 14. Case-insensitive search. ---
+        res = await callGetAdminParcels({ search: f3.senderEmail.toUpperCase() });
+        logTest('Search is case-insensitive', res.body.data.some(p => p._id.toString() === f3.id));
+
+        // --- 15. Regex special characters are escaped (literal match, no
+        // crash, and no unintended broad match). ---
+        res = await callGetAdminParcels({ search: `${marker}-REGEX-(SPECIAL)` });
+        logTest(
+            'Regex special characters in search are escaped and matched literally',
+            res.body.data.length === 1 && res.body.data[0]._id.toString() === f6.id
+        );
+
+        // --- 16. Excessively long search is capped, not rejected/crashed. ---
+        const longSearch = marker + '-'.repeat(500);
+        res = await callGetAdminParcels({ search: longSearch });
+        logTest('Excessively long search input is handled safely (no crash)', res.statusCode !== 500 && Array.isArray(res.body.data));
+
+        // ===== Status filter =====
+
+        // --- 17. Valid status filter. ---
+        res = await callGetAdminParcels({ search: marker, status: 'cancelled' });
+        logTest(
+            'Valid status filter returns only matching requests',
+            res.body.data.length === 1 && res.body.data[0]._id.toString() === f4.id
+        );
+
+        // --- 18. Invalid status is safely ignored (not a 500, not an
+        // unfiltered-crash - just falls back to no status filter). ---
+        res = await callGetAdminParcels({ search: marker, status: 'totally-invalid-status' });
+        logTest('Invalid status filter is safely ignored (no crash)', res.statusCode !== 500 && res.body.data.length === 6);
+
+        // --- 19, 24. Cancelled and completed requests are both reachable. ---
+        res = await callGetAdminParcels({ search: marker, status: 'parcel_delivered' });
+        logTest('Completed (parcel_delivered) request is included when requested', res.body.data.some(p => p._id.toString() === f3.id));
+
+        // ===== Payment filter =====
+
+        // --- 20. Paid filter. ---
+        res = await callGetAdminParcels({ search: marker, paymentStatus: 'paid' });
+        const paidIds = res.body.data.map(p => p._id.toString()).sort();
+        logTest('Paid filter returns exactly the paid fixtures', JSON.stringify(paidIds) === JSON.stringify([f3.id, f5.id].sort()));
+
+        // --- 21. Unpaid filter. ---
+        res = await callGetAdminParcels({ search: marker, paymentStatus: 'unpaid' });
+        const unpaidIds = res.body.data.map(p => p._id.toString()).sort();
+        logTest('Unpaid filter returns exactly the unpaid/unset fixtures', JSON.stringify(unpaidIds) === JSON.stringify([f1.id, f2.id, f4.id, f6.id].sort()));
+
+        // --- 22. Combined search + status. ---
+        res = await callGetAdminParcels({ search: f2.parcelName, status: 'driver_assigned' });
+        logTest('Combined search + status filter narrows correctly', res.body.data.length === 1 && res.body.data[0]._id.toString() === f2.id);
+
+        // --- 23. Combined status + payment. ---
+        res = await callGetAdminParcels({ search: marker, status: 'pending-pickup', paymentStatus: 'paid' });
+        logTest('Combined status + payment filter narrows correctly', res.body.data.length === 1 && res.body.data[0]._id.toString() === f5.id);
+
+        // --- 25. Total count matches the same filter used for data. ---
+        res = await callGetAdminParcels({ search: marker, limit: 2 });
+        const directCount = await collections.parcels.countDocuments({ $or: [
+            { trackingId: { $regex: marker, $options: 'i' } },
+            { senderEmail: { $regex: marker, $options: 'i' } },
+            { senderName: { $regex: marker, $options: 'i' } },
+            { parcelName: { $regex: marker, $options: 'i' } }
+        ] });
+        logTest(
+            'Total count reflects the same filter as the paginated data, independent of limit',
+            res.body.pagination.totalItems === directCount && res.body.data.length === 2
+        );
+
+        // ===== Projection =====
+
+        // --- 26. Private payment/session fields excluded. ---
+        res = await callGetAdminParcels({ search: marker });
+        const forbiddenPaymentFields = ['sessionId', 'stripeSessionId', 'paymentIntentId'];
+        const noPaymentInternals = res.body.data.every(p => forbiddenPaymentFields.every(f => !(f in p)));
+        logTest('Private payment/session fields are excluded from every row', noPaymentInternals);
+
+        // --- 27. Technician NID/private application fields excluded. ---
+        const forbiddenTechFields = ['nid', 'license', 'address', 'district', 'region'];
+        const noTechInternals = res.body.data.every(p => forbiddenTechFields.every(f => !(f in p)));
+        logTest('Technician NID/private application fields are excluded from every row', noTechInternals);
+
+        // ===== canAssign =====
+
+        // --- 28. canAssign true only for eligible (pending-pickup,
+        // unassigned) requests. ---
+        const f1Row = res.body.data.find(p => p._id.toString() === f1.id);
+        const f5Row = res.body.data.find(p => p._id.toString() === f5.id);
+        logTest('canAssign is true for an unassigned pending-pickup request', f1Row?.canAssign === true);
+        logTest('canAssign is true for a paid-but-unassigned pending-pickup request (payment is not an assignment requirement)', f5Row?.canAssign === true);
+
+        // --- 29. Assigned/progressed/cancelled requests return canAssign
+        // false. ---
+        const f2Row = res.body.data.find(p => p._id.toString() === f2.id);
+        const f3Row = res.body.data.find(p => p._id.toString() === f3.id);
+        const f4Row = res.body.data.find(p => p._id.toString() === f4.id);
+        logTest('canAssign is false for an assigned (driver_assigned) request', f2Row?.canAssign === false);
+        logTest('canAssign is false for a completed (parcel_delivered) request', f3Row?.canAssign === false);
+        logTest('canAssign is false for a cancelled request', f4Row?.canAssign === false);
+
+        // --- 30, 31, 32. Regression coverage note: existing assignment,
+        // authorization, and payment/cancellation/approval/completion
+        // behavior are reconfirmed by re-running the full suite alongside
+        // this new section, not duplicated here.
+    } finally {
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        const remaining = await collections.parcels.countDocuments({ parcelName: { $regex: `^${marker}` } });
+        logTest('No admin-list test fixtures remain after cleanup', remaining === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -3742,6 +4001,7 @@ async function runAllTests() {
         { path: '/payments', name: 'GET /payments' },
         { path: '/parcels/delivery-status/stats', name: 'GET /parcels/delivery-status/stats' },
         { path: '/riders/delivery-per-day', name: 'GET /riders/delivery-per-day' },
+        { path: '/admin/parcels', name: 'GET /admin/parcels' },
     ];
 
     for (const endpoint of protectedEndpoints) {
@@ -3906,6 +4166,7 @@ async function runAllTests() {
     await testP0AuthorizationFixes();
     await testTechnicianApprovalTransaction();
     await testRepairCompletionTransaction();
+    await testAdminParcelsList();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
