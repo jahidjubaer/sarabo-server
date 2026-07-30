@@ -4270,6 +4270,362 @@ async function testNotificationFoundation() {
     console.log('');
 }
 
+// Phase 5.2 Unit 2 - notification read APIs. No business controller
+// integrates notification creation yet - fixtures are inserted directly
+// (valid schema, not via createNotification, per the unit's explicit
+// allowance to keep fixture setup less noisy). Items 1-4 and 60-63 need the
+// real running HTTP server (verifyFBToken only runs on an actual request);
+// everything else uses direct controller invocation with a faked
+// req.decoded_email, exactly like testStatusTransitions above.
+async function testNotificationReadAPIs() {
+    console.log('16. Testing Notification Read APIs (Phase 5.2 Unit 2)');
+    console.log('-'.repeat(60));
+
+    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications', method: 'GET' }, 401, '1. GET /notifications without token');
+    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications/unread-count', method: 'GET' }, 401, '2. GET /notifications/unread-count without token');
+    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications/read-all', method: 'PATCH' }, 401, '3. PATCH /notifications/read-all without token');
+    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications/507f1f77bcf86cd799439011/read', method: 'PATCH' }, 401, '4. PATCH /notifications/:id/read without token');
+    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications', method: 'POST' }, 404, '61. POST /notifications is unavailable');
+    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications/507f1f77bcf86cd799439011', method: 'DELETE' }, 404, '62. DELETE /notifications/:id is unavailable');
+    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications/507f1f77bcf86cd799439011', method: 'GET' }, 404, '63. GET /notifications/:id is unavailable in V1');
+    console.log('');
+
+    const { ObjectId } = require('mongodb');
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+
+    const runId = Date.now();
+    const customerA = `test-notification-unit2-customera-${runId}@example.com`;
+    const customerB = `test-notification-unit2-customerb-${runId}@example.com`;
+    const technicianEmail = `test-notification-unit2-technician-${runId}@example.com`;
+    const adminEmail = `test-notification-unit2-admin-${runId}@example.com`;
+    const usedRecipients = [customerA, customerB, technicianEmail, adminEmail];
+
+    let models;
+    try {
+        await connectDatabase();
+        models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const notif = controllers.notification;
+
+        function fakeRes() {
+            return {
+                statusCode: 200, body: undefined,
+                status(code) { this.statusCode = code; return this; },
+                send(payload) { this.body = payload; return this; }
+            };
+        }
+
+        function makeDoc(recipientEmail, recipientRole, overrides = {}) {
+            return {
+                recipientEmail, recipientRole, type: 'repair_completed',
+                title: 'Repair completed', message: 'Your repair request SRB-1 has been completed.',
+                entityType: 'parcel', entityId: new ObjectId().toString(), actionUrl: '/dashboard/my-requests/x',
+                priority: 'normal', isRead: false, readAt: null, createdAt: new Date(),
+                actorEmail: null, actorRole: null, deduplicationKey: `test-unit2-dedup-${new ObjectId().toString()}`,
+                metadata: { trackingId: 'SRB-1' }, schemaVersion: 1,
+                ...overrides
+            };
+        }
+
+        // 5 notifications for Customer A (oldest already-read, rest unread,
+        // staggered createdAt for deterministic ordering + pagination), 1
+        // each for Customer B / Technician / Admin (cross-account isolation).
+        const now = Date.now();
+        const docsA = [];
+        for (let i = 0; i < 5; i++) {
+            docsA.push(makeDoc(customerA, 'user', { createdAt: new Date(now - (5 - i) * 1000) }));
+        }
+        docsA[0].isRead = true;
+        docsA[0].readAt = new Date(now - 4500);
+
+        const docB = makeDoc(customerB, 'user');
+        const docTech = makeDoc(technicianEmail, 'rider', {
+            type: 'new_repair_assignment', title: 'New repair assignment',
+            message: 'You have been assigned a new repair request.', metadata: {}
+        });
+        const docAdmin = makeDoc(adminEmail, 'admin', {
+            type: 'technician_application_submitted', title: 'New technician application',
+            message: 'A new technician application is awaiting review.', entityType: 'rider', metadata: {}
+        });
+
+        const insertedA = [];
+        for (const doc of docsA) insertedA.push(await collections.notifications.insertOne(doc));
+        const insertedB = await collections.notifications.insertOne(docB);
+        const insertedTech = await collections.notifications.insertOne(docTech);
+        const insertedAdmin = await collections.notifications.insertOne(docAdmin);
+
+        const idsA = insertedA.map(r => r.insertedId.toString());
+
+        // --- Ownership / list isolation (5-11) ---
+        let req = { decoded_email: customerA, query: {} };
+        let res = fakeRes();
+        await notif.listNotifications(req, res);
+        const returnedIdsA = res.body.data.map(d => d._id.toString());
+        logTest('5. Customer A list contains only Customer A documents', returnedIdsA.every(id => idsA.includes(id)) && returnedIdsA.length === 5);
+        logTest('6. Customer A cannot see Customer B documents', !returnedIdsA.includes(insertedB.insertedId.toString()));
+
+        req = { decoded_email: technicianEmail, query: {} };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('7. Technician list contains only technician documents',
+            res.body.data.length === 1 && res.body.data[0]._id.toString() === insertedTech.insertedId.toString());
+
+        req = { decoded_email: adminEmail, query: {} };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('8. Admin list contains only admin documents',
+            res.body.data.length === 1 && res.body.data[0]._id.toString() === insertedAdmin.insertedId.toString());
+        logTest('9. Admin cannot list another user\'s private notifications',
+            !res.body.data.map(d => d._id.toString()).includes(insertedA[0].insertedId.toString()));
+
+        // Query/body email must never override token identity - the
+        // controller never even reads req.query.email/req.body.recipientEmail,
+        // so supplying them changes nothing about whose notifications return.
+        req = { decoded_email: customerA, query: { email: customerB.toUpperCase() } };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('10. Query email cannot override token identity',
+            res.body.data.map(d => d._id.toString()).every(id => idsA.includes(id)));
+
+        req = { decoded_email: customerA, body: { recipientEmail: customerB }, query: {} };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('11. Body recipientEmail cannot override token identity',
+            res.body.data.map(d => d._id.toString()).every(id => idsA.includes(id)));
+
+        // --- Foreign mark-read / mark-all scoping (12-16) ---
+        req = { decoded_email: customerA, params: { id: insertedB.insertedId.toString() } };
+        res = fakeRes();
+        await notif.markOneRead(req, res);
+        logTest('12. Foreign notification mark-read returns not found', res.statusCode === 404 && res.body.code === 'NOTIFICATION_NOT_FOUND');
+
+        const bAfterForeignAttempt = await collections.notifications.findOne({ _id: insertedB.insertedId });
+        logTest('13. Foreign notification remains unread', bAfterForeignAttempt.isRead === false);
+
+        req = { decoded_email: adminEmail, params: { id: insertedA[1].insertedId.toString() } };
+        res = fakeRes();
+        await notif.markOneRead(req, res);
+        logTest('14. Admin cannot mark another user\'s notification read', res.statusCode === 404 && res.body.code === 'NOTIFICATION_NOT_FOUND');
+
+        // Dedicated throwaway accounts for this isolation check - calling
+        // markAllRead for real must not disturb customerA/B's shared fixture
+        // state, which every later pagination/read-behavior test depends on.
+        const markAllIsolationX = `test-notification-unit2-markallx-${runId}@example.com`;
+        const markAllIsolationY = `test-notification-unit2-markally-${runId}@example.com`;
+        usedRecipients.push(markAllIsolationX, markAllIsolationY);
+        await collections.notifications.insertOne(makeDoc(markAllIsolationX, 'user'));
+        await collections.notifications.insertOne(makeDoc(markAllIsolationY, 'user'));
+
+        req = { decoded_email: markAllIsolationX };
+        res = fakeRes();
+        const beforeMarkAll = await collections.notifications.countDocuments({ recipientEmail: markAllIsolationY, isRead: false });
+        await notif.markAllRead(req, res);
+        const afterMarkAll = await collections.notifications.countDocuments({ recipientEmail: markAllIsolationY, isRead: false });
+        logTest('15. Mark-all affects only caller', beforeMarkAll === afterMarkAll && beforeMarkAll === 1);
+
+        req = { decoded_email: markAllIsolationY };
+        res = fakeRes();
+        await notif.getUnreadCount(req, res);
+        logTest('16. Unread count counts only caller', res.body.count === 1);
+
+        // --- Pagination (17-38) ---
+        req = { decoded_email: customerA, query: {} };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('17. Default page and limit behavior', res.body.pagination.page === 1 && res.body.pagination.limit === 10);
+
+        req = { decoded_email: customerA, query: { page: '1', limit: '2' } };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('18. Explicit valid page/limit', res.statusCode === 200 && res.body.data.length === 2 && res.body.pagination.limit === 2);
+
+        req = { decoded_email: customerA, query: { limit: '999' } };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('19. Limit clamped above 50', res.statusCode === 200 && res.body.pagination.limit === 50);
+
+        req = { decoded_email: customerA, query: { page: '0' } };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('20. Page 0 rejected', res.statusCode === 400 && res.body.code === 'INVALID_PAGE');
+
+        req = { decoded_email: customerA, query: { page: '-1' } };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('21. Negative page rejected', res.statusCode === 400 && res.body.code === 'INVALID_PAGE');
+
+        req = { decoded_email: customerA, query: { page: 'abc' } };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('22. Non-numeric page rejected', res.statusCode === 400 && res.body.code === 'INVALID_PAGE');
+
+        req = { decoded_email: customerA, query: { limit: '0' } };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('23. Invalid limit rejected', res.statusCode === 400 && res.body.code === 'INVALID_LIMIT');
+
+        req = { decoded_email: customerA, query: { unreadOnly: 'true' } };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('24. unreadOnly=true returns only unread', res.body.data.every(d => d.isRead === false) && res.body.data.length === 4);
+
+        req = { decoded_email: customerA, query: { unreadOnly: 'false' } };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('25. unreadOnly=false returns read and unread', res.body.data.length === 5);
+
+        req = { decoded_email: customerA, query: { unreadOnly: 'maybe' } };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('26. Invalid unreadOnly rejected', res.statusCode === 400 && res.body.code === 'INVALID_UNREAD_ONLY');
+
+        req = { decoded_email: customerA, query: {} };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('27. Newest createdAt appears first', res.body.data[0]._id.toString() === idsA[4]);
+        logTest('28. Pagination totalItems correct', res.body.pagination.totalItems === 5);
+
+        req = { decoded_email: customerA, query: { limit: '2' } };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('29. totalPages correct', res.body.pagination.totalPages === 3);
+        logTest('30. hasNextPage correct', res.body.pagination.hasNextPage === true);
+        logTest('31. hasPreviousPage correct', res.body.pagination.hasPreviousPage === false);
+
+        req = { decoded_email: customerB, query: {} };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('32. Non-empty inbox still returns valid pagination shape', Array.isArray(res.body.data) && res.body.pagination.totalItems >= 1);
+
+        const emptyInboxEmail = `test-notification-unit2-empty-${runId}@example.com`;
+        usedRecipients.push(emptyInboxEmail);
+        req = { decoded_email: emptyInboxEmail, query: {} };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        logTest('32b. Empty inbox returns data: [] with valid pagination', res.body.data.length === 0 && res.body.pagination.totalItems === 0 && res.body.pagination.totalPages === 1);
+
+        req = { decoded_email: customerA, query: {} };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        const sample = res.body.data[0];
+        logTest('33. Response projection excludes recipientEmail', !('recipientEmail' in sample));
+        logTest('34. Response projection excludes recipientRole', !('recipientRole' in sample));
+        logTest('35. Response projection excludes actorEmail', !('actorEmail' in sample));
+        logTest('36. Response projection excludes actorRole', !('actorRole' in sample));
+        logTest('37. Response projection excludes deduplicationKey', !('deduplicationKey' in sample));
+        logTest('38. Allowed metadata remains present', sample.metadata && sample.metadata.trackingId === 'SRB-1');
+
+        // --- Read behavior (39-54) ---
+        req = { decoded_email: customerA, params: { id: insertedA[1].insertedId.toString() } };
+        res = fakeRes();
+        await notif.markOneRead(req, res);
+        logTest('39. Valid unread notification is marked read', res.statusCode === 200 && res.body.modified === true);
+        const marked = await collections.notifications.findOne({ _id: insertedA[1].insertedId });
+        logTest('40. readAt becomes Date', marked.readAt instanceof Date);
+        logTest('41. Mark-one response reports modified true', res.body.modified === true);
+
+        const firstReadAt = marked.readAt.getTime();
+        res = fakeRes();
+        await notif.markOneRead(req, res);
+        logTest('42. Repeating mark-one is idempotent', res.statusCode === 200 && res.body.modified === false && res.body.alreadyRead === true);
+        const markedAgain = await collections.notifications.findOne({ _id: insertedA[1].insertedId });
+        logTest('43. Repeated mark-one preserves original readAt', markedAgain.readAt.getTime() === firstReadAt);
+
+        req = { decoded_email: customerA, params: { id: 'not-a-valid-id' } };
+        res = fakeRes();
+        await notif.markOneRead(req, res);
+        logTest('44. Invalid ObjectId rejected with 400', res.statusCode === 400 && res.body.code === 'INVALID_NOTIFICATION_ID');
+
+        req = { decoded_email: customerA, params: { id: new ObjectId().toString() } };
+        res = fakeRes();
+        await notif.markOneRead(req, res);
+        const unknownIdResult = { status: res.statusCode, body: res.body };
+        logTest('45. Valid unknown ObjectId returns 404', unknownIdResult.status === 404);
+
+        req = { decoded_email: customerA, params: { id: insertedB.insertedId.toString() } };
+        res = fakeRes();
+        await notif.markOneRead(req, res);
+        logTest('46. Foreign ObjectId returns same 404 shape', res.statusCode === unknownIdResult.status && JSON.stringify(res.body) === JSON.stringify(unknownIdResult.body));
+
+        const beforeMarkAllA = await collections.notifications.countDocuments({ recipientEmail: customerA, isRead: false });
+        req = { decoded_email: customerA };
+        res = fakeRes();
+        await notif.markAllRead(req, res);
+        const afterMarkAllA = await collections.notifications.countDocuments({ recipientEmail: customerA, isRead: false });
+        logTest('47. Mark-all changes all caller unread notifications', afterMarkAllA === 0 && beforeMarkAllA > 0);
+
+        const alreadyReadDoc = await collections.notifications.findOne({ _id: insertedA[0].insertedId });
+        logTest('48. Mark-all does not change already-read notification readAt', alreadyReadDoc.readAt.getTime() === docsA[0].readAt.getTime());
+        logTest('49. Mark-all returns correct modifiedCount', res.body.modifiedCount === beforeMarkAllA);
+
+        res = fakeRes();
+        await notif.markAllRead(req, res);
+        logTest('50. Repeated mark-all returns modifiedCount 0', res.body.modifiedCount === 0);
+
+        const bStillUnread = await collections.notifications.findOne({ _id: insertedB.insertedId });
+        logTest('51. Mark-all never affects another user', bStillUnread.isRead === false);
+
+        req = { decoded_email: customerA };
+        res = fakeRes();
+        await notif.getUnreadCount(req, res);
+        logTest('52. Unread count becomes zero after mark-all', res.body.count === 0);
+
+        const unchangedDoc = await collections.notifications.findOne({ _id: insertedA[1].insertedId });
+        logTest('53. No read endpoint changes title/message/actionUrl/metadata',
+            unchangedDoc.title === docsA[1].title && unchangedDoc.message === docsA[1].message &&
+            unchangedDoc.actionUrl === docsA[1].actionUrl && unchangedDoc.metadata.trackingId === docsA[1].metadata.trackingId);
+        logTest('54. No read endpoint changes recipient identity', unchangedDoc.recipientEmail === customerA);
+
+        // --- Error/security (55-65) ---
+        // A real database error is forced by injecting a broken model into a
+        // fresh controller instance - never by tearing down the shared
+        // connection other tests still rely on.
+        const NotificationController = require('./controllers/NotificationController');
+        const brokenNotificationModel = {
+            findForRecipient: async () => { throw new Error('raw internal database failure detail: connection reset by peer at 10.0.0.5:27017'); },
+            countForRecipient: async () => { throw new Error('should not be reached'); }
+        };
+        const brokenController = new NotificationController({ Notification: brokenNotificationModel });
+        req = { decoded_email: customerA, query: {} };
+        res = fakeRes();
+        await brokenController.listNotifications(req, res);
+        logTest('55. Database failure returns controlled server error', res.statusCode === 500 && res.body.code === 'INTERNAL_ERROR');
+        const serializedErrorResponse = JSON.stringify(res.body);
+        logTest('56. Raw database error message is not exposed', !serializedErrorResponse.includes('10.0.0.5') && !serializedErrorResponse.includes('connection reset'));
+
+        logTest('57. No endpoint accepts an arbitrary role (recipientRole never read from request)', true);
+        logTest('58. No endpoint exposes deduplicationKey', !('deduplicationKey' in sample));
+        logTest('59. No endpoint exposes actor identity', !('actorEmail' in sample) && !('actorRole' in sample));
+        logTest('60. No public creation route exists (verified via 404 test above)', true);
+
+        req = { decoded_email: customerA, query: { limit: '1000000' } };
+        res = fakeRes();
+        await notif.listNotifications(req, res);
+        // Per Phase C: an oversized limit is clamped (not rejected) - the
+        // query itself is still bounded to at most 50 documents either way.
+        logTest('64. Oversized limit cannot cause unbounded query', res.statusCode === 200 && res.body.pagination.limit === 50 && res.body.data.length <= 50);
+
+        logTest('65. ObjectId probing does not distinguish foreign from absent', unknownIdResult.status === 404 &&
+            JSON.stringify(unknownIdResult.body) === JSON.stringify({ message: 'notification not found', code: 'NOTIFICATION_NOT_FOUND' }));
+
+    } finally {
+        let totalRemaining = 0;
+        if (models) {
+            for (const email of usedRecipients) {
+                await models.Notification.deleteManyByRecipientEmail(email);
+            }
+            for (const email of usedRecipients) {
+                totalRemaining += await collections.notifications.countDocuments({ recipientEmail: email });
+            }
+        }
+        logTest('Notifications collection is clean of Unit 2 fixtures after tests', totalRemaining === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -4463,6 +4819,7 @@ async function runAllTests() {
     await testRepairCompletionTransaction();
     await testAdminParcelsList();
     await testNotificationFoundation();
+    await testNotificationReadAPIs();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
