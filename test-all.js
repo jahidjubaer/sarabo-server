@@ -3975,6 +3975,301 @@ async function testAdminParcelsList() {
     console.log('');
 }
 
+// Phase 5.2 Unit 1 - notification server foundation. No business controller
+// integrates notifications yet (that is a later unit) - these tests exercise
+// the event registry, createNotification helper, model, and indexes in
+// isolation, against the same shared local dev database used above. Test
+// recipient emails use a lowercase `test-notification-unit1-` marker
+// (recipientEmail is normalized/lowercased by createNotification itself, so
+// an uppercase TEST- marker would silently mismatch on cleanup lookups).
+async function testNotificationFoundation() {
+    console.log('15. Testing Notification Server Foundation (Phase 5.2 Unit 1)');
+    console.log('-'.repeat(60));
+
+    const { ObjectId } = require('mongodb');
+    const { connectDatabase, collections, client } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { NOTIFICATION_EVENTS, ENTITY_TYPES } = require('./utils/notificationEvents');
+    const { createNotificationService } = require('./services/notificationService');
+
+    const runId = Date.now();
+    const testRecipient = (suffix) => `test-notification-unit1-${suffix}-${runId}@example.com`;
+    const usedRecipients = new Set();
+    let models;
+
+    try {
+        await connectDatabase();
+        models = initializeModels(collections);
+        const { createNotification } = createNotificationService(models);
+        const fakeParcelId = new ObjectId().toString();
+        const fakeRiderId = new ObjectId().toString();
+
+        // --- Constants/templates (1-8) ---
+        const expectedTypes = [
+            'technician_application_submitted', 'technician_application_approved', 'technician_application_rejected',
+            'technician_assigned', 'new_repair_assignment', 'technician_on_the_way',
+            'repair_in_progress', 'repair_completed', 'payment_confirmed'
+        ];
+        const actualTypes = Object.keys(NOTIFICATION_EVENTS);
+        logTest('1. All 9 event types exist', actualTypes.length === 9 && expectedTypes.every(t => actualTypes.includes(t)));
+
+        let allHaveTitleMessage = true;
+        let allHaveValidEntityType = true;
+        let allUseNormalPriority = true;
+        let allHaveAllowlistedActionUrl = true;
+        let noneContainHtml = true;
+        let noneContainRawRider = true;
+        for (const type of actualTypes) {
+            const def = NOTIFICATION_EVENTS[type];
+            const ctx = { entityId: fakeParcelId, metadata: { trackingId: 'SRB-TEMPLATECHECK' } };
+            const title = def.title(ctx);
+            const message = def.message(ctx);
+            const actionUrl = def.actionUrl(ctx);
+            if (!title || typeof title !== 'string' || !message || typeof message !== 'string') allHaveTitleMessage = false;
+            if (!ENTITY_TYPES.includes(def.entityType)) allHaveValidEntityType = false;
+            if (def.priority !== 'normal') allUseNormalPriority = false;
+            const allowedUrlPrefixes = ['/dashboard/approve-technicians', '/dashboard/assigned-jobs', '/dashboard', '/dashboard/my-requests/'];
+            if (!allowedUrlPrefixes.some(prefix => actionUrl === prefix || actionUrl.startsWith(prefix))) allHaveAllowlistedActionUrl = false;
+            if (/<[a-z]/i.test(title) || /<[a-z]/i.test(message)) noneContainHtml = false;
+            if (/\brider\b/i.test(title) || /\brider\b/i.test(message)) noneContainRawRider = false;
+        }
+        logTest('2. Every type has a fixed non-empty title/message', allHaveTitleMessage);
+        logTest('3. Every type has a valid entity type', allHaveValidEntityType);
+        logTest('4. Every type uses priority normal', allUseNormalPriority);
+        logTest('5. Every type generates an allowlisted action URL', allHaveAllowlistedActionUrl);
+        logTest('6. No template contains HTML', noneContainHtml);
+        logTest('7. No visible copy contains raw "rider"', noneContainRawRider);
+
+        const trackingRequiredTypes = actualTypes.filter(t => (NOTIFICATION_EVENTS[t].requiresMetadata || []).includes('trackingId'));
+        let allRejectMissingTrackingId = true;
+        for (const type of trackingRequiredTypes) {
+            const def = NOTIFICATION_EVENTS[type];
+            const entityId = def.entityType === 'rider' ? fakeRiderId : fakeParcelId;
+            try {
+                await createNotification({
+                    recipientEmail: testRecipient('missing-tracking'), recipientRole: def.recipientRole,
+                    type, entityType: def.entityType, entityId, metadata: {}
+                });
+                allRejectMissingTrackingId = false;
+            } catch (error) {
+                if (error.code !== 'MISSING_REQUIRED_METADATA') allRejectMissingTrackingId = false;
+            }
+        }
+        logTest('8. Required-trackingId templates reject missing trackingId', allRejectMissingTrackingId && trackingRequiredTypes.length > 0);
+
+        // --- Validation (9-18) ---
+        const normEmail = testRecipient('normalize');
+        usedRecipients.add(normEmail.toLowerCase());
+        const normResult = await createNotification({
+            recipientEmail: `  ${normEmail.toUpperCase()}  `, recipientRole: 'user',
+            type: 'repair_completed', entityType: 'parcel', entityId: fakeParcelId,
+            metadata: { trackingId: 'SRB-NORM' }
+        });
+        const normDoc = await models.Notification.findByDeduplicationKey(normResult.deduplicationKey);
+        logTest('9. Recipient email is normalized (trimmed + lowercased)', normDoc?.recipientEmail === normEmail.toLowerCase());
+
+        async function expectRejected(name, code, params) {
+            try {
+                await createNotification(params);
+                logTest(name, false, 'expected rejection but call succeeded');
+            } catch (error) {
+                logTest(name, error.code === code, `got code: ${error.code}`);
+            }
+        }
+
+        await expectRejected('10. Empty recipient email rejected', 'INVALID_RECIPIENT_EMAIL', {
+            recipientEmail: '   ', recipientRole: 'user', type: 'repair_completed',
+            entityType: 'parcel', entityId: fakeParcelId, metadata: { trackingId: 'SRB-1' }
+        });
+        await expectRejected('11. Invalid recipient role rejected', 'INVALID_RECIPIENT_ROLE', {
+            recipientEmail: testRecipient('badrole'), recipientRole: 'superadmin', type: 'repair_completed',
+            entityType: 'parcel', entityId: fakeParcelId, metadata: { trackingId: 'SRB-1' }
+        });
+        await expectRejected('12. Unknown event type rejected', 'INVALID_NOTIFICATION_TYPE', {
+            recipientEmail: testRecipient('badtype'), recipientRole: 'user', type: 'not_a_real_event',
+            entityType: 'parcel', entityId: fakeParcelId, metadata: {}
+        });
+        await expectRejected('13. Mismatched entity type rejected', 'ENTITY_TYPE_MISMATCH', {
+            recipientEmail: testRecipient('badentitytype'), recipientRole: 'user', type: 'repair_completed',
+            entityType: 'rider', entityId: fakeParcelId, metadata: { trackingId: 'SRB-1' }
+        });
+        await expectRejected('14. Invalid entity ObjectId rejected', 'INVALID_ENTITY_ID', {
+            recipientEmail: testRecipient('badid'), recipientRole: 'user', type: 'repair_completed',
+            entityType: 'parcel', entityId: 'not-an-object-id', metadata: { trackingId: 'SRB-1' }
+        });
+        await expectRejected('15. Invalid actor role rejected', 'INVALID_ACTOR_ROLE', {
+            recipientEmail: testRecipient('badactorrole'), recipientRole: 'user', type: 'repair_completed',
+            entityType: 'parcel', entityId: fakeParcelId, actorRole: 'superadmin', metadata: { trackingId: 'SRB-1' }
+        });
+        await expectRejected('16. Unexpected metadata key rejected', 'UNEXPECTED_METADATA_KEY', {
+            recipientEmail: testRecipient('badmetakey'), recipientRole: 'user', type: 'repair_completed',
+            entityType: 'parcel', entityId: fakeParcelId, metadata: { trackingId: 'SRB-1', extra: 'nope' }
+        });
+        await expectRejected('17. Oversized metadata rejected', 'INVALID_METADATA_VALUE', {
+            recipientEmail: testRecipient('bigmeta'), recipientRole: 'user', type: 'repair_completed',
+            entityType: 'parcel', entityId: fakeParcelId, metadata: { trackingId: 'x'.repeat(500) }
+        });
+
+        let allSpoofAttemptsRejected = true;
+        for (const spoofKey of ['title', 'message', 'actionUrl', 'deduplicationKey', 'priority']) {
+            try {
+                await createNotification({
+                    recipientEmail: testRecipient('spoof'), recipientRole: 'user', type: 'repair_completed',
+                    entityType: 'parcel', entityId: fakeParcelId,
+                    metadata: { trackingId: 'SRB-1', [spoofKey]: 'attacker-supplied' }
+                });
+                allSpoofAttemptsRejected = false;
+            } catch (error) {
+                if (error.code !== 'UNEXPECTED_METADATA_KEY') allSpoofAttemptsRejected = false;
+            }
+        }
+        logTest('18. Caller cannot supply title/message/actionUrl/dedup key/priority through metadata', allSpoofAttemptsRejected);
+
+        // --- Creation (19-30) ---
+        const creationEmail = testRecipient('creation');
+        usedRecipients.add(creationEmail.toLowerCase());
+        const created = await createNotification({
+            recipientEmail: creationEmail, recipientRole: 'user', type: 'repair_completed',
+            entityType: 'parcel', entityId: fakeParcelId, actorEmail: null, actorRole: null,
+            metadata: { trackingId: 'SRB-CREATION' }
+        });
+        const createdDoc = await models.Notification.findByDeduplicationKey(created.deduplicationKey);
+
+        const expectedKeys = ['_id', 'recipientEmail', 'recipientRole', 'type', 'title', 'message', 'entityType', 'entityId', 'actionUrl', 'priority', 'isRead', 'readAt', 'createdAt', 'actorEmail', 'actorRole', 'deduplicationKey', 'metadata', 'schemaVersion'];
+        const actualKeys = Object.keys(createdDoc);
+        logTest('19. Valid notification inserted with exact required fields', expectedKeys.every(k => actualKeys.includes(k)) && actualKeys.length === expectedKeys.length);
+        logTest('20. isRead false and readAt null', createdDoc.isRead === false && createdDoc.readAt === null);
+        logTest('21. createdAt is a Date', createdDoc.createdAt instanceof Date);
+        logTest('22. schemaVersion is 1', createdDoc.schemaVersion === 1);
+        logTest('23. actionUrl is server-generated', createdDoc.actionUrl === `/dashboard/my-requests/${fakeParcelId}`);
+        logTest('24. Deduplication key is deterministic', created.deduplicationKey === `repair:${fakeParcelId}:completed`);
+
+        const duplicateAttempt = await createNotification({
+            recipientEmail: creationEmail, recipientRole: 'user', type: 'repair_completed',
+            entityType: 'parcel', entityId: fakeParcelId, metadata: { trackingId: 'SRB-CREATION' }
+        });
+        const countAfterDuplicate = await collections.notifications.countDocuments({ deduplicationKey: created.deduplicationKey });
+        logTest('25. Same logical event twice creates only one document', countAfterDuplicate === 1);
+        logTest(
+            '26. Duplicate call returns the documented duplicate result',
+            duplicateAttempt.created === false && duplicateAttempt.duplicate === true &&
+            duplicateAttempt.notificationId === null && duplicateAttempt.deduplicationKey === created.deduplicationKey
+        );
+
+        const coexistEmail = testRecipient('coexist');
+        usedRecipients.add(coexistEmail.toLowerCase());
+        const customerCopy = await createNotification({
+            recipientEmail: coexistEmail, recipientRole: 'user', type: 'technician_assigned',
+            entityType: 'parcel', entityId: fakeParcelId, metadata: { trackingId: 'SRB-COEXIST' }
+        });
+        const technicianCopy = await createNotification({
+            recipientEmail: coexistEmail, recipientRole: 'rider', type: 'new_repair_assignment',
+            entityType: 'parcel', entityId: fakeParcelId, metadata: {}
+        });
+        logTest('27. Different recipient-specific assignment types coexist for the same repair', customerCopy.created === true && technicianCopy.created === true);
+
+        logTest('28. Optional actor fields may be null', createdDoc.actorEmail === null && createdDoc.actorRole === null);
+
+        const sessionEmail = testRecipient('session');
+        usedRecipients.add(sessionEmail.toLowerCase());
+        const sessionParcelId = new ObjectId().toString();
+        const mongoSession = client.startSession();
+        let sessionForwardingWorked = false;
+        try {
+            try {
+                await mongoSession.withTransaction(async () => {
+                    await createNotification({
+                        session: mongoSession,
+                        recipientEmail: sessionEmail, recipientRole: 'user', type: 'repair_completed',
+                        entityType: 'parcel', entityId: sessionParcelId, metadata: { trackingId: 'SRB-SESSION' }
+                    });
+                    // Force an abort - if the session was genuinely forwarded to
+                    // insertOne, this notification must not exist afterward.
+                    throw new Error('intentional test abort');
+                });
+            } catch (error) {
+                if (error.message !== 'intentional test abort') throw error;
+            }
+        } finally {
+            await mongoSession.endSession();
+        }
+        const shouldNotExist = await collections.notifications.findOne({ recipientEmail: sessionEmail.toLowerCase() });
+        sessionForwardingWorked = !shouldNotExist;
+        logTest('29. Session option is forwarded to the model/insert path (aborted transaction leaves no document)', sessionForwardingWorked);
+
+        let unexpectedErrorPropagated = false;
+        const deadSession = client.startSession();
+        await deadSession.endSession();
+        try {
+            await createNotification({
+                session: deadSession,
+                recipientEmail: testRecipient('deadsession'), recipientRole: 'user', type: 'repair_completed',
+                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-1' }
+            });
+        } catch (error) {
+            unexpectedErrorPropagated = error.code !== 11000;
+        }
+        logTest('30. A genuine non-duplicate database error is not swallowed', unexpectedErrorPropagated);
+
+        // --- Indexes (31-33) ---
+        const indexes = await collections.notifications.indexes();
+        const indexNames = indexes.map(i => i.name);
+        logTest('31. All four notification indexes exist',
+            indexNames.includes('notifications_recipient_createdAt') &&
+            indexNames.includes('notifications_recipient_isRead_createdAt') &&
+            indexNames.includes('notifications_deduplicationKey_unique') &&
+            indexNames.includes('notifications_entity_createdAt')
+        );
+        const dedupIndex = indexes.find(i => i.name === 'notifications_deduplicationKey_unique');
+        logTest('32. deduplicationKey index is unique', dedupIndex?.unique === true);
+        logTest('33. No TTL notification index exists', indexes.every(i => i.expireAfterSeconds === undefined));
+
+        // --- Privacy (34-36) ---
+        const paymentEmail = testRecipient('payment');
+        usedRecipients.add(paymentEmail.toLowerCase());
+        const paymentNotif = await createNotification({
+            recipientEmail: paymentEmail, recipientRole: 'user', type: 'payment_confirmed',
+            entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PRIV' }
+        });
+        const paymentDoc = await models.Notification.findByDeduplicationKey(paymentNotif.deduplicationKey);
+        const serialized = JSON.stringify(paymentDoc);
+        logTest('34. Notification document contains no Stripe identifiers', !/cs_|pi_/.test(serialized));
+        logTest('35. Notification document contains no address/private application fields', !/address|nid|license/i.test(serialized));
+
+        let unknownFieldNotPersisted = true;
+        try {
+            const withUnknownField = await createNotification({
+                recipientEmail: testRecipient('unknownfield'), recipientRole: 'user', type: 'repair_completed',
+                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-1' },
+                notARealParam: 'should be ignored'
+            });
+            usedRecipients.add(testRecipient('unknownfield').toLowerCase());
+            const doc = await models.Notification.findByDeduplicationKey(withUnknownField.deduplicationKey);
+            unknownFieldNotPersisted = !('notARealParam' in doc);
+        } catch (error) {
+            unknownFieldNotPersisted = false;
+        }
+        logTest('36. Unknown caller fields are not persisted', unknownFieldNotPersisted);
+
+    } finally {
+        // recipientEmail is stored normalized (lowercased) by createNotification
+        // itself - usedRecipients already holds lowercased values throughout,
+        // so this matches exactly what was actually persisted.
+        let totalRemaining = 0;
+        if (models) {
+            for (const email of usedRecipients) {
+                await models.Notification.deleteManyByRecipientEmail(email);
+            }
+            for (const email of usedRecipients) {
+                totalRemaining += await collections.notifications.countDocuments({ recipientEmail: email });
+            }
+        }
+        logTest('Notifications collection is clean of Unit 1 fixtures after tests', totalRemaining === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -4167,6 +4462,7 @@ async function runAllTests() {
     await testTechnicianApprovalTransaction();
     await testRepairCompletionTransaction();
     await testAdminParcelsList();
+    await testNotificationFoundation();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

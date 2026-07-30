@@ -24,6 +24,7 @@ const collections = {
     riders: db.collection("riders"),
     trackings: db.collection("trackings"),
     checkoutSessions: db.collection("checkoutSessions"),
+    notifications: db.collection("notifications"),
 };
 
 let connectionPromise = null;
@@ -57,6 +58,39 @@ async function connectDatabase() {
                 // two repair requests must never be able to collide onto the
                 // same code.
                 await collections.parcels.createIndex({ trackingId: 1 }, { unique: true });
+                // Notification foundation (Phase 5.2 Unit 1) - no business
+                // workflow creates notifications yet, but the collection and
+                // its indexes are established up front. No TTL index: unread
+                // notifications must never silently expire, and notification
+                // deletion is a separate concern from repair-record retention.
+                //
+                // Primary inbox read path - "this recipient's notifications,
+                // newest first".
+                await collections.notifications.createIndex(
+                    { recipientEmail: 1, createdAt: -1 },
+                    { name: 'notifications_recipient_createdAt' }
+                );
+                // Unread-count / unread-filtered list for the same recipient.
+                await collections.notifications.createIndex(
+                    { recipientEmail: 1, isRead: 1, createdAt: -1 },
+                    { name: 'notifications_recipient_isRead_createdAt' }
+                );
+                // Enforces deterministic deduplication at the database level -
+                // a duplicate-key error here is the expected, intentional
+                // signal that this exact logical event already produced a
+                // notification (see services/notificationService.js's
+                // createNotification), the same pattern already used for
+                // payments.sessionId and parcels.trackingId above.
+                await collections.notifications.createIndex(
+                    { deduplicationKey: 1 },
+                    { unique: true, name: 'notifications_deduplicationKey_unique' }
+                );
+                // Entity-audit lookup - "every notification tied to this
+                // repair request/technician application".
+                await collections.notifications.createIndex(
+                    { entityType: 1, entityId: 1, createdAt: -1 },
+                    { name: 'notifications_entity_createdAt' }
+                );
                 return { db, collections };
             })
             .catch((error) => {
