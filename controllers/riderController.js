@@ -1,6 +1,7 @@
 const { ObjectId } = require('mongodb');
 const { client } = require('../config/database');
 const { normalize } = require('../services/paymentProcessor');
+const { createNotificationService } = require('../services/notificationService');
 const { REQUESTABLE_STATUSES, ROLE_FOR_STATUS, isValidRiderTransition } = require('../utils/riderStatus');
 
 class RiderController {
@@ -9,6 +10,7 @@ class RiderController {
         this.User = models.User;
         this.Parcel = models.Parcel;
         this.collections = collections;
+        this.notifications = createNotificationService(models);
     }
 
     async getAllRiders(req, res) {
@@ -88,10 +90,55 @@ class RiderController {
         try {
             const rider = req.body;
             const result = await this.Rider.create(rider);
+
+            // Best-effort admin fan-out - this route is unauthenticated
+            // (routes/riders.js), so there is no req.decoded_email; the actor
+            // is the applicant's own submitted email, and actorRole is
+            // always null since no verified identity exists for it. A
+            // lookup or notification failure here must never fail
+            // technician application creation, since the application itself
+            // has already been durably created above.
+            await this.notifyAdminsOfNewApplication(rider, result.insertedId);
+
             res.send(result);
         } catch (error) {
             res.status(500).send({ message: 'Error creating technician application', error: error.message });
         }
+    }
+
+    async notifyAdminsOfNewApplication(rider, riderId) {
+        let adminEmails = [];
+        try {
+            adminEmails = await this.User.findEmailsByRole('admin');
+        } catch (error) {
+            console.error('Admin lookup failed for technician application notification (non-fatal):', error.message);
+            return;
+        }
+        if (adminEmails.length === 0) {
+            return;
+        }
+
+        const applicantEmail = normalize(rider.email);
+        await Promise.all(adminEmails.map(async (adminEmail) => {
+            try {
+                await this.notifications.createNotification({
+                    recipientEmail: adminEmail,
+                    recipientRole: 'admin',
+                    type: 'technician_application_submitted',
+                    entityType: 'rider',
+                    entityId: riderId.toString(),
+                    actorEmail: applicantEmail || null,
+                    actorRole: null,
+                    // Each admin's deduplicationKey uniqueness comes from the
+                    // trusted recipientEmail in createNotification's render
+                    // context (see utils/notificationEvents.js), never from
+                    // metadata - recipientEmail is never persisted as metadata.
+                    metadata: {}
+                });
+            } catch (error) {
+                console.error('Admin notification failed for technician application (non-fatal):', error.message);
+            }
+        }));
     }
 
     // Admin-only technician approval/rejection. The application's status and
@@ -215,6 +262,39 @@ class RiderController {
                             new Error('linked user role update failed'),
                             { code: requestedStatus === 'approved' ? 'TECHNICIAN_APPROVAL_FAILED' : 'TECHNICIAN_REJECTION_FAILED' }
                         );
+                    }
+
+                    // Notification joins this same transaction (Strategy A) -
+                    // a failure here aborts the technician-status and
+                    // linked-user-role updates above exactly like any other
+                    // guarded write in this transaction. recipientRole for
+                    // the rejection path is 'user' - the role the linked
+                    // user was just set to above, per
+                    // ROLE_FOR_STATUS.rejected, never 'rider'.
+                    if (requestedStatus === 'approved') {
+                        await this.notifications.createNotification({
+                            session: mongoSession,
+                            recipientEmail: email,
+                            recipientRole: 'rider',
+                            type: 'technician_application_approved',
+                            entityType: 'rider',
+                            entityId: technician._id.toString(),
+                            actorEmail: req.decoded_email,
+                            actorRole: 'admin',
+                            metadata: {}
+                        });
+                    } else {
+                        await this.notifications.createNotification({
+                            session: mongoSession,
+                            recipientEmail: email,
+                            recipientRole: 'user',
+                            type: 'technician_application_rejected',
+                            entityType: 'rider',
+                            entityId: technician._id.toString(),
+                            actorEmail: req.decoded_email,
+                            actorRole: 'admin',
+                            metadata: {}
+                        });
                     }
 
                     outcome = { success: true };

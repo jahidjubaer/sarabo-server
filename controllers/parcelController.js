@@ -5,6 +5,7 @@ const { generateSecureTrackingId } = require('../utils/trackingId');
 const { logTracking } = require('../middleware/logging');
 const { VALID_STATUSES, isValidTransition } = require('../utils/parcelStatus');
 const { normalize } = require('../services/paymentProcessor');
+const { createNotificationService } = require('../services/notificationService');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
 const { getCancellationEligibility } = require('../services/cancellationPolicy');
 const { canAssignRequest } = require('../services/assignmentEligibility');
@@ -31,6 +32,7 @@ class ParcelController {
         // is reused here to release/expire an active session on cancellation
         // - see services/checkoutSessionManager.js.
         this.checkoutSessions = createCheckoutSessionManager(collections);
+        this.notifications = createNotificationService(models);
     }
 
     async getAllParcels(req, res) {
@@ -478,6 +480,22 @@ class ParcelController {
             let conflict = false;
             try {
                 await mongoSession.withTransaction(async () => {
+                    // The repair request's owner is resolved from the real
+                    // users collection state inside this same transaction -
+                    // never trusted from the parcel document itself or any
+                    // request body value, and never defaulted. Resolved
+                    // before any guarded write below, so a missing/invalid
+                    // owner account aborts before anything is committed: no
+                    // assignment, no technician workload change, no tracking
+                    // write, no notification.
+                    const resolvedOwnerRole = await this.User.findRoleByEmail(parcel.senderEmail, { session: mongoSession });
+                    if (!resolvedOwnerRole) {
+                        throw Object.assign(
+                            new Error('repair request owner role could not be resolved'),
+                            { code: 'REPAIR_OWNER_ROLE_UNRESOLVED' }
+                        );
+                    }
+
                     // Guarded atomically against a concurrent customer
                     // cancellation or a competing assignment - the query
                     // condition itself is the race-resolver, not a
@@ -526,6 +544,37 @@ class ParcelController {
                     }
 
                     await logTracking(this.collections.trackings, parcel.trackingId, 'driver_assigned', mongoSession);
+
+                    // Both notifications join the same transaction - a
+                    // failure creating either one aborts the parcel
+                    // assignment, the technician workload update, and the
+                    // tracking log above exactly like any other guarded
+                    // write here. recipientRole for the customer copy is
+                    // whatever the owner's real role actually is (user,
+                    // rider, or admin), never hardcoded.
+                    await this.notifications.createNotification({
+                        session: mongoSession,
+                        recipientEmail: parcel.senderEmail,
+                        recipientRole: resolvedOwnerRole,
+                        type: 'technician_assigned',
+                        entityType: 'parcel',
+                        entityId: parcelId,
+                        actorEmail: req.decoded_email,
+                        actorRole: 'admin',
+                        metadata: { trackingId: parcel.trackingId }
+                    });
+
+                    await this.notifications.createNotification({
+                        session: mongoSession,
+                        recipientEmail: technician.email,
+                        recipientRole: 'rider',
+                        type: 'new_repair_assignment',
+                        entityType: 'parcel',
+                        entityId: parcelId,
+                        actorEmail: req.decoded_email,
+                        actorRole: 'admin',
+                        metadata: { trackingId: parcel.trackingId }
+                    });
                 });
             } finally {
                 await mongoSession.endSession();
@@ -549,6 +598,10 @@ class ParcelController {
 
             res.send({ acknowledged: true, matchedCount: 1, modifiedCount: 1, deliveryStatus: 'driver_assigned' });
         } catch (error) {
+            if (error.code === 'REPAIR_OWNER_ROLE_UNRESOLVED') {
+                console.error('Assignment transaction aborted: repair request owner role could not be resolved');
+                return res.status(409).send({ message: 'repair request owner account could not be verified', code: 'REPAIR_OWNER_ROLE_UNRESOLVED' });
+            }
             if (error.code === 'TECHNICIAN_UPDATE_FAILED') {
                 console.error('Assignment transaction aborted: technician update failed');
                 return res.status(500).send({ message: 'Error updating technician during assignment', code: 'TECHNICIAN_UPDATE_FAILED' });

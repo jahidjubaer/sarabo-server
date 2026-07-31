@@ -46,13 +46,28 @@ function createNotificationService(models) {
         if (!ROLES.includes(recipientRole)) {
             throw invalidNotificationInput(`Invalid recipientRole: ${recipientRole}`, 'INVALID_RECIPIENT_ROLE');
         }
-        // Defensive consistency check - every event owns exactly one
-        // expected recipient role (see Phase C); a caller passing a role
-        // that disagrees with the event definition is a programming error,
-        // never a legitimate variation.
-        if (recipientRole !== eventDefinition.recipientRole) {
+        // Every event owns either a single fixed recipientRole or a fixed
+        // recipientRoles allowlist - never both, never neither. That shape
+        // is a static registry contract, not caller input, so a violation
+        // here is a programming error in utils/notificationEvents.js itself.
+        const hasSingleRole = Object.prototype.hasOwnProperty.call(eventDefinition, 'recipientRole');
+        const hasRoleList = Object.prototype.hasOwnProperty.call(eventDefinition, 'recipientRoles');
+        if (hasSingleRole === hasRoleList) {
+            throw invalidNotificationInput(`Event "${type}" has an invalid recipient-role contract`, 'INVALID_EVENT_ROLE_CONTRACT');
+        }
+        if (hasSingleRole) {
+            // Defensive consistency check - a caller passing a role that
+            // disagrees with the event's single fixed role is a programming
+            // error, never a legitimate variation.
+            if (recipientRole !== eventDefinition.recipientRole) {
+                throw invalidNotificationInput(
+                    `recipientRole "${recipientRole}" does not match event "${type}" (expected "${eventDefinition.recipientRole}")`,
+                    'RECIPIENT_ROLE_MISMATCH'
+                );
+            }
+        } else if (!eventDefinition.recipientRoles.includes(recipientRole)) {
             throw invalidNotificationInput(
-                `recipientRole "${recipientRole}" does not match event "${type}" (expected "${eventDefinition.recipientRole}")`,
+                `recipientRole "${recipientRole}" is not permitted for event "${type}" (expected one of: ${eventDefinition.recipientRoles.join(', ')})`,
                 'RECIPIENT_ROLE_MISMATCH'
             );
         }
@@ -106,7 +121,19 @@ function createNotificationService(models) {
             }
         }
 
-        const templateContext = { entityId, metadata: safeMetadata };
+        // Trusted render context - recipientEmail/actorEmail here are already
+        // normalized and validated above, never caller-controlled raw input.
+        // Event templates may read these for server-generated copy/dedup
+        // keys, but nothing here is ever spread into the stored document or
+        // into metadata - the document below sets every field explicitly.
+        const templateContext = {
+            entityId,
+            metadata: safeMetadata,
+            recipientEmail: normalizedRecipientEmail,
+            recipientRole,
+            actorEmail: normalizedActorEmail,
+            actorRole
+        };
         const document = {
             recipientEmail: normalizedRecipientEmail,
             recipientRole,

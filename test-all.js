@@ -296,6 +296,14 @@ async function testStatusTransitions() {
         if (createdTrackingIds.length) {
             await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
+        // Phase 5.2 Unit 3 wired real notification creation into
+        // assignRiderToParcel, so assignTestRider's real CUSTOMER_EMAIL/
+        // RIDER_EMAIL assignment above now also creates real notification
+        // documents - scoped and removed here by entityId, never by
+        // recipient, so both real accounts are left exactly as found.
+        if (createdParcelIds.length) {
+            await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
+        }
 
         // Restore the real, shared RIDER_EMAIL account's workStatus - this
         // test's assignments can genuinely flip it to 'in_delivery' now that
@@ -398,6 +406,12 @@ async function testInitialRequestStatus() {
         }
         if (createdTrackingIds.length) {
             await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
+        // Phase 5.2 Unit 3: the real assignment above now also creates real
+        // notification documents for CUSTOMER_EMAIL/RIDER_EMAIL - scoped and
+        // removed here by entityId, never by recipient.
+        if (createdParcelIds.length) {
+            await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
         }
 
         // Restore the real, shared RIDER_EMAIL account's workStatus.
@@ -2384,6 +2398,12 @@ async function testRequestCancellation() {
         }
         await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds } });
         await collections.payments.deleteMany({ parcelId: { $in: createdParcelIds } });
+        // Phase 5.2 Unit 3: any real assignment above (cancellation-vs-
+        // assignment races) now also creates real notification documents -
+        // scoped and removed here by entityId, never by recipient.
+        if (createdParcelIds.length) {
+            await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
+        }
 
         // Restore the real, shared RIDER_EMAIL account's workStatus.
         if (originalRiderWorkStatus !== null) {
@@ -2738,6 +2758,16 @@ async function testTechnicianAssignment() {
         }
         if (createdTrackingIds.length) {
             await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
+        // Phase 5.2 Unit 3 wired real notification creation into
+        // assignRiderToParcel, so every successful assignment above (which
+        // uses the real CUSTOMER_EMAIL fixture as senderEmail by default) now
+        // also creates real technician_assigned/new_repair_assignment
+        // documents - scoped and removed here by entityId (this function's
+        // own created parcel ids), never by recipient, so the real
+        // CUSTOMER_EMAIL/RIDER_EMAIL accounts are left exactly as found.
+        if (createdParcelIds.length) {
+            await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
         }
         for (const id of createdRiderIds) {
             await collections.riders.deleteOne({ _id: new ObjectId(id) });
@@ -3312,6 +3342,14 @@ async function testTechnicianApprovalTransaction() {
         // payment, and cancellation behavior are reconfirmed by re-running
         // the full suite alongside this section, not duplicated here.
     } finally {
+        // Phase 5.2 Unit 3 wired real notification creation into
+        // updateRiderStatus, so every genuine approval/rejection transition
+        // above now also creates a real technician_application_approved/
+        // rejected document - scoped and removed here by entityId (this
+        // function's own created rider ids).
+        if (createdRiderIds.length) {
+            await collections.notifications.deleteMany({ entityId: { $in: createdRiderIds } });
+        }
         for (const id of createdRiderIds) {
             await collections.riders.deleteOne({ _id: new ObjectId(id) });
         }
@@ -4047,7 +4085,7 @@ async function testNotificationFoundation() {
             const entityId = def.entityType === 'rider' ? fakeRiderId : fakeParcelId;
             try {
                 await createNotification({
-                    recipientEmail: testRecipient('missing-tracking'), recipientRole: def.recipientRole,
+                    recipientEmail: testRecipient('missing-tracking'), recipientRole: def.recipientRole || def.recipientRoles[0],
                     type, entityType: def.entityType, entityId, metadata: {}
                 });
                 allRejectMissingTrackingId = false;
@@ -4250,6 +4288,129 @@ async function testNotificationFoundation() {
             unknownFieldNotPersisted = false;
         }
         logTest('36. Unknown caller fields are not persisted', unknownFieldNotPersisted);
+
+        // --- Role-contract corrections (Phase 5.2 Unit 3 Phase H) (37-45) ---
+        logTest('37. Rejection event registry now expects recipientRole "user"', NOTIFICATION_EVENTS.technician_application_rejected.recipientRole === 'user');
+
+        const rejectedEmail = testRecipient('rejected-role-user');
+        usedRecipients.add(rejectedEmail.toLowerCase());
+        const rejectedResult = await createNotification({
+            recipientEmail: rejectedEmail, recipientRole: 'user', type: 'technician_application_rejected',
+            entityType: 'rider', entityId: fakeRiderId, metadata: {}
+        });
+        logTest('38. Rejection notification with recipientRole "user" is accepted', rejectedResult.created === true);
+
+        await expectRejected('39. Rejection notification with recipientRole "rider" is now rejected', 'RECIPIENT_ROLE_MISMATCH', {
+            recipientEmail: testRecipient('rejected-role-rider'), recipientRole: 'rider', type: 'technician_application_rejected',
+            entityType: 'rider', entityId: fakeRiderId, metadata: {}
+        });
+
+        // Each of the three role-acceptance checks below uses its own fresh
+        // entityId - technician_assigned's deduplicationKey depends only on
+        // entityId (see utils/notificationEvents.js), so reusing fakeParcelId
+        // (already used earlier by test 27's coexistence check) would collide
+        // with an existing document and silently return duplicate:true
+        // instead of created:true.
+        const assignedUserEmail = testRecipient('assigned-owner-user');
+        usedRecipients.add(assignedUserEmail.toLowerCase());
+        const assignedUserResult = await createNotification({
+            recipientEmail: assignedUserEmail, recipientRole: 'user', type: 'technician_assigned',
+            entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-OWNER-USER' }
+        });
+        logTest('40. technician_assigned accepts recipientRole "user"', assignedUserResult.created === true);
+
+        const assignedRiderEmail = testRecipient('assigned-owner-rider');
+        usedRecipients.add(assignedRiderEmail.toLowerCase());
+        const assignedRiderResult = await createNotification({
+            recipientEmail: assignedRiderEmail, recipientRole: 'rider', type: 'technician_assigned',
+            entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-OWNER-RIDER' }
+        });
+        logTest('41. technician_assigned accepts recipientRole "rider"', assignedRiderResult.created === true);
+
+        const assignedAdminEmail = testRecipient('assigned-owner-admin');
+        usedRecipients.add(assignedAdminEmail.toLowerCase());
+        const assignedAdminResult = await createNotification({
+            recipientEmail: assignedAdminEmail, recipientRole: 'admin', type: 'technician_assigned',
+            entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-OWNER-ADMIN' }
+        });
+        logTest('42. technician_assigned accepts recipientRole "admin"', assignedAdminResult.created === true);
+
+        await expectRejected('43. technician_assigned rejects an unsupported role', 'INVALID_RECIPIENT_ROLE', {
+            recipientEmail: testRecipient('assigned-owner-superadmin'), recipientRole: 'superadmin', type: 'technician_assigned',
+            entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-OWNER-BAD' }
+        });
+
+        await expectRejected('44. Other single-role events still reject a mismatched (but globally valid) role', 'RECIPIENT_ROLE_MISMATCH', {
+            recipientEmail: testRecipient('approved-role-admin'), recipientRole: 'admin', type: 'technician_application_approved',
+            entityType: 'rider', entityId: fakeRiderId, metadata: {}
+        });
+
+        const multiRoleEventNames = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
+        const singleRoleEventsHaveNoList = actualTypes
+            .filter(t => t !== 'technician_assigned')
+            .every(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRole') && !Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
+        logTest('45. No other event accidentally became multi-role', multiRoleEventNames.length === 1 && multiRoleEventNames[0] === 'technician_assigned' && singleRoleEventsHaveNoList);
+
+        // --- Fan-out deduplication correction (46-54) - recipientEmail is
+        // read from createNotification's trusted render context, never from
+        // metadata, so technician_application_submitted persists no metadata
+        // at all while still deduplicating per-recipient. ---
+        const fanoutRiderId = new ObjectId().toString();
+
+        const fanoutEmailA = testRecipient('fanout-admin-a');
+        usedRecipients.add(fanoutEmailA.toLowerCase());
+        const fanoutResultA = await createNotification({
+            recipientEmail: fanoutEmailA, recipientRole: 'admin', type: 'technician_application_submitted',
+            entityType: 'rider', entityId: fanoutRiderId, metadata: {}
+        });
+        logTest('46. technician_application_submitted allows empty metadata', fanoutResultA.created === true);
+
+        await expectRejected('47. adminEmail metadata is rejected as an unexpected key', 'UNEXPECTED_METADATA_KEY', {
+            recipientEmail: testRecipient('fanout-badmeta-admin'), recipientRole: 'admin', type: 'technician_application_submitted',
+            entityType: 'rider', entityId: fanoutRiderId, metadata: { adminEmail: 'x@example.com' }
+        });
+
+        await expectRejected('48. recipientEmail metadata is rejected as an unexpected key', 'UNEXPECTED_METADATA_KEY', {
+            recipientEmail: testRecipient('fanout-badmeta-recipient'), recipientRole: 'admin', type: 'technician_application_submitted',
+            entityType: 'rider', entityId: fanoutRiderId, metadata: { recipientEmail: 'x@example.com' }
+        });
+
+        logTest('49. Dedup key includes the normalized trusted recipientEmail', fanoutResultA.deduplicationKey === `rider:${fanoutRiderId}:application_submitted:${fanoutEmailA.toLowerCase()}`);
+
+        const fanoutEmailB = testRecipient('fanout-admin-b');
+        usedRecipients.add(fanoutEmailB.toLowerCase());
+        const fanoutResultB = await createNotification({
+            recipientEmail: fanoutEmailB, recipientRole: 'admin', type: 'technician_application_submitted',
+            entityType: 'rider', entityId: fanoutRiderId, metadata: {}
+        });
+        logTest(
+            '50. Two different admins receive two distinct dedup keys for one application',
+            fanoutResultB.created === true && fanoutResultB.deduplicationKey !== fanoutResultA.deduplicationKey
+        );
+
+        const fanoutReplayA = await createNotification({
+            recipientEmail: fanoutEmailA, recipientRole: 'admin', type: 'technician_application_submitted',
+            entityType: 'rider', entityId: fanoutRiderId, metadata: {}
+        });
+        logTest(
+            '51. Repeating creation for the same admin produces an idempotent duplicate',
+            fanoutReplayA.created === false && fanoutReplayA.duplicate === true && fanoutReplayA.deduplicationKey === fanoutResultA.deduplicationKey
+        );
+
+        const fanoutCount = await collections.notifications.countDocuments({ entityId: fanoutRiderId, type: 'technician_application_submitted' });
+        logTest('52. Two-admin fan-out still creates exactly two notifications (replay above added none)', fanoutCount === 2);
+
+        const fanoutDocA = await models.Notification.findByDeduplicationKey(fanoutResultA.deduplicationKey);
+        const fanoutDocB = await models.Notification.findByDeduplicationKey(fanoutResultB.deduplicationKey);
+        logTest(
+            '53. Both persisted metadata objects are exactly empty',
+            Object.keys(fanoutDocA.metadata).length === 0 && Object.keys(fanoutDocB.metadata).length === 0
+        );
+        logTest(
+            '54. No admin email appears in title/message/actionUrl, and recipientEmail field is correct for each admin',
+            !fanoutDocA.title.includes('@') && !fanoutDocA.message.includes('@') && !fanoutDocA.actionUrl.includes('@') &&
+            fanoutDocA.recipientEmail === fanoutEmailA.toLowerCase() && fanoutDocB.recipientEmail === fanoutEmailB.toLowerCase()
+        );
 
     } finally {
         // recipientEmail is stored normalized (lowercased) by createNotification
@@ -4626,6 +4787,409 @@ async function testNotificationReadAPIs() {
     console.log('');
 }
 
+// Phase 5.2 Unit 3 - Technician Application and Assignment Notification
+// Integration. Exercises the 5 real notification instances wired into
+// createRider/updateRiderStatus/assignRiderToParcel, using the real shared
+// controllers (not stubs) so the actual transaction/session behavior is
+// exercised - failure scenarios monkey-patch a single collection method
+// (the same convention already used throughout this file) rather than
+// tearing down the shared connection or constructing throwaway controllers.
+// The real ADMIN_EMAIL fixture is a genuine admin account in the shared
+// local dev database, so the submission fan-out tests below necessarily
+// create a real notification document for it - every such document is
+// precisely scoped and removed in the finally block by entityId (the
+// throwaway test rider/parcel's own fresh ObjectId, which no real
+// notification could ever coincidentally share), leaving that real account
+// exactly as it was found.
+async function testTechnicianNotificationIntegration() {
+    console.log('17. Testing Technician Application and Assignment Notification Integration (Phase 5.2 Unit 3)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections, client } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+
+    const runId = Date.now();
+    const createdRiderIds = [];
+    const createdParcelIds = [];
+    const createdTrackingIds = [];
+    const createdUserEmails = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    function notificationsFor(entityId, type) {
+        return collections.notifications.find({ entityId, type }).toArray();
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const riderController = controllers.rider;
+        const parcelController = controllers.parcel;
+
+        async function createTestRider(marker, { status = 'pending', email } = {}) {
+            const doc = {
+                name: marker,
+                email: email || `${marker.toLowerCase()}-${runId}@test.local`,
+                region: 'Test Region', district: 'Test District', address: 'Test Address',
+                license: 'Test License', nid: 'TEST-NID-0000', bike: 'Test',
+                status, workStatus: 'available', createdAt: new Date()
+            };
+            const result = await collections.riders.insertOne(doc);
+            createdRiderIds.push(result.insertedId.toString());
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        async function createTestUser(email, role = 'user') {
+            createdUserEmails.push(email);
+            await collections.users.insertOne({ email, role, createdAt: new Date() });
+        }
+
+        async function createTestParcel(marker, { senderEmail = CUSTOMER_EMAIL, deliveryStatus = 'pending-pickup' } = {}) {
+            const doc = {
+                parcelName: marker, cost: 30, senderEmail,
+                trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
+                deliveryStatus, createdAt: new Date()
+            };
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            createdTrackingIds.push(doc.trackingId);
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function callCreateRider(body) {
+            const req = { body };
+            const res = fakeRes();
+            return riderController.createRider(req, res).then(() => res);
+        }
+
+        function callUpdateRiderStatus(riderId, body, decoded_email = ADMIN_EMAIL) {
+            const req = { params: { id: riderId }, body, decoded_email };
+            const res = fakeRes();
+            return riderController.updateRiderStatus(req, res).then(() => res);
+        }
+
+        function callAssign(parcelId, riderId, decoded_email = ADMIN_EMAIL, extraBody = {}) {
+            const req = { params: { id: parcelId }, body: { riderId, ...extraBody }, decoded_email };
+            const res = fakeRes();
+            return parcelController.assignRiderToParcel(req, res).then(() => res);
+        }
+
+        let res;
+
+        // ================= SUBMISSION (1-9) =================
+        const extraAdminEmail = `test-notification-unit3-admin-${runId}@test.local`;
+        await createTestUser(extraAdminEmail, 'admin');
+
+        // createRider itself performs the insert - no pre-existing rider
+        // fixture is created here, unlike the approval/rejection tests below
+        // where the rider must already exist.
+        const applicantEmail1 = `test-unit3-applicant-${runId}@test.local`;
+        const createRes = await callCreateRider({
+            name: `TEST-UNIT3-SUBMIT-${runId}`, email: applicantEmail1, region: 'R', district: 'D', address: 'A',
+            license: 'L', nid: 'N', bike: 'B'
+        });
+        const createdRiderId = createRes.body.insertedId.toString();
+        createdRiderIds.push(createdRiderId);
+        logTest('1. Submission response shape unchanged (byte-for-byte insertOne result)', createRes.body.acknowledged === true && !!createRes.body.insertedId && Object.keys(createRes.body).sort().join(',') === 'acknowledged,insertedId');
+
+        const submitNotifs = await notificationsFor(createdRiderId, 'technician_application_submitted');
+        const submitRecipients = submitNotifs.map(n => n.recipientEmail).sort();
+        logTest('2. Every current admin receives a submission notification (real + throwaway admin)', submitRecipients.length === 2 && submitRecipients.includes(ADMIN_EMAIL.toLowerCase()) && submitRecipients.includes(extraAdminEmail));
+        logTest('3. Submission notification recipientRole is admin', submitNotifs.every(n => n.recipientRole === 'admin'));
+        logTest('4. Submission notification actorEmail is the applicant email', submitNotifs.every(n => n.actorEmail === applicantEmail1.toLowerCase()));
+        logTest('5. Submission notification actorRole is null (route is unauthenticated)', submitNotifs.every(n => n.actorRole === null));
+        logTest('6. Submission notification entityId is the created rider id', submitNotifs.every(n => n.entityId === createdRiderId));
+        logTest('6.1. Persisted metadata for the real fan-out is exactly empty for both admins', submitNotifs.every(n => Object.keys(n.metadata).length === 0));
+
+        const safeSubmitProjected = await models.Notification.findForRecipient({ recipientEmail: ADMIN_EMAIL, page: 1, limit: 10, unreadOnly: false });
+        const safeSubmitDoc = safeSubmitProjected.find(n => n.entityId === createdRiderId);
+        logTest('6.2. Safe read projection returns empty metadata for the real admin\'s submission notification', !!safeSubmitDoc && Object.keys(safeSubmitDoc.metadata).length === 0);
+
+        // Zero-admin lookup: temporarily make the admin role-query return no
+        // documents. Application creation must still succeed.
+        const originalUsersFind = collections.users.find.bind(collections.users);
+        collections.users.find = (query, options) => {
+            if (query && query.role === 'admin') return { toArray: async () => [] };
+            return originalUsersFind(query, options);
+        };
+        let noAdminRes;
+        try {
+            noAdminRes = await callCreateRider({ name: `TEST-UNIT3-NOADMIN-${runId}`, email: `test-unit3-noadmin-${runId}@test.local`, region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B' });
+        } finally {
+            collections.users.find = originalUsersFind;
+        }
+        const noAdminRiderId = noAdminRes.body.insertedId.toString();
+        createdRiderIds.push(noAdminRiderId);
+        const noAdminNotifs = await notificationsFor(noAdminRiderId, 'technician_application_submitted');
+        logTest('7. Zero admins does not fail application creation, and creates no notification', noAdminRes.statusCode === 200 && noAdminNotifs.length === 0);
+
+        // Admin lookup failure: the role-query itself throws.
+        collections.users.find = (query, options) => {
+            if (query && query.role === 'admin') throw new Error('simulated admin lookup outage');
+            return originalUsersFind(query, options);
+        };
+        let lookupFailRes;
+        try {
+            lookupFailRes = await callCreateRider({ name: `TEST-UNIT3-LOOKUPFAIL-${runId}`, email: `test-unit3-lookupfail-${runId}@test.local`, region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B' });
+        } finally {
+            collections.users.find = originalUsersFind;
+        }
+        const lookupFailRiderId = lookupFailRes.body.insertedId.toString();
+        createdRiderIds.push(lookupFailRiderId);
+        const lookupFailNotifs = await notificationsFor(lookupFailRiderId, 'technician_application_submitted');
+        logTest('8. Admin lookup failure does not fail application creation, and creates no notification', lookupFailRes.statusCode === 200 && lookupFailNotifs.length === 0);
+
+        // Notification-insert failure for the submission type specifically.
+        const originalNotifInsertOne = collections.notifications.insertOne.bind(collections.notifications);
+        collections.notifications.insertOne = async (doc, options) => {
+            if (doc.type === 'technician_application_submitted') throw new Error('simulated notification outage');
+            return originalNotifInsertOne(doc, options);
+        };
+        let notifFailRes;
+        try {
+            notifFailRes = await callCreateRider({ name: `TEST-UNIT3-NOTIFFAIL-${runId}`, email: `test-unit3-notiffail-${runId}@test.local`, region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B' });
+        } finally {
+            collections.notifications.insertOne = originalNotifInsertOne;
+        }
+        const notifFailRiderId = notifFailRes.body.insertedId.toString();
+        createdRiderIds.push(notifFailRiderId);
+        const notifFailNotifs = await notificationsFor(notifFailRiderId, 'technician_application_submitted');
+        logTest('9. Notification-insert failure for every admin does not fail application creation, and persists no notification', notifFailRes.statusCode === 200 && notifFailNotifs.length === 0);
+
+        // ================= APPROVAL (10-14) =================
+        const approveEmail = `test-unit3-approve-${runId}@test.local`;
+        const r10 = await createTestRider(`TEST-UNIT3-APPROVE-${runId}`, { email: approveEmail });
+        await createTestUser(approveEmail, 'user');
+        res = await callUpdateRiderStatus(r10.id, { status: 'approved' });
+        logTest('10. Approval still succeeds (200) with notification integrated', res.statusCode === 200 && res.body.alreadyConsistent === false);
+        const approveNotifs = await notificationsFor(r10.id, 'technician_application_approved');
+        logTest(
+            '11. Approval creates exactly one notification with the correct contract',
+            approveNotifs.length === 1 && approveNotifs[0].recipientEmail === approveEmail &&
+            approveNotifs[0].recipientRole === 'rider' && approveNotifs[0].actorEmail === ADMIN_EMAIL.toLowerCase() &&
+            approveNotifs[0].actorRole === 'admin'
+        );
+
+        // Forced notification failure aborts the whole approval transaction.
+        const approveFailEmail = `test-unit3-approvefail-${runId}@test.local`;
+        const rApproveFail = await createTestRider(`TEST-UNIT3-APPROVEFAIL-${runId}`, { email: approveFailEmail });
+        await createTestUser(approveFailEmail, 'user');
+        collections.notifications.insertOne = async (doc, options) => {
+            if (doc.type === 'technician_application_approved') throw new Error('simulated notification outage');
+            return originalNotifInsertOne(doc, options);
+        };
+        let approveFailRes;
+        try {
+            approveFailRes = await callUpdateRiderStatus(rApproveFail.id, { status: 'approved' });
+        } finally {
+            collections.notifications.insertOne = originalNotifInsertOne;
+        }
+        logTest('12. Notification failure aborts the approval transaction (500)', approveFailRes.statusCode === 500);
+        const riderAfterApproveFail = await collections.riders.findOne({ _id: new ObjectId(rApproveFail.id) });
+        const userAfterApproveFail = await collections.users.findOne({ email: approveFailEmail });
+        logTest(
+            '13. Rider status and linked user role both roll back on notification failure',
+            riderAfterApproveFail.status === 'pending' && userAfterApproveFail.role === 'user'
+        );
+        const approveFailNotifs = await notificationsFor(rApproveFail.id, 'technician_application_approved');
+        logTest('14. No notification persists when the approval transaction aborts', approveFailNotifs.length === 0);
+
+        // Idempotent replay creates no second notification.
+        res = await callUpdateRiderStatus(r10.id, { status: 'approved' });
+        const approveNotifsAfterReplay = await notificationsFor(r10.id, 'technician_application_approved');
+        logTest('15. Idempotent replay of an already-approved application creates no second notification', res.statusCode === 200 && res.body.alreadyConsistent === true && approveNotifsAfterReplay.length === 1);
+
+        // ================= REJECTION (16-21) =================
+        const rejectEmail = `test-unit3-reject-${runId}@test.local`;
+        const r16 = await createTestRider(`TEST-UNIT3-REJECT-${runId}`, { email: rejectEmail });
+        await createTestUser(rejectEmail, 'user');
+        res = await callUpdateRiderStatus(r16.id, { status: 'rejected' });
+        logTest('16. Rejection still succeeds (200) with notification integrated', res.statusCode === 200 && res.body.alreadyConsistent === false);
+        const rejectNotifs = await notificationsFor(r16.id, 'technician_application_rejected');
+        logTest(
+            '17. Rejection notification stores the corrected recipientRole "user" (not "rider")',
+            rejectNotifs.length === 1 && rejectNotifs[0].recipientRole === 'user' && rejectNotifs[0].recipientEmail === rejectEmail
+        );
+        logTest(
+            '18. Rejection notification actor is the admin caller',
+            rejectNotifs[0].actorEmail === ADMIN_EMAIL.toLowerCase() && rejectNotifs[0].actorRole === 'admin'
+        );
+        const rejectSerialized = JSON.stringify(rejectNotifs[0]);
+        logTest('19. Rejection notification contains no private application data', !/address|nid|license/i.test(rejectSerialized));
+
+        // Forced notification failure aborts the whole rejection transaction.
+        const rejectFailEmail = `test-unit3-rejectfail-${runId}@test.local`;
+        const rRejectFail = await createTestRider(`TEST-UNIT3-REJECTFAIL-${runId}`, { email: rejectFailEmail });
+        await createTestUser(rejectFailEmail, 'user');
+        collections.notifications.insertOne = async (doc, options) => {
+            if (doc.type === 'technician_application_rejected') throw new Error('simulated notification outage');
+            return originalNotifInsertOne(doc, options);
+        };
+        let rejectFailRes;
+        try {
+            rejectFailRes = await callUpdateRiderStatus(rRejectFail.id, { status: 'rejected' });
+        } finally {
+            collections.notifications.insertOne = originalNotifInsertOne;
+        }
+        logTest('20. Notification failure aborts the rejection transaction (500)', rejectFailRes.statusCode === 500);
+        const riderAfterRejectFail = await collections.riders.findOne({ _id: new ObjectId(rRejectFail.id) });
+        const userAfterRejectFail = await collections.users.findOne({ email: rejectFailEmail });
+        logTest(
+            '21. Rider status and linked user role both roll back on rejection notification failure',
+            riderAfterRejectFail.status === 'pending' && userAfterRejectFail.role === 'user'
+        );
+
+        // Idempotent replay creates no second notification.
+        res = await callUpdateRiderStatus(r16.id, { status: 'rejected' });
+        const rejectNotifsAfterReplay = await notificationsFor(r16.id, 'technician_application_rejected');
+        logTest('22. Idempotent replay of an already-rejected application creates no second notification', res.statusCode === 200 && res.body.alreadyConsistent === true && rejectNotifsAfterReplay.length === 1);
+
+        // ================= ASSIGNMENT ROLE RESOLUTION + NOTIFICATIONS (23-38) =================
+        const riderOwnerEmail = `test-unit3-riderowner-${runId}@test.local`;
+        await createTestUser(riderOwnerEmail, 'rider');
+        const orphanOwnerEmail = `test-unit3-orphanowner-${runId}@test.local`;
+        const badRoleOwnerEmail = `test-unit3-badroleowner-${runId}@test.local`;
+        await createTestUser(badRoleOwnerEmail, 'legacy_role');
+
+        const assignTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-${runId}`, { status: 'approved' });
+
+        async function assignScenario(marker, senderEmail, techRider) {
+            const parcel = await createTestParcel(marker, { senderEmail });
+            const assignRes = await callAssign(parcel.id, techRider.id);
+            return { parcel, assignRes };
+        }
+
+        // Customer-owned (real CUSTOMER_EMAIL, role user).
+        const custTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-CUST-${runId}`, { status: 'approved' });
+        const { parcel: custParcel, assignRes: custAssignRes } = await assignScenario(`TEST-UNIT3-ASSIGN-CUST-${runId}`, CUSTOMER_EMAIL, custTech);
+        logTest('23. Assignment succeeds for a customer-owned parcel', custAssignRes.statusCode === 200);
+        let custNotifs = await notificationsFor(custParcel.id, 'technician_assigned');
+        logTest('24. Customer-owned parcel stores recipientRole "user"', custNotifs.length === 1 && custNotifs[0].recipientRole === 'user' && custNotifs[0].recipientEmail === CUSTOMER_EMAIL.toLowerCase());
+        const custTechNotifs = await notificationsFor(custParcel.id, 'new_repair_assignment');
+        logTest('25. Technician copy created alongside the customer copy (dedup keys coexist)', custTechNotifs.length === 1 && custTechNotifs[0].recipientRole === 'rider' && custTechNotifs[0].recipientEmail === custTech.email);
+
+        // Rider-owned parcel (a technician who submitted their own repair request).
+        const riderOwnerTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-RIDEROWNER-${runId}`, { status: 'approved' });
+        const { parcel: riderOwnedParcel, assignRes: riderOwnedAssignRes } = await assignScenario(`TEST-UNIT3-ASSIGN-RIDEROWNER-${runId}`, riderOwnerEmail, riderOwnerTech);
+        logTest('26. Assignment succeeds for a rider-owned parcel', riderOwnedAssignRes.statusCode === 200);
+        const riderOwnedNotifs = await notificationsFor(riderOwnedParcel.id, 'technician_assigned');
+        logTest('27. Rider-owned parcel stores recipientRole "rider" (loaded from users collection, not defaulted)', riderOwnedNotifs.length === 1 && riderOwnedNotifs[0].recipientRole === 'rider');
+
+        // Admin-owned parcel (an admin who submitted their own repair request).
+        const adminOwnerTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-ADMINOWNER-${runId}`, { status: 'approved' });
+        const { parcel: adminOwnedParcel, assignRes: adminOwnedAssignRes } = await assignScenario(`TEST-UNIT3-ASSIGN-ADMINOWNER-${runId}`, ADMIN_EMAIL, adminOwnerTech);
+        logTest('28. Assignment succeeds for an admin-owned parcel', adminOwnedAssignRes.statusCode === 200);
+        const adminOwnedNotifs = await notificationsFor(adminOwnedParcel.id, 'technician_assigned');
+        logTest('29. Admin-owned parcel stores recipientRole "admin"', adminOwnedNotifs.length === 1 && adminOwnedNotifs[0].recipientRole === 'admin' && adminOwnedNotifs[0].recipientEmail === ADMIN_EMAIL.toLowerCase());
+
+        // Spoofed request-body role has no effect - the controller never reads a role from the body.
+        const spoofTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-SPOOF-${runId}`, { status: 'approved' });
+        const spoofParcel = await createTestParcel(`TEST-UNIT3-ASSIGN-SPOOF-${runId}`, { senderEmail: CUSTOMER_EMAIL });
+        const spoofRes = await callAssign(spoofParcel.id, spoofTech.id, ADMIN_EMAIL, { role: 'admin', recipientRole: 'admin' });
+        const spoofNotifs = await notificationsFor(spoofParcel.id, 'technician_assigned');
+        logTest('30. Spoofed request-body role field has no effect on the resolved owner role', spoofRes.statusCode === 200 && spoofNotifs.length === 1 && spoofNotifs[0].recipientRole === 'user');
+
+        // Missing owner user record aborts the assignment before anything commits.
+        const orphanTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-ORPHAN-${runId}`, { status: 'approved' });
+        const orphanParcel = await createTestParcel(`TEST-UNIT3-ASSIGN-ORPHAN-${runId}`, { senderEmail: orphanOwnerEmail });
+        const orphanRes = await callAssign(orphanParcel.id, orphanTech.id);
+        logTest('31. Missing owner user record aborts assignment (409 REPAIR_OWNER_ROLE_UNRESOLVED)', orphanRes.statusCode === 409 && orphanRes.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
+        const orphanParcelAfter = await models.Parcel.findById(orphanParcel.id);
+        const orphanTechAfter = await collections.riders.findOne({ _id: new ObjectId(orphanTech.id) });
+        const orphanTrackingLogs = await collections.trackings.find({ trackingId: orphanParcel.trackingId }).toArray();
+        const orphanNotifs = await notificationsFor(orphanParcel.id, 'technician_assigned');
+        const orphanTechNotifs = await notificationsFor(orphanParcel.id, 'new_repair_assignment');
+        logTest('32. Missing-owner failure leaves the parcel unassigned', orphanParcelAfter.deliveryStatus === 'pending-pickup' && !orphanParcelAfter.riderId);
+        logTest('33. Missing-owner failure leaves the technician workload unchanged', orphanTechAfter.workStatus === 'available');
+        logTest('34. Missing-owner failure writes no tracking log', orphanTrackingLogs.length === 0);
+        logTest('35. Missing-owner failure creates neither notification', orphanNotifs.length === 0 && orphanTechNotifs.length === 0);
+
+        // Invalid stored owner role (not in the recognized role set) is treated identically.
+        const badRoleTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-BADROLE-${runId}`, { status: 'approved' });
+        const badRoleParcel = await createTestParcel(`TEST-UNIT3-ASSIGN-BADROLE-${runId}`, { senderEmail: badRoleOwnerEmail });
+        const badRoleRes = await callAssign(badRoleParcel.id, badRoleTech.id);
+        logTest('36. Invalid stored owner role aborts assignment (409 REPAIR_OWNER_ROLE_UNRESOLVED)', badRoleRes.statusCode === 409 && badRoleRes.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
+        const badRoleParcelAfter = await models.Parcel.findById(badRoleParcel.id);
+        logTest('37. Invalid-role failure leaves the parcel unassigned too', badRoleParcelAfter.deliveryStatus === 'pending-pickup' && !badRoleParcelAfter.riderId);
+
+        // Forced notification failure (customer copy) rolls back the entire assignment.
+        const notifFailTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-NOTIFFAIL-${runId}`, { status: 'approved' });
+        const notifFailParcel = await createTestParcel(`TEST-UNIT3-ASSIGN-NOTIFFAIL-${runId}`, { senderEmail: CUSTOMER_EMAIL });
+        collections.notifications.insertOne = async (doc, options) => {
+            if (doc.type === 'technician_assigned' && doc.entityId === notifFailParcel.id) throw new Error('simulated notification outage');
+            return originalNotifInsertOne(doc, options);
+        };
+        let assignNotifFailRes;
+        try {
+            assignNotifFailRes = await callAssign(notifFailParcel.id, notifFailTech.id);
+        } finally {
+            collections.notifications.insertOne = originalNotifInsertOne;
+        }
+        logTest('38. Notification failure aborts the entire assignment transaction (500)', assignNotifFailRes.statusCode === 500);
+        const notifFailParcelAfter = await models.Parcel.findById(notifFailParcel.id);
+        const notifFailTechAfter = await collections.riders.findOne({ _id: new ObjectId(notifFailTech.id) });
+        const notifFailTrackingLogs = await collections.trackings.find({ trackingId: notifFailParcel.trackingId }).toArray();
+        logTest(
+            '39. Assignment failure rollback covers parcel, technician workload, and tracking together',
+            notifFailParcelAfter.deliveryStatus === 'pending-pickup' && !notifFailParcelAfter.riderId &&
+            notifFailTechAfter.workStatus === 'available' && notifFailTrackingLogs.length === 0
+        );
+
+        // ================= SECURITY / PRIVACY (40-41) =================
+        const allNotifDocs = [...submitNotifs, ...approveNotifs, ...rejectNotifs, ...custNotifs, ...custTechNotifs];
+        const allSerialized = JSON.stringify(allNotifDocs);
+        logTest('40. None of the integrated notifications expose private technician application data', !/address|nid|license/i.test(allSerialized));
+
+        const safeProjected = await models.Notification.findForRecipient({ recipientEmail: approveEmail, page: 1, limit: 10, unreadOnly: false });
+        const projectedFields = safeProjected.length ? Object.keys(safeProjected[0]) : [];
+        logTest(
+            '41. The safe read-API projection still excludes recipientEmail/recipientRole/actorEmail/actorRole/deduplicationKey',
+            safeProjected.length > 0 && !projectedFields.includes('recipientEmail') && !projectedFields.includes('recipientRole') &&
+            !projectedFields.includes('actorEmail') && !projectedFields.includes('actorRole') && !projectedFields.includes('deduplicationKey')
+        );
+
+    } finally {
+        for (const id of createdRiderIds) {
+            await collections.riders.deleteOne({ _id: new ObjectId(id) });
+        }
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        if (createdTrackingIds.length) {
+            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
+        if (createdUserEmails.length) {
+            await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        }
+        // Every notification created by this test is scoped to a throwaway
+        // TEST- rider/parcel entityId above - deleting by (entityId, type)
+        // catches every recipient, including the real ADMIN_EMAIL fixture's
+        // fan-out copies, without needing to guess/enumerate recipients.
+        let remaining = 0;
+        for (const riderId of createdRiderIds) {
+            await collections.notifications.deleteMany({ entityId: riderId });
+            remaining += await collections.notifications.countDocuments({ entityId: riderId });
+        }
+        for (const parcelId of createdParcelIds) {
+            await collections.notifications.deleteMany({ entityId: parcelId });
+            remaining += await collections.notifications.countDocuments({ entityId: parcelId });
+        }
+        logTest('No Unit 3 rider/parcel/user/notification fixture remains after cleanup', remaining === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -4820,6 +5384,7 @@ async function runAllTests() {
     await testAdminParcelsList();
     await testNotificationFoundation();
     await testNotificationReadAPIs();
+    await testTechnicianNotificationIntegration();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

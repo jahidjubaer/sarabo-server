@@ -17,8 +17,11 @@ const PRIORITIES = ['normal', 'high'];
 // always addressed to, priority (always 'normal' in V1), the metadata keys
 // it will accept, which of those are required to render a safe message
 // (never silently rendering "undefined"), and the four template functions.
-// Template functions receive `{ entityId, metadata }` - only the fields a
-// given template actually needs are used.
+// Template functions receive a trusted render context - entityId, metadata,
+// recipientEmail, recipientRole, actorEmail, actorRole (see
+// services/notificationService.js's templateContext) - only the fields a
+// given template actually needs are used. recipientEmail/actorEmail there
+// are already normalized/validated and are never persisted as metadata.
 const NOTIFICATION_EVENTS = {
     technician_application_submitted: {
         entityType: 'rider',
@@ -29,7 +32,23 @@ const NOTIFICATION_EVENTS = {
         title: () => 'New technician application',
         message: () => 'A new technician application is awaiting review.',
         actionUrl: () => '/dashboard/approve-technicians',
-        deduplicationKey: ({ entityId }) => `rider:${entityId}:application_submitted`,
+        // Each fanned-out admin needs a distinct deduplicationKey - without
+        // one, every admin's notification for the same application would
+        // collide on the exact same key (entityId alone), and the unique
+        // index would silently drop every admin's copy after the first
+        // insert wins the race. recipientEmail is read from the trusted,
+        // already-normalized render context (see services/notificationService.js),
+        // never from metadata - it is never persisted as metadata and never
+        // caller-controlled.
+        deduplicationKey: ({ entityId, recipientEmail }) => {
+            if (!recipientEmail) {
+                throw Object.assign(
+                    new Error('technician_application_submitted requires a trusted recipientEmail to generate a deduplication key'),
+                    { code: 'MISSING_TRUSTED_RECIPIENT_CONTEXT' }
+                );
+            }
+            return `rider:${entityId}:application_submitted:${recipientEmail}`;
+        },
     },
     technician_application_approved: {
         entityType: 'rider',
@@ -44,7 +63,11 @@ const NOTIFICATION_EVENTS = {
     },
     technician_application_rejected: {
         entityType: 'rider',
-        recipientRole: 'rider',
+        // A rejected application's linked user is set back to 'user' (see
+        // utils/riderStatus.js's ROLE_FOR_STATUS.rejected), never 'rider' -
+        // this is the exact same-transaction role the recipient holds at the
+        // moment this notification is created.
+        recipientRole: 'user',
         priority: 'normal',
         allowedMetadataKeys: [],
         requiresMetadata: [],
@@ -55,7 +78,12 @@ const NOTIFICATION_EVENTS = {
     },
     technician_assigned: {
         entityType: 'parcel',
-        recipientRole: 'user',
+        // The repair request's owner is whoever is authenticated when they
+        // submit it (POST /parcels only requires verifyFBToken - see
+        // routes/parcels.js), so this is the one event whose recipient's
+        // real role is not fixed to a single value. recipientRoles is a
+        // fixed allowlist, not a caller-supplied option.
+        recipientRoles: ['user', 'rider', 'admin'],
         priority: 'normal',
         allowedMetadataKeys: ['trackingId'],
         requiresMetadata: ['trackingId'],
