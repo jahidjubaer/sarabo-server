@@ -107,7 +107,10 @@ const NOTIFICATION_EVENTS = {
     },
     technician_on_the_way: {
         entityType: 'parcel',
-        recipientRole: 'user',
+        // Same reasoning as technician_assigned - POST /parcels only
+        // requires authentication (routes/parcels.js), so the repair
+        // owner's real role is not fixed to a single value.
+        recipientRoles: ['user', 'rider', 'admin'],
         priority: 'normal',
         allowedMetadataKeys: ['trackingId'],
         requiresMetadata: ['trackingId'],
@@ -118,7 +121,7 @@ const NOTIFICATION_EVENTS = {
     },
     repair_in_progress: {
         entityType: 'parcel',
-        recipientRole: 'user',
+        recipientRoles: ['user', 'rider', 'admin'],
         priority: 'normal',
         allowedMetadataKeys: ['trackingId'],
         requiresMetadata: ['trackingId'],
@@ -129,7 +132,7 @@ const NOTIFICATION_EVENTS = {
     },
     repair_completed: {
         entityType: 'parcel',
-        recipientRole: 'user',
+        recipientRoles: ['user', 'rider', 'admin'],
         priority: 'normal',
         allowedMetadataKeys: ['trackingId'],
         requiresMetadata: ['trackingId'],

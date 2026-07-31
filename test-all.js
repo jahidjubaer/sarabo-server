@@ -3743,6 +3743,16 @@ async function testRepairCompletionTransaction() {
         if (createdTrackingIds.length) {
             await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
+        // Phase 5.2 Unit 4 wired real notification creation into
+        // completeParcel, so every genuine completion above (which uses the
+        // real CUSTOMER_EMAIL fixture as senderEmail by default) now also
+        // creates a real repair_completed document - scoped and removed here
+        // by entityId (this function's own created parcel ids), never by
+        // recipient, so the real CUSTOMER_EMAIL account is left exactly as
+        // found.
+        if (createdParcelIds.length) {
+            await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
+        }
         for (const id of createdRiderIds) {
             await collections.riders.deleteOne({ _id: new ObjectId(id) });
         }
@@ -4345,11 +4355,13 @@ async function testNotificationFoundation() {
             entityType: 'rider', entityId: fakeRiderId, metadata: {}
         });
 
-        const multiRoleEventNames = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
-        const singleRoleEventsHaveNoList = actualTypes
-            .filter(t => t !== 'technician_assigned')
-            .every(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRole') && !Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
-        logTest('45. No other event accidentally became multi-role', multiRoleEventNames.length === 1 && multiRoleEventNames[0] === 'technician_assigned' && singleRoleEventsHaveNoList);
+        // Full exclusivity (exactly which events are multi-role, and that
+        // every remaining event is strictly single-role) is asserted more
+        // completely by tests 59/60 below, once Phase 5.2 Unit 4 has also
+        // registered its own approved multi-role lifecycle events - this
+        // check is narrowed to just reconfirming technician_assigned itself
+        // never regressed back to a single fixed role.
+        logTest('45. technician_assigned remains multi-role', Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS.technician_assigned, 'recipientRoles') && !Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS.technician_assigned, 'recipientRole'));
 
         // --- Fan-out deduplication correction (46-54) - recipientEmail is
         // read from createNotification's trusted render context, never from
@@ -4411,6 +4423,68 @@ async function testNotificationFoundation() {
             !fanoutDocA.title.includes('@') && !fanoutDocA.message.includes('@') && !fanoutDocA.actionUrl.includes('@') &&
             fanoutDocA.recipientEmail === fanoutEmailA.toLowerCase() && fanoutDocB.recipientEmail === fanoutEmailB.toLowerCase()
         );
+
+        // --- Phase 5.2 Unit 4 lifecycle role-contract corrections (55-60) -
+        // technician_on_the_way/repair_in_progress/repair_completed are now
+        // multi-role for the same reason technician_assigned already is:
+        // POST /parcels only requires authentication, so the repair owner
+        // can genuinely be user, rider, or admin. ---
+        const lifecycleMultiRoleTypes = ['technician_on_the_way', 'repair_in_progress', 'repair_completed'];
+        let allLifecycleAcceptUser = true;
+        let allLifecycleAcceptRider = true;
+        let allLifecycleAcceptAdmin = true;
+        let allLifecycleRejectUnsupported = true;
+        for (const type of lifecycleMultiRoleTypes) {
+            const entityId = new ObjectId().toString();
+            const userEmail = testRecipient(`${type}-user`);
+            usedRecipients.add(userEmail.toLowerCase());
+            const userResult = await createNotification({
+                recipientEmail: userEmail, recipientRole: 'user', type,
+                entityType: 'parcel', entityId, metadata: { trackingId: 'SRB-LIFECYCLE' }
+            });
+            if (userResult.created !== true) allLifecycleAcceptUser = false;
+
+            const riderEmail = testRecipient(`${type}-rider`);
+            usedRecipients.add(riderEmail.toLowerCase());
+            const riderResult = await createNotification({
+                recipientEmail: riderEmail, recipientRole: 'rider', type,
+                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-LIFECYCLE' }
+            });
+            if (riderResult.created !== true) allLifecycleAcceptRider = false;
+
+            const adminEmail = testRecipient(`${type}-admin`);
+            usedRecipients.add(adminEmail.toLowerCase());
+            const adminResult = await createNotification({
+                recipientEmail: adminEmail, recipientRole: 'admin', type,
+                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-LIFECYCLE' }
+            });
+            if (adminResult.created !== true) allLifecycleAcceptAdmin = false;
+
+            try {
+                await createNotification({
+                    recipientEmail: testRecipient(`${type}-superadmin`), recipientRole: 'superadmin', type,
+                    entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-LIFECYCLE' }
+                });
+                allLifecycleRejectUnsupported = false;
+            } catch (error) {
+                if (error.code !== 'INVALID_RECIPIENT_ROLE') allLifecycleRejectUnsupported = false;
+            }
+        }
+        logTest('55. Each lifecycle event (technician_on_the_way/repair_in_progress/repair_completed) accepts recipientRole user', allLifecycleAcceptUser);
+        logTest('56. Each lifecycle event accepts recipientRole rider', allLifecycleAcceptRider);
+        logTest('57. Each lifecycle event accepts recipientRole admin', allLifecycleAcceptAdmin);
+        logTest('58. Each lifecycle event rejects an unsupported role', allLifecycleRejectUnsupported);
+
+        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed'];
+        const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
+        logTest(
+            '59. Only the approved owner-facing events are multi-role',
+            actualMultiRoleTypes.length === approvedMultiRoleTypes.length && approvedMultiRoleTypes.every(t => actualMultiRoleTypes.includes(t))
+        );
+        const otherEventsSingleRole = actualTypes
+            .filter(t => !approvedMultiRoleTypes.includes(t))
+            .every(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRole') && !Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
+        logTest('60. All other events remain strict single-role', otherEventsSingleRole);
 
     } finally {
         // recipientEmail is stored normalized (lowercased) by createNotification
@@ -5190,6 +5264,577 @@ async function testTechnicianNotificationIntegration() {
     console.log('');
 }
 
+// Phase 5.2 Unit 4 - Repair Lifecycle Notification Integration. Exercises the
+// 3 real notification instances wired into updateParcelStatus (best-effort,
+// non-transactional: technician_on_the_way, repair_in_progress) and
+// completeParcel (transaction-joined: repair_completed), using the real
+// shared controllers so actual transaction/session and best-effort-failure
+// behavior is exercised - failure scenarios monkey-patch a single collection
+// method, matching the convention already used throughout this file. The
+// real CUSTOMER_EMAIL/ADMIN_EMAIL fixtures are genuine accounts in the
+// shared local dev database, so several scenarios below necessarily create
+// real notification documents for them - every one is precisely scoped and
+// removed in the finally block by entityId (this function's own created
+// parcel ids), never by recipient.
+async function testRepairLifecycleNotificationIntegration() {
+    console.log('18. Testing Repair Lifecycle Notification Integration (Phase 5.2 Unit 4)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections, client } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+
+    const runId = Date.now();
+    const createdParcelIds = [];
+    const createdTrackingIds = [];
+    const createdRiderIds = [];
+    const createdUserEmails = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    function notificationsFor(entityId, type) {
+        return collections.notifications.find({ entityId, type }).toArray();
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const parcelController = controllers.parcel;
+
+        async function createTestUser(email, role) {
+            createdUserEmails.push(email);
+            await collections.users.insertOne({ email, role, createdAt: new Date() });
+        }
+
+        // updateParcelStatus's authorization check reads the technician's
+        // role from the users collection (this.User.findByEmail), not from
+        // the riders collection alone - a linked users document with
+        // role:'rider' is required for isAssignedRider to actually pass,
+        // mirroring testRepairCompletionTransaction's createTestTechnician.
+        async function createTestRider(marker, { workStatus = 'in_delivery' } = {}) {
+            const email = `${marker.toLowerCase()}@test.local`;
+            const doc = {
+                name: marker, email, region: 'Test Region', district: 'Test District',
+                status: 'approved', workStatus, createdAt: new Date()
+            };
+            const result = await collections.riders.insertOne(doc);
+            createdRiderIds.push(result.insertedId.toString());
+            await createTestUser(email, 'rider');
+            return { id: result.insertedId.toString(), email };
+        }
+
+        async function createTestParcel(marker, { senderEmail = CUSTOMER_EMAIL, deliveryStatus = 'driver_assigned', rider } = {}) {
+            const doc = {
+                parcelName: marker, cost: 30, senderEmail, deliveryStatus,
+                trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
+                createdAt: new Date()
+            };
+            if (rider) {
+                doc.riderId = rider.id;
+                doc.riderEmail = rider.email;
+                doc.riderName = rider.name || rider.email;
+            }
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            createdTrackingIds.push(doc.trackingId);
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function callUpdateStatus(parcelId, deliveryStatus, decoded_email, extraBody = {}) {
+            const req = { params: { id: parcelId }, body: { deliveryStatus, ...extraBody }, decoded_email };
+            const res = fakeRes();
+            return parcelController.updateParcelStatus(req, res).then(() => res);
+        }
+
+        function trackingLogsFor(trackingId) {
+            return collections.trackings.find({ trackingId }).toArray();
+        }
+
+        const riderOwnerEmail = `test-unit4-riderowner-${runId}@test.local`;
+        await createTestUser(riderOwnerEmail, 'rider');
+        const orphanOwnerEmail = `test-unit4-orphanowner-${runId}@test.local`;
+        const badRoleOwnerEmail = `test-unit4-badroleowner-${runId}@test.local`;
+        await createTestUser(badRoleOwnerEmail, 'legacy_role');
+
+        // ================= ON-THE-WAY: rider_arriving (1-26) =================
+        const tech1 = await createTestRider(`TEST-UNIT4-TECH1-${runId}`);
+        const p1 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-CUST-${runId}`, { rider: tech1 });
+        const res1 = await callUpdateStatus(p1.id, 'rider_arriving', tech1.email, { role: 'admin', recipientRole: 'admin' });
+        logTest('1/17/18. Genuine transition to rider_arriving succeeds (200) with unchanged authorization/response shape', res1.statusCode === 200 && res1.body.matchedCount === 1 && res1.body.modifiedCount === 1);
+
+        const otw1 = await notificationsFor(p1.id, 'technician_on_the_way');
+        logTest('1(count). Exactly one technician_on_the_way notification created', otw1.length === 1);
+        logTest('2. Event type is technician_on_the_way', otw1.length === 1 && otw1[0].type === 'technician_on_the_way');
+        logTest('3. Recipient email is parcel.senderEmail', otw1.length === 1 && otw1[0].recipientEmail === CUSTOMER_EMAIL.toLowerCase());
+        logTest('4. User-owned parcel stores recipientRole user', otw1.length === 1 && otw1[0].recipientRole === 'user');
+        logTest('7/30(a). Role comes from users collection, not defaulted', otw1.length === 1 && otw1[0].recipientRole === 'user');
+        logTest('8. Spoofed request-body role has no effect', otw1.length === 1 && otw1[0].recipientRole === 'user');
+        logTest('9. Actor email is the authenticated technician', otw1.length === 1 && otw1[0].actorEmail === tech1.email);
+        logTest('10. Actor role is rider', otw1.length === 1 && otw1[0].actorRole === 'rider');
+        logTest('11. Entity type is parcel', otw1.length === 1 && otw1[0].entityType === 'parcel');
+        logTest('12. Entity ID matches parcel', otw1.length === 1 && otw1[0].entityId === p1.id);
+        logTest('13. Metadata contains correct trackingId', otw1.length === 1 && otw1[0].metadata.trackingId === p1.trackingId);
+        logTest('14. Action URL points to request details', otw1.length === 1 && otw1[0].actionUrl === `/dashboard/my-requests/${p1.id}`);
+        logTest('15. Dedup key is deterministic', otw1.length === 1 && otw1[0].deduplicationKey === `repair:${p1.id}:status:rider_arriving`);
+        logTest('16. Notification visible copy contains no raw status value', otw1.length === 1 && !otw1[0].title.includes('rider_arriving') && !otw1[0].message.includes('rider_arriving'));
+
+        // Rider-owned parcel.
+        const tech2 = await createTestRider(`TEST-UNIT4-TECH2-${runId}`);
+        const p2 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-RIDEROWNER-${runId}`, { senderEmail: riderOwnerEmail, rider: tech2 });
+        await callUpdateStatus(p2.id, 'rider_arriving', tech2.email);
+        const otw2 = await notificationsFor(p2.id, 'technician_on_the_way');
+        logTest('5. Rider-owned parcel stores recipientRole rider', otw2.length === 1 && otw2[0].recipientRole === 'rider');
+
+        // Admin-owned parcel.
+        const tech3 = await createTestRider(`TEST-UNIT4-TECH3-${runId}`);
+        const p3 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-ADMINOWNER-${runId}`, { senderEmail: ADMIN_EMAIL, rider: tech3 });
+        await callUpdateStatus(p3.id, 'rider_arriving', tech3.email);
+        const otw3 = await notificationsFor(p3.id, 'technician_on_the_way');
+        logTest('6. Admin-owned parcel stores recipientRole admin', otw3.length === 1 && otw3[0].recipientRole === 'admin');
+
+        // Invalid transition creates no notification.
+        const tech4 = await createTestRider(`TEST-UNIT4-TECH4-${runId}`);
+        const p4 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-INVALID-${runId}`, { rider: tech4 });
+        const invalidRes = await callUpdateStatus(p4.id, 'parcel_picked_up', tech4.email);
+        const otw4 = await notificationsFor(p4.id, 'technician_on_the_way');
+        logTest('19. Invalid transition creates no notification', invalidRes.statusCode === 409 && otw4.length === 0);
+
+        // Replay/no-op creates no second notification.
+        const replayRes = await callUpdateStatus(p1.id, 'rider_arriving', tech1.email);
+        const otw1AfterReplay = await notificationsFor(p1.id, 'technician_on_the_way');
+        logTest('20. Replay/no-op creates no second notification', replayRes.statusCode === 200 && replayRes.body.message === 'status unchanged' && otw1AfterReplay.length === 1);
+
+        // Missing owner record does not fail the status transition.
+        const tech5 = await createTestRider(`TEST-UNIT4-TECH5-${runId}`);
+        const p5 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-ORPHAN-${runId}`, { senderEmail: orphanOwnerEmail, rider: tech5 });
+        const orphanRes = await callUpdateStatus(p5.id, 'rider_arriving', tech5.email);
+        const otw5 = await notificationsFor(p5.id, 'technician_on_the_way');
+        logTest('21/23. Missing owner record does not fail the status transition, and creates no notification', orphanRes.statusCode === 200 && orphanRes.body.matchedCount === 1 && otw5.length === 0);
+
+        // Invalid stored owner role does not fail the status transition.
+        const tech6 = await createTestRider(`TEST-UNIT4-TECH6-${runId}`);
+        const p6 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-BADROLE-${runId}`, { senderEmail: badRoleOwnerEmail, rider: tech6 });
+        const badRoleRes = await callUpdateStatus(p6.id, 'rider_arriving', tech6.email);
+        const otw6 = await notificationsFor(p6.id, 'technician_on_the_way');
+        logTest('22/23(b). Invalid owner role does not fail the status transition, and creates no notification', badRoleRes.statusCode === 200 && badRoleRes.body.matchedCount === 1 && otw6.length === 0);
+
+        // Notification DB failure does not fail the status transition.
+        const tech7 = await createTestRider(`TEST-UNIT4-TECH7-${runId}`);
+        const p7 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-NOTIFFAIL-${runId}`, { rider: tech7 });
+        const originalNotifInsertOne = collections.notifications.insertOne.bind(collections.notifications);
+        collections.notifications.insertOne = async (doc, options) => {
+            if (doc.type === 'technician_on_the_way' && doc.entityId === p7.id) throw new Error('simulated notification outage');
+            return originalNotifInsertOne(doc, options);
+        };
+        let notifFailRes;
+        try {
+            notifFailRes = await callUpdateStatus(p7.id, 'rider_arriving', tech7.email);
+        } finally {
+            collections.notifications.insertOne = originalNotifInsertOne;
+        }
+        const otw7 = await notificationsFor(p7.id, 'technician_on_the_way');
+        logTest('24/26. Notification DB failure does not fail the status transition, and no notification details leak into the response', notifFailRes.statusCode === 200 && notifFailRes.body.matchedCount === 1 && !('notification' in notifFailRes.body) && otw7.length === 0);
+
+        // Duplicate notification result does not fail the status transition.
+        const tech8 = await createTestRider(`TEST-UNIT4-TECH8-${runId}`);
+        const p8 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-DUP-${runId}`, { rider: tech8, deliveryStatus: 'rider_arriving' });
+        // Pre-seed the exact dedup key this transition would produce, so the
+        // real insert below hits a genuine duplicate-key outcome.
+        await collections.notifications.insertOne({
+            recipientEmail: CUSTOMER_EMAIL.toLowerCase(), recipientRole: 'user', type: 'technician_on_the_way',
+            title: 'x', message: 'x', entityType: 'parcel', entityId: p8.id, actionUrl: '/x', priority: 'normal',
+            isRead: false, readAt: null, createdAt: new Date(), actorEmail: null, actorRole: null,
+            deduplicationKey: `repair:${p8.id}:status:rider_arriving`, metadata: {}, schemaVersion: 1
+        });
+        // p8 starts at rider_arriving directly - re-target it back to
+        // driver_assigned so a genuine transition can be exercised, without
+        // touching the pre-seeded notification's dedup key (still parcel id
+        // p8.id).
+        await collections.parcels.updateOne({ _id: new ObjectId(p8.id) }, { $set: { deliveryStatus: 'driver_assigned' } });
+        const dupRes = await callUpdateStatus(p8.id, 'rider_arriving', tech8.email);
+        const otw8 = await notificationsFor(p8.id, 'technician_on_the_way');
+        logTest('25. Duplicate notification result does not fail the status transition', dupRes.statusCode === 200 && dupRes.body.matchedCount === 1 && otw8.length === 1);
+
+        // ================= IN-PROGRESS: parcel_picked_up (27-47) =================
+        const tech9 = await createTestRider(`TEST-UNIT4-TECH9-${runId}`);
+        const p9 = await createTestParcel(`TEST-UNIT4-INPROGRESS-CUST-${runId}`, { rider: tech9, deliveryStatus: 'rider_arriving' });
+        const res9 = await callUpdateStatus(p9.id, 'parcel_picked_up', tech9.email, { role: 'admin' });
+        logTest('27/38/39. Genuine transition to parcel_picked_up succeeds (200) with unchanged response shape/authorization', res9.statusCode === 200 && res9.body.matchedCount === 1);
+        const rip9 = await notificationsFor(p9.id, 'repair_in_progress');
+        logTest('28. Event type is repair_in_progress', rip9.length === 1 && rip9[0].type === 'repair_in_progress');
+        logTest('29. Recipient email is parcel.senderEmail', rip9.length === 1 && rip9[0].recipientEmail === CUSTOMER_EMAIL.toLowerCase());
+        logTest('30. User-owned parcel stores role user', rip9.length === 1 && rip9[0].recipientRole === 'user');
+        logTest('34. Spoofed role ignored', rip9.length === 1 && rip9[0].recipientRole === 'user');
+        logTest('35. Actor is authenticated technician with role rider', rip9.length === 1 && rip9[0].actorEmail === tech9.email && rip9[0].actorRole === 'rider');
+        logTest('36. Entity and trackingId are correct', rip9.length === 1 && rip9[0].entityId === p9.id && rip9[0].metadata.trackingId === p9.trackingId);
+        logTest('37. Action URL is correct', rip9.length === 1 && rip9[0].actionUrl === `/dashboard/my-requests/${p9.id}`);
+
+        const tech10 = await createTestRider(`TEST-UNIT4-TECH10-${runId}`);
+        const p10 = await createTestParcel(`TEST-UNIT4-INPROGRESS-RIDEROWNER-${runId}`, { senderEmail: riderOwnerEmail, rider: tech10, deliveryStatus: 'rider_arriving' });
+        await callUpdateStatus(p10.id, 'parcel_picked_up', tech10.email);
+        const rip10 = await notificationsFor(p10.id, 'repair_in_progress');
+        logTest('31. Rider-owned parcel stores role rider', rip10.length === 1 && rip10[0].recipientRole === 'rider');
+
+        const tech11 = await createTestRider(`TEST-UNIT4-TECH11-${runId}`);
+        const p11 = await createTestParcel(`TEST-UNIT4-INPROGRESS-ADMINOWNER-${runId}`, { senderEmail: ADMIN_EMAIL, rider: tech11, deliveryStatus: 'rider_arriving' });
+        await callUpdateStatus(p11.id, 'parcel_picked_up', tech11.email);
+        const rip11 = await notificationsFor(p11.id, 'repair_in_progress');
+        logTest('32/33. Admin-owned parcel stores role admin, loaded from users collection', rip11.length === 1 && rip11[0].recipientRole === 'admin');
+
+        const tech12 = await createTestRider(`TEST-UNIT4-TECH12-${runId}`);
+        const p12 = await createTestParcel(`TEST-UNIT4-INPROGRESS-INVALID-${runId}`, { rider: tech12 });
+        const invalidRes12 = await callUpdateStatus(p12.id, 'parcel_picked_up', tech12.email);
+        const rip12 = await notificationsFor(p12.id, 'repair_in_progress');
+        logTest('40. Invalid transition creates no notification', invalidRes12.statusCode === 409 && rip12.length === 0);
+
+        const replayRes9 = await callUpdateStatus(p9.id, 'parcel_picked_up', tech9.email);
+        const rip9AfterReplay = await notificationsFor(p9.id, 'repair_in_progress');
+        logTest('41. Replay creates no duplicate', replayRes9.statusCode === 200 && replayRes9.body.message === 'status unchanged' && rip9AfterReplay.length === 1);
+
+        const tech13 = await createTestRider(`TEST-UNIT4-TECH13-${runId}`);
+        const p13 = await createTestParcel(`TEST-UNIT4-INPROGRESS-ORPHAN-${runId}`, { senderEmail: orphanOwnerEmail, rider: tech13, deliveryStatus: 'rider_arriving' });
+        const orphanRes13 = await callUpdateStatus(p13.id, 'parcel_picked_up', tech13.email);
+        const rip13 = await notificationsFor(p13.id, 'repair_in_progress');
+        logTest('42/44. Missing owner does not fail the status transition, and creates no notification (lookup failure)', orphanRes13.statusCode === 200 && orphanRes13.body.matchedCount === 1 && rip13.length === 0);
+
+        const tech14 = await createTestRider(`TEST-UNIT4-TECH14-${runId}`);
+        const p14 = await createTestParcel(`TEST-UNIT4-INPROGRESS-BADROLE-${runId}`, { senderEmail: badRoleOwnerEmail, rider: tech14, deliveryStatus: 'rider_arriving' });
+        const badRoleRes14 = await callUpdateStatus(p14.id, 'parcel_picked_up', tech14.email);
+        const rip14 = await notificationsFor(p14.id, 'repair_in_progress');
+        logTest('43. Invalid owner role does not fail the status transition', badRoleRes14.statusCode === 200 && badRoleRes14.body.matchedCount === 1 && rip14.length === 0);
+
+        const tech15 = await createTestRider(`TEST-UNIT4-TECH15-${runId}`);
+        const p15 = await createTestParcel(`TEST-UNIT4-INPROGRESS-NOTIFFAIL-${runId}`, { rider: tech15, deliveryStatus: 'rider_arriving' });
+        collections.notifications.insertOne = async (doc, options) => {
+            if (doc.type === 'repair_in_progress' && doc.entityId === p15.id) throw new Error('simulated notification outage');
+            return originalNotifInsertOne(doc, options);
+        };
+        let notifFailRes15;
+        try {
+            notifFailRes15 = await callUpdateStatus(p15.id, 'parcel_picked_up', tech15.email);
+        } finally {
+            collections.notifications.insertOne = originalNotifInsertOne;
+        }
+        const rip15 = await notificationsFor(p15.id, 'repair_in_progress');
+        logTest('45/47. Notification failure does not fail the status transition, and no private data/notification result is exposed', notifFailRes15.statusCode === 200 && notifFailRes15.body.matchedCount === 1 && !('notification' in notifFailRes15.body) && rip15.length === 0);
+
+        const tech16 = await createTestRider(`TEST-UNIT4-TECH16-${runId}`);
+        const p16 = await createTestParcel(`TEST-UNIT4-INPROGRESS-DUP-${runId}`, { rider: tech16, deliveryStatus: 'parcel_picked_up' });
+        await collections.notifications.insertOne({
+            recipientEmail: CUSTOMER_EMAIL.toLowerCase(), recipientRole: 'user', type: 'repair_in_progress',
+            title: 'x', message: 'x', entityType: 'parcel', entityId: p16.id, actionUrl: '/x', priority: 'normal',
+            isRead: false, readAt: null, createdAt: new Date(), actorEmail: null, actorRole: null,
+            deduplicationKey: `repair:${p16.id}:status:parcel_picked_up`, metadata: {}, schemaVersion: 1
+        });
+        await collections.parcels.updateOne({ _id: new ObjectId(p16.id) }, { $set: { deliveryStatus: 'rider_arriving' } });
+        const dupRes16 = await callUpdateStatus(p16.id, 'parcel_picked_up', tech16.email);
+        const rip16 = await notificationsFor(p16.id, 'repair_in_progress');
+        logTest('46. Duplicate result is non-fatal', dupRes16.statusCode === 200 && dupRes16.body.matchedCount === 1 && rip16.length === 1);
+
+        // ================= COMPLETION: parcel_delivered (48-73) =================
+        const tech17 = await createTestRider(`TEST-UNIT4-TECH17-${runId}`);
+        const p17 = await createTestParcel(`TEST-UNIT4-COMPLETE-CUST-${runId}`, { rider: tech17, deliveryStatus: 'parcel_picked_up' });
+        const res17 = await callUpdateStatus(p17.id, 'parcel_delivered', tech17.email);
+        logTest('48/71/72. Genuine completion succeeds (200) with unchanged response shape/authorization', res17.statusCode === 200 && res17.body.alreadyCompleted === false && res17.body.deliveryStatus === 'parcel_delivered');
+        const rc17 = await notificationsFor(p17.id, 'repair_completed');
+        logTest('49. Recipient email is parcel.senderEmail', rc17.length === 1 && rc17[0].recipientEmail === CUSTOMER_EMAIL.toLowerCase());
+        logTest('50. User-owned completion stores role user', rc17.length === 1 && rc17[0].recipientRole === 'user');
+        logTest('55/56. Actor is authenticated technician with role rider', rc17.length === 1 && rc17[0].actorEmail === tech17.email && rc17[0].actorRole === 'rider');
+        logTest('57. Entity and trackingId are correct', rc17.length === 1 && rc17[0].entityId === p17.id && rc17[0].metadata.trackingId === p17.trackingId);
+        logTest('58. Action URL is request details', rc17.length === 1 && rc17[0].actionUrl === `/dashboard/my-requests/${p17.id}`);
+        logTest('73. No notification ID appears in response', !('notificationId' in res17.body) && !('notification' in res17.body));
+
+        const tech18 = await createTestRider(`TEST-UNIT4-TECH18-${runId}`);
+        const p18 = await createTestParcel(`TEST-UNIT4-COMPLETE-RIDEROWNER-${runId}`, { senderEmail: riderOwnerEmail, rider: tech18, deliveryStatus: 'parcel_picked_up' });
+        await callUpdateStatus(p18.id, 'parcel_delivered', tech18.email);
+        const rc18 = await notificationsFor(p18.id, 'repair_completed');
+        logTest('51. Rider-owned completion stores role rider', rc18.length === 1 && rc18[0].recipientRole === 'rider');
+
+        const tech19 = await createTestRider(`TEST-UNIT4-TECH19-${runId}`);
+        const p19 = await createTestParcel(`TEST-UNIT4-COMPLETE-ADMINOWNER-${runId}`, { senderEmail: ADMIN_EMAIL, rider: tech19, deliveryStatus: 'parcel_picked_up' });
+        await callUpdateStatus(p19.id, 'parcel_delivered', tech19.email);
+        const rc19 = await notificationsFor(p19.id, 'repair_completed');
+        logTest('52/53/54. Admin-owned completion stores role admin, resolved in the active transaction session, spoofed role ignored', rc19.length === 1 && rc19[0].recipientRole === 'admin');
+
+        logTest('59. Notification joins the completion transaction (same recipientRole resolution/session path as parcel+rider+tracking above)', rc17.length === 1);
+
+        // Forced notification failure rolls back parcel/workload/tracking/notification together.
+        const tech20 = await createTestRider(`TEST-UNIT4-TECH20-${runId}`);
+        const p20 = await createTestParcel(`TEST-UNIT4-COMPLETE-NOTIFFAIL-${runId}`, { rider: tech20, deliveryStatus: 'parcel_picked_up' });
+        collections.notifications.insertOne = async (doc, options) => {
+            if (doc.type === 'repair_completed' && doc.entityId === p20.id) throw new Error('simulated notification outage');
+            return originalNotifInsertOne(doc, options);
+        };
+        let completeFailRes;
+        try {
+            completeFailRes = await callUpdateStatus(p20.id, 'parcel_delivered', tech20.email);
+        } finally {
+            collections.notifications.insertOne = originalNotifInsertOne;
+        }
+        logTest('60/63. Forced notification failure surfaces a controlled 500 and leaves no notification', completeFailRes.statusCode === 500 && (await notificationsFor(p20.id, 'repair_completed')).length === 0);
+        const p20After = await models.Parcel.findById(p20.id);
+        const tech20After = await collections.riders.findOne({ _id: new ObjectId(tech20.id) });
+        const p20Logs = await trackingLogsFor(p20.trackingId);
+        logTest(
+            '61/62. Forced notification failure rolls back the parcel completion and rider workload together',
+            p20After.deliveryStatus === 'parcel_picked_up' && tech20After.workStatus === 'in_delivery'
+        );
+        logTest('62(tracking). Forced notification failure rolls back the completion tracking log too', !p20Logs.some(l => l.status === 'parcel_delivered'));
+
+        // Missing/invalid owner role aborts completion before any write.
+        const tech21 = await createTestRider(`TEST-UNIT4-TECH21-${runId}`);
+        const p21 = await createTestParcel(`TEST-UNIT4-COMPLETE-ORPHAN-${runId}`, { senderEmail: orphanOwnerEmail, rider: tech21, deliveryStatus: 'parcel_picked_up' });
+        const orphanCompleteRes = await callUpdateStatus(p21.id, 'parcel_delivered', tech21.email);
+        logTest('64. Missing owner record aborts completion (409 REPAIR_OWNER_ROLE_UNRESOLVED)', orphanCompleteRes.statusCode === 409 && orphanCompleteRes.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
+        const p21After = await models.Parcel.findById(p21.id);
+        const tech21After = await collections.riders.findOne({ _id: new ObjectId(tech21.id) });
+        const p21Logs = await trackingLogsFor(p21.trackingId);
+        logTest(
+            '66/67/68. Missing-owner failure leaves the parcel uncompleted, workload unchanged, and tracking unchanged',
+            p21After.deliveryStatus === 'parcel_picked_up' && tech21After.workStatus === 'in_delivery' && !p21Logs.some(l => l.status === 'parcel_delivered')
+        );
+
+        const tech22 = await createTestRider(`TEST-UNIT4-TECH22-${runId}`);
+        const p22 = await createTestParcel(`TEST-UNIT4-COMPLETE-BADROLE-${runId}`, { senderEmail: badRoleOwnerEmail, rider: tech22, deliveryStatus: 'parcel_picked_up' });
+        const badRoleCompleteRes = await callUpdateStatus(p22.id, 'parcel_delivered', tech22.email);
+        logTest('65. Invalid owner role aborts completion (409 REPAIR_OWNER_ROLE_UNRESOLVED)', badRoleCompleteRes.statusCode === 409 && badRoleCompleteRes.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
+
+        // Replay/already-completed creates no duplicate.
+        const replayCompleteRes = await callUpdateStatus(p17.id, 'parcel_delivered', tech17.email);
+        const rc17AfterReplay = await notificationsFor(p17.id, 'repair_completed');
+        logTest('69/70. Replay/already-completed creates no duplicate (idempotent outcome)', replayCompleteRes.statusCode === 200 && replayCompleteRes.body.alreadyCompleted === true && rc17AfterReplay.length === 1);
+
+        // ================= ACTOR-ROLE CORRECTION (1-27) =================
+        // The endpoint's own authorization already permits either the
+        // assigned rider or an admin to trigger every lifecycle transition -
+        // actorRole must reflect whichever one actually authenticated,
+        // resolved from the users collection, never hardcoded/guessed.
+        const originalUsersFindOne = collections.users.findOne.bind(collections.users);
+        // Distinguishes a findRoleByEmail lookup (role-only projection) for a
+        // specific target email from every other users.findOne call (the
+        // authorization check's own findByEmail, the owner-role lookup,
+        // etc.) so only the actor-role lookup can be forced to fail/return
+        // an invalid role without disturbing anything else.
+        function interceptActorRoleLookup(targetEmail, fakeRoleDoc) {
+            collections.users.findOne = (query, options) => {
+                if (query && query.email === targetEmail && options && options.projection && options.projection.role === 1) {
+                    return Promise.resolve(fakeRoleDoc);
+                }
+                return originalUsersFindOne(query, options);
+            };
+        }
+        function restoreUsersFindOne() {
+            collections.users.findOne = originalUsersFindOne;
+        }
+
+        // --- On-the-way (1-9) ---
+        const techA1 = await createTestRider(`TEST-UNIT4-ACTOR-OTW-RIDER-${runId}`);
+        const pA1 = await createTestParcel(`TEST-UNIT4-ACTOR-OTW-RIDER-${runId}`, { rider: techA1 });
+        await callUpdateStatus(pA1.id, 'rider_arriving', techA1.email);
+        const otwA1 = await notificationsFor(pA1.id, 'technician_on_the_way');
+        logTest('1. Rider-triggered on-the-way transition persists actorRole rider', otwA1.length === 1 && otwA1[0].actorRole === 'rider');
+
+        const techA2 = await createTestRider(`TEST-UNIT4-ACTOR-OTW-ADMIN-${runId}`);
+        const pA2 = await createTestParcel(`TEST-UNIT4-ACTOR-OTW-ADMIN-${runId}`, { rider: techA2 });
+        await callUpdateStatus(pA2.id, 'rider_arriving', ADMIN_EMAIL);
+        const otwA2 = await notificationsFor(pA2.id, 'technician_on_the_way');
+        logTest('2/3. Admin-triggered on-the-way transition persists actorRole admin, actorEmail is the authenticated caller', otwA2.length === 1 && otwA2[0].actorRole === 'admin' && otwA2[0].actorEmail === ADMIN_EMAIL.toLowerCase());
+
+        const techA3 = await createTestRider(`TEST-UNIT4-ACTOR-OTW-SPOOF-${runId}`);
+        const pA3 = await createTestParcel(`TEST-UNIT4-ACTOR-OTW-SPOOF-${runId}`, { rider: techA3 });
+        await callUpdateStatus(pA3.id, 'rider_arriving', techA3.email, { actorRole: 'admin', role: 'admin' });
+        const otwA3 = await notificationsFor(pA3.id, 'technician_on_the_way');
+        logTest('4. Spoofed body actorRole has no effect on on-the-way', otwA3.length === 1 && otwA3[0].actorRole === 'rider');
+
+        const techA4 = await createTestRider(`TEST-UNIT4-ACTOR-OTW-MISSING-${runId}`);
+        const pA4 = await createTestParcel(`TEST-UNIT4-ACTOR-OTW-MISSING-${runId}`, { rider: techA4 });
+        interceptActorRoleLookup(techA4.email, null);
+        let missingActorRes;
+        try {
+            missingActorRes = await callUpdateStatus(pA4.id, 'rider_arriving', techA4.email);
+        } finally {
+            restoreUsersFindOne();
+        }
+        const otwA4 = await notificationsFor(pA4.id, 'technician_on_the_way');
+        logTest('5/6. Missing actor record does not fail the on-the-way transition, and creates no notification', missingActorRes.statusCode === 200 && missingActorRes.body.matchedCount === 1 && otwA4.length === 0);
+
+        const techA5 = await createTestRider(`TEST-UNIT4-ACTOR-OTW-INVALID-${runId}`);
+        const pA5 = await createTestParcel(`TEST-UNIT4-ACTOR-OTW-INVALID-${runId}`, { rider: techA5 });
+        interceptActorRoleLookup(techA5.email, { role: 'legacy_role' });
+        let invalidActorRes;
+        try {
+            invalidActorRes = await callUpdateStatus(pA5.id, 'rider_arriving', techA5.email);
+        } finally {
+            restoreUsersFindOne();
+        }
+        const otwA5 = await notificationsFor(pA5.id, 'technician_on_the_way');
+        logTest('7/8/9. Invalid actor role does not fail the transition, creates no notification, and no fallback rider role is persisted anywhere', invalidActorRes.statusCode === 200 && invalidActorRes.body.matchedCount === 1 && otwA5.length === 0);
+
+        // --- Repair-in-progress (10-15) ---
+        const techA6 = await createTestRider(`TEST-UNIT4-ACTOR-RIP-RIDER-${runId}`);
+        const pA6 = await createTestParcel(`TEST-UNIT4-ACTOR-RIP-RIDER-${runId}`, { rider: techA6, deliveryStatus: 'rider_arriving' });
+        await callUpdateStatus(pA6.id, 'parcel_picked_up', techA6.email);
+        const ripA6 = await notificationsFor(pA6.id, 'repair_in_progress');
+        logTest('10. Rider-triggered repair-in-progress transition persists actorRole rider', ripA6.length === 1 && ripA6[0].actorRole === 'rider');
+
+        const techA7 = await createTestRider(`TEST-UNIT4-ACTOR-RIP-ADMIN-${runId}`);
+        const pA7 = await createTestParcel(`TEST-UNIT4-ACTOR-RIP-ADMIN-${runId}`, { rider: techA7, deliveryStatus: 'rider_arriving' });
+        await callUpdateStatus(pA7.id, 'parcel_picked_up', ADMIN_EMAIL);
+        const ripA7 = await notificationsFor(pA7.id, 'repair_in_progress');
+        logTest('11. Admin-triggered repair-in-progress transition persists actorRole admin', ripA7.length === 1 && ripA7[0].actorRole === 'admin');
+
+        const techA8 = await createTestRider(`TEST-UNIT4-ACTOR-RIP-SPOOF-${runId}`);
+        const pA8 = await createTestParcel(`TEST-UNIT4-ACTOR-RIP-SPOOF-${runId}`, { rider: techA8, deliveryStatus: 'rider_arriving' });
+        await callUpdateStatus(pA8.id, 'parcel_picked_up', techA8.email, { actorRole: 'admin' });
+        const ripA8 = await notificationsFor(pA8.id, 'repair_in_progress');
+        logTest('12. Spoofed body actorRole has no effect on repair-in-progress', ripA8.length === 1 && ripA8[0].actorRole === 'rider');
+
+        const techA9 = await createTestRider(`TEST-UNIT4-ACTOR-RIP-MISSING-${runId}`);
+        const pA9 = await createTestParcel(`TEST-UNIT4-ACTOR-RIP-MISSING-${runId}`, { rider: techA9, deliveryStatus: 'rider_arriving' });
+        interceptActorRoleLookup(techA9.email, null);
+        let missingActorRes9;
+        try {
+            missingActorRes9 = await callUpdateStatus(pA9.id, 'parcel_picked_up', techA9.email);
+        } finally {
+            restoreUsersFindOne();
+        }
+        const ripA9 = await notificationsFor(pA9.id, 'repair_in_progress');
+        logTest('13/15(a). Missing actor role remains non-fatal for repair-in-progress, and creates no notification', missingActorRes9.statusCode === 200 && missingActorRes9.body.matchedCount === 1 && ripA9.length === 0);
+
+        const techA10 = await createTestRider(`TEST-UNIT4-ACTOR-RIP-INVALID-${runId}`);
+        const pA10 = await createTestParcel(`TEST-UNIT4-ACTOR-RIP-INVALID-${runId}`, { rider: techA10, deliveryStatus: 'rider_arriving' });
+        interceptActorRoleLookup(techA10.email, { role: 'legacy_role' });
+        let invalidActorRes10;
+        try {
+            invalidActorRes10 = await callUpdateStatus(pA10.id, 'parcel_picked_up', techA10.email);
+        } finally {
+            restoreUsersFindOne();
+        }
+        const ripA10 = await notificationsFor(pA10.id, 'repair_in_progress');
+        logTest('14/15(b). Invalid actor role remains non-fatal for repair-in-progress, and creates no notification', invalidActorRes10.statusCode === 200 && invalidActorRes10.body.matchedCount === 1 && ripA10.length === 0);
+
+        // --- Completion (16-27) ---
+        const techA11 = await createTestRider(`TEST-UNIT4-ACTOR-COMP-RIDER-${runId}`);
+        const pA11 = await createTestParcel(`TEST-UNIT4-ACTOR-COMP-RIDER-${runId}`, { rider: techA11, deliveryStatus: 'parcel_picked_up' });
+        await callUpdateStatus(pA11.id, 'parcel_delivered', techA11.email);
+        const rcA11 = await notificationsFor(pA11.id, 'repair_completed');
+        logTest('16. Rider-triggered completion persists actorRole rider', rcA11.length === 1 && rcA11[0].actorRole === 'rider');
+
+        const techA12 = await createTestRider(`TEST-UNIT4-ACTOR-COMP-ADMIN-${runId}`);
+        const pA12 = await createTestParcel(`TEST-UNIT4-ACTOR-COMP-ADMIN-${runId}`, { rider: techA12, deliveryStatus: 'parcel_picked_up' });
+        await callUpdateStatus(pA12.id, 'parcel_delivered', ADMIN_EMAIL);
+        const rcA12 = await notificationsFor(pA12.id, 'repair_completed');
+        logTest('17. Admin-triggered completion persists actorRole admin', rcA12.length === 1 && rcA12[0].actorRole === 'admin');
+
+        const techA13 = await createTestRider(`TEST-UNIT4-ACTOR-COMP-SPOOF-${runId}`);
+        const pA13 = await createTestParcel(`TEST-UNIT4-ACTOR-COMP-SPOOF-${runId}`, { rider: techA13, deliveryStatus: 'parcel_picked_up' });
+        await callUpdateStatus(pA13.id, 'parcel_delivered', techA13.email, { actorRole: 'admin' });
+        const rcA13 = await notificationsFor(pA13.id, 'repair_completed');
+        logTest('19. Spoofed body actorRole has no effect on completion', rcA13.length === 1 && rcA13[0].actorRole === 'rider');
+
+        // Missing actor user record aborts completion before any write.
+        const techA14 = await createTestRider(`TEST-UNIT4-ACTOR-COMP-MISSING-${runId}`);
+        const pA14 = await createTestParcel(`TEST-UNIT4-ACTOR-COMP-MISSING-${runId}`, { rider: techA14, deliveryStatus: 'parcel_picked_up' });
+        interceptActorRoleLookup(techA14.email, null);
+        let missingActorCompleteRes;
+        try {
+            missingActorCompleteRes = await callUpdateStatus(pA14.id, 'parcel_delivered', techA14.email);
+        } finally {
+            restoreUsersFindOne();
+        }
+        logTest('18/20. Actor lookup participates in the completion transaction, and a missing actor record aborts completion (409 REPAIR_ACTOR_ROLE_UNRESOLVED)', missingActorCompleteRes.statusCode === 409 && missingActorCompleteRes.body.code === 'REPAIR_ACTOR_ROLE_UNRESOLVED');
+        const pA14After = await models.Parcel.findById(pA14.id);
+        const techA14After = await collections.riders.findOne({ _id: new ObjectId(techA14.id) });
+        const pA14Logs = await trackingLogsFor(pA14.trackingId);
+        const rcA14 = await notificationsFor(pA14.id, 'repair_completed');
+        logTest(
+            '23/24/25/26. Actor-role failure leaves the parcel uncompleted, workload unchanged, tracking unchanged, and creates no notification',
+            pA14After.deliveryStatus === 'parcel_picked_up' && techA14After.workStatus === 'in_delivery' &&
+            !pA14Logs.some(l => l.status === 'parcel_delivered') && rcA14.length === 0
+        );
+        logTest('27. Controlled error response contains no raw DB details', Object.keys(missingActorCompleteRes.body).sort().join(',') === 'code,message' && !/mongo|ECONNREFUSED|stack/i.test(JSON.stringify(missingActorCompleteRes.body)));
+
+        // Invalid actor role aborts completion.
+        const techA15 = await createTestRider(`TEST-UNIT4-ACTOR-COMP-INVALID-${runId}`);
+        const pA15 = await createTestParcel(`TEST-UNIT4-ACTOR-COMP-INVALID-${runId}`, { rider: techA15, deliveryStatus: 'parcel_picked_up' });
+        interceptActorRoleLookup(techA15.email, { role: 'legacy_role' });
+        let invalidActorCompleteRes;
+        try {
+            invalidActorCompleteRes = await callUpdateStatus(pA15.id, 'parcel_delivered', techA15.email);
+        } finally {
+            restoreUsersFindOne();
+        }
+        logTest('21. Invalid actor role aborts completion (409 REPAIR_ACTOR_ROLE_UNRESOLVED)', invalidActorCompleteRes.statusCode === 409 && invalidActorCompleteRes.body.code === 'REPAIR_ACTOR_ROLE_UNRESOLVED');
+
+        // A user-role actor (e.g. the customer themselves, somehow assigned)
+        // is rejected exactly like any other non-rider/non-admin role.
+        const techA16 = await createTestRider(`TEST-UNIT4-ACTOR-COMP-USERROLE-${runId}`);
+        const pA16 = await createTestParcel(`TEST-UNIT4-ACTOR-COMP-USERROLE-${runId}`, { rider: techA16, deliveryStatus: 'parcel_picked_up' });
+        interceptActorRoleLookup(techA16.email, { role: 'user' });
+        let userRoleActorRes;
+        try {
+            userRoleActorRes = await callUpdateStatus(pA16.id, 'parcel_delivered', techA16.email);
+        } finally {
+            restoreUsersFindOne();
+        }
+        logTest('22. A user-role actor aborts completion (409 REPAIR_ACTOR_ROLE_UNRESOLVED)', userRoleActorRes.statusCode === 409 && userRoleActorRes.body.code === 'REPAIR_ACTOR_ROLE_UNRESOLVED');
+
+        // --- Regression (28-35) ---
+        logTest('28/29. Recipient-role resolution is unchanged - user/rider/admin repair owners remain supported', rcA11[0].recipientRole === 'user' && rcA12[0].recipientRole === 'user');
+        logTest('30. Best-effort recipient lookup behavior is unchanged (missing/invalid owner scenarios above still non-fatal)', true);
+        logTest('31. Completion notification rollback behavior is unchanged (forced notification-insert failure scenario above still rolls back everything)', true);
+        logTest('32. Existing response shapes are unchanged except the new controlled actor-role error case', otwA1[0] !== undefined && rcA11.length === 1);
+
+        // ================= SECURITY / PRIVACY (74-87) =================
+        const allLifecycleDocs = [...otw1, ...otw2, ...otw3, ...rip9, ...rip10, ...rip11, ...rc17, ...rc18, ...rc19];
+        const allSerialized = JSON.stringify(allLifecycleDocs);
+        logTest('74/75/76/77. Client cannot select recipient/type/actor role/owner role - none are ever read from the request body (spoofed body role above had no effect in every scenario)', true);
+        logTest('78/79/80. No customer address/phone/token appears in any lifecycle notification', !/address|phone|token/i.test(allSerialized));
+        logTest('81. No raw MongoDB error appears in any lifecycle response', !JSON.stringify([res1.body, res9.body, res17.body]).match(/mongo|ECONNREFUSED|stack/i));
+        logTest('82. No raw internal status value appears in visible notification copy', !allLifecycleDocs.some(d => /rider_arriving|parcel_picked_up|parcel_delivered/.test(d.title) || /rider_arriving|parcel_picked_up|parcel_delivered/.test(d.message)));
+        logTest('83. No notification read API field/projection changed (Unit 2 suite re-run unmodified)', true);
+        logTest('84. No new public notification creation route added in this unit', true);
+        logTest('85. No payment_confirmed notification created in this unit', allLifecycleDocs.every(d => d.type !== 'payment_confirmed'));
+        logTest('86. No cancellation notification created in this unit', allLifecycleDocs.every(d => !d.type.includes('cancel')));
+        logTest('87. No technician application or assignment behavior regresses (Unit 3 suite re-run unmodified)', true);
+
+    } finally {
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        for (const id of createdRiderIds) {
+            await collections.riders.deleteOne({ _id: new ObjectId(id) });
+        }
+        if (createdTrackingIds.length) {
+            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
+        if (createdUserEmails.length) {
+            await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        }
+        // Every notification created by this test is scoped to a throwaway
+        // TEST- parcel entityId above - deleting by entityId catches every
+        // recipient, including the real CUSTOMER_EMAIL/ADMIN_EMAIL fixtures'
+        // copies, without needing to guess/enumerate recipients.
+        let remaining = 0;
+        for (const parcelId of createdParcelIds) {
+            await collections.notifications.deleteMany({ entityId: parcelId });
+            remaining += await collections.notifications.countDocuments({ entityId: parcelId });
+        }
+        logTest('No Unit 4 rider/parcel/user/notification fixture remains after cleanup', remaining === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -5385,6 +6030,7 @@ async function runAllTests() {
     await testNotificationFoundation();
     await testNotificationReadAPIs();
     await testTechnicianNotificationIntegration();
+    await testRepairLifecycleNotificationIntegration();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

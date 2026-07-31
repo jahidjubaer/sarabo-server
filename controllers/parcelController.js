@@ -260,12 +260,13 @@ class ParcelController {
             // completeParcel. Everything below only ever applies to the
             // earlier, technician-only steps of the lifecycle.
             if (requestedStatus === 'parcel_delivered') {
-                return this.completeParcel(res, parcel);
+                return this.completeParcel(res, parcel, req.decoded_email);
             }
 
             if (requestedStatus === parcel.deliveryStatus) {
                 // Idempotent re-submission of the current status: nothing to
-                // persist, and no tracking log should be duplicated for it.
+                // persist, and no tracking log (or lifecycle notification)
+                // should be duplicated for it.
                 return res.send({ message: 'status unchanged', matchedCount: 1, modifiedCount: 0 });
             }
 
@@ -291,9 +292,63 @@ class ParcelController {
             // arbitrary/unrelated trackingId.
             logTracking(this.collections.trackings, parcel.trackingId, requestedStatus);
 
+            // Best-effort lifecycle notification - only reached after a
+            // genuine, newly-committed transition (never on the no-op or
+            // invalid-transition paths above). This never runs inside a
+            // transaction (the status update itself isn't one), and a
+            // failure here can never turn this already-successful status
+            // transition into an error response - see
+            // notifyRepairOwnerBestEffort.
+            if (requestedStatus === 'rider_arriving') {
+                await this.notifyRepairOwnerBestEffort({ parcel, type: 'technician_on_the_way', actorEmail: req.decoded_email });
+            } else if (requestedStatus === 'parcel_picked_up') {
+                await this.notifyRepairOwnerBestEffort({ parcel, type: 'repair_in_progress', actorEmail: req.decoded_email });
+            }
+
             res.send(result);
         } catch (error) {
             res.status(500).send({ message: 'Error updating repair status', error: error.message });
+        }
+    }
+
+    // Best-effort, non-blocking repair-lifecycle notification for the two
+    // non-transactional status transitions (rider_arriving, parcel_picked_up)
+    // - never for repair_completed, which joins completeParcel's own
+    // transaction instead. Resolves both the repair owner's real current
+    // role and the authenticated actor's real current role from the users
+    // collection (never trusted from the parcel document, request body, or
+    // a hardcoded assumption, never defaulted); if either lookup fails, or
+    // the notification insert itself fails, the failure is logged and
+    // swallowed here so the already-successful status transition above is
+    // never turned into an error response.
+    async notifyRepairOwnerBestEffort({ parcel, type, actorEmail }) {
+        try {
+            const resolvedOwnerRole = await this.User.findRoleByEmail(parcel.senderEmail);
+            if (!resolvedOwnerRole) {
+                console.error('Repair owner role could not be resolved for lifecycle notification (non-fatal):', type, parcel._id.toString());
+                return;
+            }
+            // The endpoint's own authorization already permits either the
+            // assigned rider or an admin to trigger this transition - the
+            // persisted actorRole must reflect whichever one actually
+            // authenticated, never an assumed/hardcoded value.
+            const resolvedActorRole = await this.User.findRoleByEmail(actorEmail);
+            if (resolvedActorRole !== 'rider' && resolvedActorRole !== 'admin') {
+                console.error('Actor role could not be resolved as rider/admin for lifecycle notification (non-fatal):', type, parcel._id.toString());
+                return;
+            }
+            await this.notifications.createNotification({
+                recipientEmail: parcel.senderEmail,
+                recipientRole: resolvedOwnerRole,
+                type,
+                entityType: 'parcel',
+                entityId: parcel._id.toString(),
+                actorEmail,
+                actorRole: resolvedActorRole,
+                metadata: { trackingId: parcel.trackingId }
+            });
+        } catch (error) {
+            console.error('Best-effort repair lifecycle notification failed (non-fatal):', type, error.message);
         }
     }
 
@@ -308,7 +363,7 @@ class ParcelController {
     // for a retry to repair it. The assigned technician is always the one
     // recorded on the repair request itself (parcel.riderId) - a
     // client-supplied riderId is never trusted to select who gets reset.
-    async completeParcel(res, parcel) {
+    async completeParcel(res, parcel, actorEmail) {
         try {
             if (!parcel.riderId || !ObjectId.isValid(parcel.riderId)) {
                 return res.status(409).send({ message: 'this request has no valid assigned technician', code: 'REQUEST_NOT_ASSIGNED' });
@@ -380,6 +435,36 @@ class ParcelController {
                         return;
                     }
 
+                    // The repair request's owner is resolved from the real
+                    // users collection state inside this same transaction -
+                    // never trusted from the parcel document itself, and
+                    // never defaulted. Resolved before any guarded write
+                    // below, so a missing/invalid owner account aborts
+                    // completion before anything commits: no parcel
+                    // completion, no technician reset, no tracking write, no
+                    // notification. Mirrors the same outcome-object pattern
+                    // as every other pre-write conflict above (nothing was
+                    // written yet, so no throw/rollback is needed).
+                    const resolvedOwnerRole = await this.User.findRoleByEmail(freshParcel.senderEmail, { session: mongoSession });
+                    if (!resolvedOwnerRole) {
+                        outcome = { httpStatus: 409, code: 'REPAIR_OWNER_ROLE_UNRESOLVED', message: 'repair request owner account could not be verified' };
+                        return;
+                    }
+
+                    // The authenticated actor's real current role is
+                    // resolved the same way, inside the same transaction -
+                    // this endpoint's own authorization already permits
+                    // either the assigned rider or an admin to complete a
+                    // repair, so the persisted actorRole must reflect
+                    // whichever one actually authenticated, never an
+                    // assumed/hardcoded value. Resolved before any guarded
+                    // write below, mirroring the owner-role check above.
+                    const resolvedActorRole = await this.User.findRoleByEmail(actorEmail, { session: mongoSession });
+                    if (resolvedActorRole !== 'rider' && resolvedActorRole !== 'admin') {
+                        outcome = { httpStatus: 409, code: 'REPAIR_ACTOR_ROLE_UNRESOLVED', message: 'repair completion actor account could not be verified' };
+                        return;
+                    }
+
                     // Guarded atomically against a concurrent completion
                     // attempt on the same request - re-verifies the status is
                     // still what was just read, not just a read-then-write
@@ -420,6 +505,22 @@ class ParcelController {
                     if (!trackingResult.insertedId) {
                         throw Object.assign(new Error('completion tracking log failed'), { code: 'COMPLETION_FAILED' });
                     }
+
+                    // Notification joins this same transaction - a failure
+                    // here aborts the parcel completion, technician reset,
+                    // and tracking log above exactly like any other guarded
+                    // write in this transaction.
+                    await this.notifications.createNotification({
+                        session: mongoSession,
+                        recipientEmail: freshParcel.senderEmail,
+                        recipientRole: resolvedOwnerRole,
+                        type: 'repair_completed',
+                        entityType: 'parcel',
+                        entityId: freshParcel._id.toString(),
+                        actorEmail,
+                        actorRole: resolvedActorRole,
+                        metadata: { trackingId: freshParcel.trackingId }
+                    });
 
                     outcome = { success: true };
                 });
