@@ -23,8 +23,13 @@ function normalize(value) {
 // `callerEmail` is only present for the browser path, where an authenticated
 // Firebase identity must additionally match the request owner. The webhook
 // has no such identity and relies solely on Stripe/MongoDB agreement.
-function createPaymentProcessor(models, collections) {
-    const { Parcel } = models;
+// `notifications` is the already-constructed createNotificationService(models)
+// instance, injected by the caller (controllers/paymentController.js) rather
+// than required directly here - services/notificationService.js itself
+// requires this file for `normalize`, so requiring it back here would create
+// a module-load cycle between the two service files.
+function createPaymentProcessor(models, collections, notifications) {
+    const { Parcel, User } = models;
     const checkoutSessionManager = createCheckoutSessionManager(collections);
 
     return async function processVerifiedCheckoutSession({ session, source, callerEmail = null }) {
@@ -135,8 +140,21 @@ function createPaymentProcessor(models, collections) {
         const mongoSession = client.startSession();
         let committedPayment = null;
         let conflict = false;
+        let ownerRoleUnresolved = false;
         try {
             await mongoSession.withTransaction(async () => {
+                // Resolved first, inside the same transaction, before any
+                // write below - the real current role, never trusted from
+                // the parcel document, the client, or Stripe. A missing or
+                // invalid owner account aborts before anything is written,
+                // mirroring the outcome-object pattern used for every other
+                // pre-write conflict in this function.
+                const resolvedOwnerRole = await User.findRoleByEmail(parcel.senderEmail, { session: mongoSession });
+                if (!resolvedOwnerRole) {
+                    ownerRoleUnresolved = true;
+                    return;
+                }
+
                 let insertedId;
                 try {
                     paymentRecord.paidAt = new Date();
@@ -179,10 +197,32 @@ function createPaymentProcessor(models, collections) {
                 // the parcel is actually paid.
                 await checkoutSessionManager.completeByParcelId(parcel._id.toString(), mongoSession);
 
+                // Joins this same transaction, reached only on the genuine
+                // first-time commit path (never on a conflict/no-op return
+                // above, never on the alreadyProcessed fast path, which
+                // returns long before any transaction opens). A genuine
+                // failure here throws and aborts the whole transaction - no
+                // payment document and no paid parcel can commit without it.
+                await notifications.createNotification({
+                    session: mongoSession,
+                    recipientEmail: parcel.senderEmail,
+                    recipientRole: resolvedOwnerRole,
+                    type: 'payment_confirmed',
+                    entityType: 'parcel',
+                    entityId: parcel._id.toString(),
+                    actorEmail: null,
+                    actorRole: null,
+                    metadata: { trackingId: parcel.trackingId }
+                });
+
                 committedPayment = { ...paymentRecord, _id: insertedId };
             });
         } finally {
             await mongoSession.endSession();
+        }
+
+        if (ownerRoleUnresolved) {
+            return { code: 'REPAIR_OWNER_ROLE_UNRESOLVED' };
         }
 
         if (conflict) {

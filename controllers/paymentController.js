@@ -3,6 +3,7 @@ const { ObjectId } = require('mongodb');
 const { createPaymentProcessor, normalize } = require('../services/paymentProcessor');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
 const { getPaymentEligibility } = require('../services/paymentEligibility');
+const { createNotificationService } = require('../services/notificationService');
 const { PAYMENT_CURRENCY, toSmallestUnit } = require('../config/paymentConfig');
 
 // Stripe Checkout Session IDs are base62-ish (letters, digits, underscores).
@@ -16,9 +17,15 @@ class PaymentController {
         this.Parcel = models.Parcel;
         this.User = models.User;
         this.collections = collections;
+        // Same notification-service construction parcelController.js already
+        // uses - injected into the payment processor rather than required
+        // from within services/paymentProcessor.js itself, since
+        // services/notificationService.js requires paymentProcessor.js back
+        // for `normalize` and a direct require here would create a cycle.
+        this.notifications = createNotificationService(models);
         // Shared with the Stripe webhook handler below - exactly one place
         // validates a Checkout Session and records a payment for it.
-        this.processCheckoutSession = createPaymentProcessor(models, collections);
+        this.processCheckoutSession = createPaymentProcessor(models, collections, this.notifications);
         // Guards against duplicate concurrent Stripe Checkout Sessions for
         // the same parcel - see services/checkoutSessionManager.js.
         this.checkoutSessions = createCheckoutSessionManager(collections);
@@ -231,6 +238,8 @@ class PaymentController {
                     return res.status(409).send({ message: 'this request has already been paid for' });
                 case 'REQUEST_CANCELLED':
                     return res.status(409).send({ message: 'this request has been cancelled and cannot be paid for', code: 'REQUEST_CANCELLED' });
+                case 'REPAIR_OWNER_ROLE_UNRESOLVED':
+                    return res.status(409).send({ message: 'repair request owner account could not be verified', code: 'REPAIR_OWNER_ROLE_UNRESOLVED' });
                 default:
                     return res.status(500).send({ message: 'Error processing payment success' });
             }

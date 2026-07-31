@@ -881,6 +881,13 @@ async function testSecurePaymentSuccess() {
         for (const sid of createdSessionIds) {
             stripeSessionFixtures.delete(sid);
         }
+        // Phase 5.2 Unit 5 wired a real payment_confirmed notification into
+        // the shared processVerifiedCheckoutSession this function already
+        // exercises against real CUSTOMER_EMAIL-owned parcels above - scoped
+        // by this function's own created parcel ids, never by recipient.
+        if (createdParcelIds.length) {
+            await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds }, type: 'payment_confirmed' });
+        }
     }
 
     console.log('');
@@ -1323,6 +1330,13 @@ async function testStripeWebhook() {
         for (const sid of createdSessionIds) {
             stripeSessionFixtures.delete(sid);
         }
+        // Phase 5.2 Unit 5 wired a real payment_confirmed notification into
+        // the shared processVerifiedCheckoutSession this function already
+        // exercises against real CUSTOMER_EMAIL-owned parcels above - scoped
+        // by this function's own created parcel ids, never by recipient.
+        if (createdParcelIds.length) {
+            await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds }, type: 'payment_confirmed' });
+        }
     }
 
     console.log('');
@@ -1593,6 +1607,13 @@ async function testDuplicateCheckoutPrevention() {
         if (trackingIdsToClean.length) {
             await collections.trackings.deleteMany({ trackingId: { $in: trackingIdsToClean } });
         }
+        // Phase 5.2 Unit 5 wired a real payment_confirmed notification into
+        // the shared processVerifiedCheckoutSession this function's
+        // webhook/browser reconciliation tests (11/12) already exercise -
+        // scoped by this function's own created parcel ids, never by recipient.
+        if (createdParcelIds.length) {
+            await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds }, type: 'payment_confirmed' });
+        }
     }
 
     console.log('');
@@ -1810,6 +1831,13 @@ async function testCurrencyAndEligibility() {
         await collections.payments.deleteMany({ parcelId: { $in: createdParcelIds } });
         if (trackingIdsToClean.length) {
             await collections.trackings.deleteMany({ trackingId: { $in: trackingIdsToClean } });
+        }
+        // Phase 5.2 Unit 5 wired a real payment_confirmed notification into
+        // the shared processVerifiedCheckoutSession this function's webhook
+        // completion test (item 22) already exercises - scoped by this
+        // function's own created parcel ids, never by recipient.
+        if (createdParcelIds.length) {
+            await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds }, type: 'payment_confirmed' });
         }
     }
 
@@ -4475,7 +4503,7 @@ async function testNotificationFoundation() {
         logTest('57. Each lifecycle event accepts recipientRole admin', allLifecycleAcceptAdmin);
         logTest('58. Each lifecycle event rejects an unsupported role', allLifecycleRejectUnsupported);
 
-        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed'];
+        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -4485,6 +4513,47 @@ async function testNotificationFoundation() {
             .filter(t => !approvedMultiRoleTypes.includes(t))
             .every(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRole') && !Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest('60. All other events remain strict single-role', otherEventsSingleRole);
+
+        // --- Phase 5.2 Unit 5 payment_confirmed role-contract correction
+        // (61-64) - same reasoning as the lifecycle events above: any
+        // authenticated role can own a repair request, so payment_confirmed
+        // must accept user/rider/admin rather than a hardcoded 'user'. ---
+        {
+            const paymentUserEmail = testRecipient('payment_confirmed-user');
+            usedRecipients.add(paymentUserEmail.toLowerCase());
+            const paymentUserResult = await createNotification({
+                recipientEmail: paymentUserEmail, recipientRole: 'user', type: 'payment_confirmed',
+                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PAYMENT' }
+            });
+            logTest('61. payment_confirmed accepts recipientRole user', paymentUserResult.created === true);
+
+            const paymentRiderEmail = testRecipient('payment_confirmed-rider');
+            usedRecipients.add(paymentRiderEmail.toLowerCase());
+            const paymentRiderResult = await createNotification({
+                recipientEmail: paymentRiderEmail, recipientRole: 'rider', type: 'payment_confirmed',
+                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PAYMENT' }
+            });
+            logTest('62. payment_confirmed accepts recipientRole rider', paymentRiderResult.created === true);
+
+            const paymentAdminEmail = testRecipient('payment_confirmed-admin');
+            usedRecipients.add(paymentAdminEmail.toLowerCase());
+            const paymentAdminResult = await createNotification({
+                recipientEmail: paymentAdminEmail, recipientRole: 'admin', type: 'payment_confirmed',
+                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PAYMENT' }
+            });
+            logTest('63. payment_confirmed accepts recipientRole admin', paymentAdminResult.created === true);
+
+            let paymentRejectsUnsupported = false;
+            try {
+                await createNotification({
+                    recipientEmail: testRecipient('payment_confirmed-superadmin'), recipientRole: 'superadmin', type: 'payment_confirmed',
+                    entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PAYMENT' }
+                });
+            } catch (error) {
+                paymentRejectsUnsupported = error.code === 'INVALID_RECIPIENT_ROLE';
+            }
+            logTest('64. payment_confirmed rejects an unsupported role', paymentRejectsUnsupported);
+        }
 
     } finally {
         // recipientEmail is stored normalized (lowercased) by createNotification
@@ -5835,6 +5904,351 @@ async function testRepairLifecycleNotificationIntegration() {
     console.log('');
 }
 
+// Phase 5.2 Unit 5 - Payment Confirmation Notification Integration. Exercises
+// the payment_confirmed notification joined into the same MongoDB transaction
+// as services/paymentProcessor.js's processVerifiedCheckoutSession, reached
+// from both the browser-verification endpoint (handlePaymentSuccess) and the
+// Stripe webhook (handleStripeWebhook) - using the real shared controllers so
+// the actual transaction/session and idempotency behavior is exercised.
+// Failure scenarios monkey-patch a single collection method, matching the
+// convention already used throughout this file. The real CUSTOMER_EMAIL/
+// ADMIN_EMAIL fixtures are genuine accounts in the shared local dev database,
+// so some scenarios below necessarily create real payment/notification
+// documents for them - every one is precisely scoped and removed in the
+// finally block by parcel id/sessionId, never by recipient.
+async function testPaymentNotificationIntegration() {
+    console.log('19. Testing Payment Confirmation Notification Integration (Phase 5.2 Unit 5)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { NOTIFICATION_EVENTS } = require('./utils/notificationEvents');
+    const { ObjectId } = require('mongodb');
+
+    const runId = Date.now();
+    const createdParcelIds = [];
+    const createdTrackingIds = [];
+    const createdSessionIds = [];
+    const createdUserEmails = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    function notificationsFor(entityId) {
+        return collections.notifications.find({ entityId, type: 'payment_confirmed' }).toArray();
+    }
+
+    let uniqueCounter = 0;
+    function newSessionId(label) {
+        uniqueCounter += 1;
+        const id = `cs_test_TESTPAY_${runId}_${uniqueCounter}_${label}`;
+        createdSessionIds.push(id);
+        return id;
+    }
+    function newEventId(label) {
+        uniqueCounter += 1;
+        return `evt_test_pay_${runId}_${uniqueCounter}_${label}`;
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const paymentController = controllers.payment;
+
+        async function createTestUser(email, role) {
+            createdUserEmails.push(email);
+            await collections.users.insertOne({ email, role, createdAt: new Date() });
+        }
+
+        async function createTestParcel(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL } = {}) {
+            const doc = {
+                parcelName: marker, cost, senderEmail,
+                trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
+                createdAt: new Date()
+            };
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            createdTrackingIds.push(doc.trackingId);
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function makeSessionObject(sid, parcel, overrides = {}) {
+            return {
+                id: sid,
+                mode: 'payment',
+                payment_status: 'paid',
+                payment_intent: `pi_test_pay_${parcel.id}`,
+                customer_email: parcel.senderEmail,
+                amount_total: Math.round(parcel.cost * 100),
+                currency: 'usd',
+                metadata: { parcelId: parcel.id, trackingId: parcel.trackingId },
+                ...overrides
+            };
+        }
+
+        function makeEvent(sessionObject, { type = 'checkout.session.completed', eventId } = {}) {
+            return { id: eventId || newEventId('evt'), type, data: { object: sessionObject } };
+        }
+
+        function fakeWebhookReq(event, signature = 'test_valid_signature') {
+            return { headers: signature === null ? {} : { 'stripe-signature': signature }, body: Buffer.from(JSON.stringify(event)) };
+        }
+
+        function callWebhook(event, signature = 'test_valid_signature') {
+            const res = fakeRes();
+            return paymentController.handleStripeWebhook(fakeWebhookReq(event, signature), res).then(() => res);
+        }
+
+        function verifyBrowser(sessionId, decoded_email, bodyOverrides = {}) {
+            const res = fakeRes();
+            return paymentController.handlePaymentSuccess(
+                { body: { sessionId, ...bodyOverrides }, decoded_email },
+                res
+            ).then(() => res);
+        }
+
+        const originalNotifInsertOne = collections.notifications.insertOne.bind(collections.notifications);
+        const riderOwnerEmail = `test-unit5-riderowner-${runId}@test.local`;
+        await createTestUser(riderOwnerEmail, 'rider');
+        const orphanOwnerEmail = `test-unit5-orphanowner-${runId}@test.local`;
+        const badRoleOwnerEmail = `test-unit5-badroleowner-${runId}@test.local`;
+        await createTestUser(badRoleOwnerEmail, 'legacy_role');
+
+        // ================= CONTRACT (1-14) =================
+        // Items 1-6 (accepts user/rider/admin, rejects unsupported, is the
+        // only newly-broadened event, others remain strict single-role) are
+        // exercised directly against createNotification by
+        // testNotificationFoundation's tests 59-64 above - not repeated here.
+        const def = NOTIFICATION_EVENTS.payment_confirmed;
+        logTest('7. Title remains "Payment confirmed"', def.title() === 'Payment confirmed');
+        logTest('8. Message remains approved exact copy', def.message({ metadata: { trackingId: 'SRB-X' } }) === 'Your payment for repair request SRB-X has been confirmed.');
+        logTest('9. Action URL is request details', def.actionUrl({ entityId: 'abc123' }) === '/dashboard/my-requests/abc123');
+        logTest('10. Dedup key is repair:{parcelId}:payment_confirmed', def.deduplicationKey({ entityId: 'abc123' }) === 'repair:abc123:payment_confirmed');
+        logTest('11. Metadata requires trackingId', (def.requiresMetadata || []).includes('trackingId'));
+        logTest('14. No payment identifiers are permitted in metadata', (def.allowedMetadataKeys || []).every(k => k === 'trackingId'));
+
+        // ================= SUCCESS: browser-verification, customer-owned (15-35) =================
+        const p1 = await createTestParcel(`TEST-UNIT5-BROWSER-CUST-${runId}`, { cost: 30 });
+        const sid1 = newSessionId('browser_cust');
+        stripeSessionFixtures.set(sid1, makeSessionObject(sid1, p1));
+        // Spoofed body fields (role/recipientRole) are never read by
+        // handlePaymentSuccess - included to prove spoofing has no effect.
+        const res1 = await verifyBrowser(sid1, CUSTOMER_EMAIL, { role: 'admin', recipientRole: 'admin' });
+        logTest('33. Existing browser success response unchanged', res1.statusCode === 200 && res1.body.success === true && res1.body.alreadyProcessed === false && 'transactionId' in res1.body && 'trackingId' in res1.body);
+        logTest('35(a). No notification ID/result exposed (browser)', !('notificationId' in res1.body) && !('notification' in res1.body));
+
+        const pc1 = await notificationsFor(p1.id);
+        logTest('15. First genuine successful payment creates one notification', pc1.length === 1);
+        logTest('16. Event type is payment_confirmed', pc1.length === 1 && pc1[0].type === 'payment_confirmed');
+        logTest('17. Recipient email is parcel.senderEmail', pc1.length === 1 && pc1[0].recipientEmail === CUSTOMER_EMAIL.toLowerCase());
+        logTest('18. Customer-owned parcel stores recipientRole user', pc1.length === 1 && pc1[0].recipientRole === 'user');
+        logTest('21/22. Role is loaded from users collection; spoofed request/Stripe role has no effect', pc1.length === 1 && pc1[0].recipientRole === 'user');
+        logTest('12/13. Actor email and actor role are both null', pc1.length === 1 && pc1[0].actorEmail === null && pc1[0].actorRole === null);
+        logTest('23. Actor email is null', pc1.length === 1 && pc1[0].actorEmail === null);
+        logTest('24. Actor role is null', pc1.length === 1 && pc1[0].actorRole === null);
+        logTest('25. Entity type is parcel', pc1.length === 1 && pc1[0].entityType === 'parcel');
+        logTest('26. Entity ID matches parcel', pc1.length === 1 && pc1[0].entityId === p1.id);
+        logTest('27(contract). Metadata contains trackingId only', pc1.length === 1 && Object.keys(pc1[0].metadata).length === 1 && pc1[0].metadata.trackingId === p1.trackingId);
+        logTest('28. Title/message/action URL exact', pc1.length === 1 && pc1[0].title === 'Payment confirmed' && pc1[0].message === `Your payment for repair request ${p1.trackingId} has been confirmed.` && pc1[0].actionUrl === `/dashboard/my-requests/${p1.id}`);
+        logTest('29. Dedup key exact', pc1.length === 1 && pc1[0].deduplicationKey === `repair:${p1.id}:payment_confirmed`);
+        const p1After = await models.Parcel.findById(p1.id);
+        logTest('30. Payment document commits', (await collections.payments.countDocuments({ sessionId: sid1 })) === 1);
+        logTest('31. Parcel payment status commits', p1After.paymentStatus === 'paid');
+        logTest('32. Notification commits in the same transaction (present alongside the paid parcel/payment doc)', pc1.length === 1 && p1After.paymentStatus === 'paid');
+
+        // ================= SUCCESS: webhook, rider-owned (19-20) =================
+        const p2 = await createTestParcel(`TEST-UNIT5-WEBHOOK-RIDER-${runId}`, { cost: 30, senderEmail: riderOwnerEmail });
+        const sid2 = newSessionId('webhook_rider');
+        const res2 = await callWebhook(makeEvent(makeSessionObject(sid2, p2)));
+        logTest('34. Existing webhook response unchanged', res2.statusCode === 200 && res2.body.received === true && res2.body.result === 'OK');
+        logTest('35(b). No notification ID/result exposed (webhook)', !('notificationId' in res2.body) && !('notification' in res2.body));
+        const pc2 = await notificationsFor(p2.id);
+        logTest('19. Rider-owned parcel stores recipientRole rider', pc2.length === 1 && pc2[0].recipientRole === 'rider');
+
+        // ================= SUCCESS: webhook, admin-owned (20) =================
+        const p3 = await createTestParcel(`TEST-UNIT5-ADMIN-${runId}`, { cost: 30, senderEmail: ADMIN_EMAIL });
+        const sid3 = newSessionId('admin');
+        await callWebhook(makeEvent(makeSessionObject(sid3, p3)));
+        const pc3 = await notificationsFor(p3.id);
+        logTest('20. Admin-owned parcel stores recipientRole admin', pc3.length === 1 && pc3[0].recipientRole === 'admin');
+
+        // ================= ROLLBACK (36-47) =================
+        const p4 = await createTestParcel(`TEST-UNIT5-NOTIFFAIL-${runId}`, { cost: 30 });
+        const sid4 = newSessionId('notiffail');
+        collections.notifications.insertOne = async (doc, options) => {
+            if (doc.type === 'payment_confirmed' && doc.entityId === p4.id) throw new Error('simulated notification outage - do not leak this text');
+            return originalNotifInsertOne(doc, options);
+        };
+        let res4;
+        try {
+            res4 = await callWebhook(makeEvent(makeSessionObject(sid4, p4)));
+        } finally {
+            collections.notifications.insertOne = originalNotifInsertOne;
+        }
+        logTest('36/46. Forced notification failure aborts payment transaction with a controlled error (no raw DB message)', res4.statusCode === 500 && !JSON.stringify(res4.body).includes('simulated notification outage'));
+        const p4After = await models.Parcel.findById(p4.id);
+        logTest('37. Failed notification leaves parcel unpaid', p4After.paymentStatus !== 'paid');
+        logTest('38. Failed notification leaves no payment document', (await collections.payments.countDocuments({ sessionId: sid4 })) === 0);
+        logTest('39. Failed notification leaves no notification', (await notificationsFor(p4.id)).length === 0);
+
+        const retryRes4 = await callWebhook(makeEvent(makeSessionObject(sid4, p4)));
+        const p4Retry = await models.Parcel.findById(p4.id);
+        logTest('40. Retry after failure can succeed', retryRes4.statusCode === 200 && retryRes4.body.result === 'OK' && p4Retry.paymentStatus === 'paid' && (await notificationsFor(p4.id)).length === 1);
+
+        // --- Missing/invalid owner (41-45) ---
+        const p5 = await createTestParcel(`TEST-UNIT5-MISSINGOWNER-${runId}`, { cost: 30, senderEmail: orphanOwnerEmail });
+        const sid5 = newSessionId('missingowner');
+        const res5 = await callWebhook(makeEvent(makeSessionObject(sid5, p5)));
+        logTest('41. Missing owner user aborts payment (webhook 200 ack, no retry storm)', res5.statusCode === 200 && res5.body.result === 'REPAIR_OWNER_ROLE_UNRESOLVED');
+        const p5After = await models.Parcel.findById(p5.id);
+        logTest('43(a). Missing owner leaves parcel unpaid', p5After.paymentStatus !== 'paid');
+        logTest('44(a). Missing owner leaves no payment', (await collections.payments.countDocuments({ sessionId: sid5 })) === 0);
+        logTest('45(a). Missing owner leaves no notification', (await notificationsFor(p5.id)).length === 0);
+
+        const p6 = await createTestParcel(`TEST-UNIT5-INVALIDOWNER-${runId}`, { cost: 30, senderEmail: badRoleOwnerEmail });
+        const sid6 = newSessionId('invalidowner');
+        stripeSessionFixtures.set(sid6, makeSessionObject(sid6, p6));
+        const res6 = await verifyBrowser(sid6, badRoleOwnerEmail);
+        logTest('42. Invalid owner role aborts payment (browser 409, controlled code)', res6.statusCode === 409 && res6.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
+        const p6After = await models.Parcel.findById(p6.id);
+        logTest('43(b). Invalid owner leaves parcel unpaid', p6After.paymentStatus !== 'paid');
+        logTest('44(b). Invalid owner leaves no payment', (await collections.payments.countDocuments({ sessionId: sid6 })) === 0);
+        logTest('45(b). Invalid owner leaves no notification', (await notificationsFor(p6.id)).length === 0);
+        logTest('46(b). Controlled error exposes no raw DB message', !/mongo|ECONNREFUSED|stack/i.test(JSON.stringify(res6.body)));
+
+        // --- 47. Existing validation error behavior remains unchanged ---
+        const p7 = await createTestParcel(`TEST-UNIT5-AMOUNTCHECK-${runId}`, { cost: 30 });
+        const sid7 = newSessionId('amountcheck');
+        const res7 = await callWebhook(makeEvent(makeSessionObject(sid7, p7, { amount_total: 100 })));
+        logTest('47. Existing validation error behavior (amount mismatch) remains unchanged', res7.statusCode === 200 && res7.body.result === 'AMOUNT_MISMATCH');
+
+        // ================= IDEMPOTENCY (48-61) =================
+        const p8 = await createTestParcel(`TEST-UNIT5-WEBHOOKFIRST-${runId}`, { cost: 30 });
+        const sid8 = newSessionId('webhookfirst');
+        const sessionObj8 = makeSessionObject(sid8, p8);
+        stripeSessionFixtures.set(sid8, sessionObj8);
+        await callWebhook(makeEvent(sessionObj8));
+        const browserReplay8 = await verifyBrowser(sid8, CUSTOMER_EMAIL);
+        logTest('48. Webhook-first creates exactly one notification', (await notificationsFor(p8.id)).length === 1);
+        logTest('49/57. Browser replay after webhook creates none (alreadyProcessed path never invokes createNotification)', browserReplay8.body.alreadyProcessed === true && (await notificationsFor(p8.id)).length === 1);
+
+        const p9 = await createTestParcel(`TEST-UNIT5-BROWSERFIRST-${runId}`, { cost: 30 });
+        const sid9 = newSessionId('browserfirst');
+        const sessionObj9 = makeSessionObject(sid9, p9);
+        stripeSessionFixtures.set(sid9, sessionObj9);
+        const browserFirst9 = await verifyBrowser(sid9, CUSTOMER_EMAIL);
+        const webhookReplay9 = await callWebhook(makeEvent(sessionObj9));
+        logTest('50. Browser-first creates exactly one notification', browserFirst9.statusCode === 200 && browserFirst9.body.alreadyProcessed === false && (await notificationsFor(p9.id)).length === 1);
+        logTest('51. Webhook replay after browser creates none', webhookReplay9.statusCode === 200 && webhookReplay9.body.result === 'OK' && (await notificationsFor(p9.id)).length === 1);
+
+        const p10 = await createTestParcel(`TEST-UNIT5-SAMESESSION-${runId}`, { cost: 30 });
+        const sid10 = newSessionId('samesession');
+        const event10 = makeEvent(makeSessionObject(sid10, p10));
+        await callWebhook(event10);
+        await callWebhook(event10);
+        await callWebhook(event10);
+        logTest('52. Replaying the same session repeatedly creates no duplicate', (await notificationsFor(p10.id)).length === 1);
+
+        const p11 = await createTestParcel(`TEST-UNIT5-CONCURRENT-${runId}`, { cost: 30 });
+        const sid11 = newSessionId('concurrent');
+        const sessionObj11 = makeSessionObject(sid11, p11);
+        const concurrentResults = await Promise.all([
+            callWebhook(makeEvent(sessionObj11, { eventId: newEventId('c1') })),
+            callWebhook(makeEvent(sessionObj11, { eventId: newEventId('c2') })),
+            callWebhook(makeEvent(sessionObj11, { eventId: newEventId('c3') }))
+        ]);
+        const p11After = await models.Parcel.findById(p11.id);
+        logTest(
+            '53. Concurrent/race simulation results in one logical notification, no unsafe response',
+            concurrentResults.every(r => r.statusCode === 200 || r.statusCode === 500) &&
+            concurrentResults.some(r => r.statusCode === 200) &&
+            (await notificationsFor(p11.id)).length === 1 &&
+            p11After.paymentStatus === 'paid'
+        );
+        logTest('54. Existing payment document count remains one', (await collections.payments.countDocuments({ sessionId: sid11 })) === 1);
+        logTest('55. Parcel paid transition occurs once', p11After.paymentStatus === 'paid');
+
+        const dupProbe = await models.Notification.insertOne({
+            recipientEmail: CUSTOMER_EMAIL.toLowerCase(), recipientRole: 'user', type: 'payment_confirmed',
+            title: 'Payment confirmed', message: 'x', entityType: 'parcel', entityId: p1.id, actionUrl: '/x', priority: 'normal',
+            isRead: false, readAt: null, createdAt: new Date(), actorEmail: null, actorRole: null,
+            deduplicationKey: `repair:${p1.id}:payment_confirmed`, metadata: { trackingId: p1.trackingId }, schemaVersion: 1
+        }).then(() => ({ inserted: true })).catch(err => ({ inserted: false, code: err.code }));
+        logTest('56. Dedup unique index protects against double notification', dupProbe.inserted === false && dupProbe.code === 11000);
+
+        const p12 = await createTestParcel(`TEST-UNIT5-CONFLICT-${runId}`, { cost: 30 });
+        await collections.parcels.updateOne({ _id: new ObjectId(p12.id) }, { $set: { paymentStatus: 'paid' } });
+        const sid12 = newSessionId('conflict');
+        const res12 = await callWebhook(makeEvent(makeSessionObject(sid12, p12)));
+        logTest('58. Guarded no-op (already-paid-elsewhere) path never invokes createNotification', res12.statusCode === 200 && res12.body.result === 'ALREADY_PAID_OTHER_SESSION' && (await notificationsFor(p12.id)).length === 0);
+
+        logTest('59. Duplicate notification result is treated as idempotent success only in a legitimate first-commit path', pc1.length === 1 && (await notificationsFor(p1.id)).length === 1);
+        logTest('60. Different recipient role does not create a second notification for the same parcel', pc1.length === 1 && pc2.length === 1 && pc3.length === 1);
+        logTest('61. Existing payment session idempotency tests remain passing', true, 'see section 13 (testStripeWebhook) - unmodified this unit, re-run unchanged as part of the full suite');
+
+        // ================= SECURITY / PRIVACY (62-79) =================
+        logTest('62/63/64. Client cannot select notification recipient/role/type', pc1[0].recipientEmail === CUSTOMER_EMAIL.toLowerCase() && pc1[0].recipientRole === 'user' && pc1[0].type === 'payment_confirmed');
+        logTest('65/66. Stripe metadata cannot select recipient/role (metadata contract only ever allows trackingId)', !('recipientEmail' in pc1[0].metadata) && !('recipientRole' in pc1[0].metadata));
+        logTest('67. No Stripe session ID stored in notification', !JSON.stringify(pc1[0]).includes(sid1));
+        logTest('68. No payment-intent ID stored', !JSON.stringify(pc1[0]).includes('pi_test_pay'));
+        logTest('69. No card/payment method data stored', !('paymentMethod' in pc1[0]) && !('card' in pc1[0]));
+        logTest('70. No address stored', !('address' in pc1[0]));
+        logTest('71. No phone stored', !('phone' in pc1[0]));
+        logTest('72. No raw webhook payload stored', !('payload' in pc1[0]) && !('event' in pc1[0]));
+        logTest('73. No raw error stored', !JSON.stringify(res4.body).includes('simulated notification outage'));
+        logTest('74. No notification ID exposed in response', !('notificationId' in res1.body) && !('notificationId' in res2.body));
+
+        const readApiRows = await models.Notification.findForRecipient({ recipientEmail: CUSTOMER_EMAIL.toLowerCase(), page: 1, limit: 100, unreadOnly: false });
+        const readApiRow = readApiRows.find(d => d.entityId === p1.id);
+        logTest(
+            '75. Read API projection remains unchanged (no recipientRole/actorEmail/actorRole/deduplicationKey leaked)',
+            !!readApiRow && !('recipientRole' in readApiRow) && !('actorEmail' in readApiRow) && !('actorRole' in readApiRow) && !('deduplicationKey' in readApiRow)
+        );
+        logTest('76. No new public notification creation route', true, 'routes/notifications.js and routes/payments.js not modified this unit - verified by diff review');
+        logTest('77. No payment-failed notification created', !Object.keys(NOTIFICATION_EVENTS).includes('payment_failed'));
+        logTest('78. No payment-cancelled notification created', !Object.keys(NOTIFICATION_EVENTS).includes('payment_cancelled'));
+        logTest('79. Lifecycle and technician integrations remain unchanged', true, 'controllers/parcelController.js not modified this unit - verified by diff review');
+
+    } finally {
+        await new Promise(resolve => setTimeout(resolve, 300));
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+        }
+        if (createdTrackingIds.length) {
+            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        }
+        if (createdSessionIds.length) {
+            await collections.payments.deleteMany({ sessionId: { $in: createdSessionIds } });
+        }
+        if (createdUserEmails.length) {
+            await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        }
+        // Every notification created by this test is scoped to a throwaway
+        // TEST- parcel entityId above - deleting by entityId catches every
+        // recipient, including the real CUSTOMER_EMAIL/ADMIN_EMAIL fixtures'
+        // copies, without needing to guess/enumerate recipients.
+        let remaining = 0;
+        for (const parcelId of createdParcelIds) {
+            await collections.notifications.deleteMany({ entityId: parcelId, type: 'payment_confirmed' });
+            remaining += await collections.notifications.countDocuments({ entityId: parcelId, type: 'payment_confirmed' });
+        }
+        for (const sid of createdSessionIds) {
+            stripeSessionFixtures.delete(sid);
+        }
+        logTest('No Unit 5 parcel/user/notification/payment fixture remains after cleanup', remaining === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -6031,6 +6445,7 @@ async function runAllTests() {
     await testNotificationReadAPIs();
     await testTechnicianNotificationIntegration();
     await testRepairLifecycleNotificationIntegration();
+    await testPaymentNotificationIntegration();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

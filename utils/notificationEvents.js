@@ -143,7 +143,11 @@ const NOTIFICATION_EVENTS = {
     },
     payment_confirmed: {
         entityType: 'parcel',
-        recipientRole: 'user',
+        // Same reasoning as technician_assigned/technician_on_the_way/
+        // repair_in_progress/repair_completed - POST /parcels only requires
+        // authentication (routes/parcels.js), so the repair owner's real
+        // role is not fixed to a single value.
+        recipientRoles: ['user', 'rider', 'admin'],
         priority: 'normal',
         allowedMetadataKeys: ['trackingId'],
         requiresMetadata: ['trackingId'],
