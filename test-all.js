@@ -1,4 +1,25 @@
 // Comprehensive API test script
+
+// Must be set before anything requires ./config/database (which reads these
+// at module-load time - see config/databaseName.js) so this suite can never
+// accidentally run against production, no matter what the operator's shell
+// happens to have set. dotenv.config() below does not override already-set
+// process.env values, so an operator's explicit override still wins; this
+// only supplies the safe default when nothing else has.
+process.env.NODE_ENV = process.env.NODE_ENV || 'test';
+if (process.env.NODE_ENV !== 'test') {
+    console.error(`Refusing to run: NODE_ENV must be 'test' for this suite, got '${process.env.NODE_ENV}'.`);
+    process.exit(1);
+}
+// Defaults to the existing development database (Option 2 from this
+// project's test-strategy decision - see config/databaseName.js) rather than
+// a genuinely separate test database, since this suite depends on pre-seeded
+// real user/rider/role records that only exist there today. An operator can
+// still opt into a real dedicated test database once that seeding exists
+// separately, by setting MONGO_DB_NAME to a name containing "test" before
+// running this file.
+process.env.MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'zap_shift_db';
+
 const http = require('http');
 require('dotenv').config();
 
@@ -6349,6 +6370,136 @@ async function testProductionConfigValidation() {
     console.log('');
 }
 
+// Exercises config/databaseName.js and config/database.js's module-load-time
+// database-name resolution directly, under manufactured env combinations.
+// Never calls connectDatabase() - MongoClient#db(name) and Collection#dbName
+// are both synchronous and require no network connection, so every scenario
+// here is inspected without ever opening a real connection, and without
+// disturbing the one real connection the rest of this suite eventually
+// opens. Every env var touched is restored to the safe test baseline this
+// file establishes at the top (NODE_ENV=test, MONGO_DB_NAME=zap_shift_db -
+// see the interim test-database note there) before returning, and the
+// require cache is reset to a build of that restored baseline so later test
+// sections see the real, working module.
+async function testDatabaseNameValidation() {
+    console.log('12. Testing MONGO_DB_NAME Validation and Database Selection');
+    console.log('-'.repeat(60));
+
+    const databaseNamePath = require.resolve('./config/databaseName');
+    const databasePath = require.resolve('./config/database');
+    const originalEnv = {
+        MONGO_DB_NAME: process.env.MONGO_DB_NAME,
+        NODE_ENV: process.env.NODE_ENV,
+        VERCEL: process.env.VERCEL,
+        VERCEL_ENV: process.env.VERCEL_ENV,
+    };
+
+    function setEnv(vars) {
+        for (const [key, value] of Object.entries(vars)) {
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+        }
+    }
+
+    function freshDatabaseName() {
+        delete require.cache[databaseNamePath];
+        return require('./config/databaseName');
+    }
+
+    function freshDatabaseModule() {
+        delete require.cache[databaseNamePath];
+        delete require.cache[databasePath];
+        return require('./config/database');
+    }
+
+    function expectThrows(fn) {
+        try {
+            fn();
+            return false;
+        } catch {
+            return true;
+        }
+    }
+
+    try {
+        // 1. Development explicit database name accepted.
+        setEnv({ NODE_ENV: undefined, VERCEL: undefined, VERCEL_ENV: undefined, MONGO_DB_NAME: 'my_custom_dev_db' });
+        let { resolveDatabaseName } = freshDatabaseName();
+        logTest('Development explicit database name accepted', resolveDatabaseName() === 'my_custom_dev_db');
+
+        // 2. Development missing name uses fallback with warning.
+        setEnv({ MONGO_DB_NAME: undefined });
+        ({ resolveDatabaseName } = freshDatabaseName());
+        logTest('Development missing name uses fallback', resolveDatabaseName() === 'zap_shift_db');
+
+        // 3. Production missing name rejected.
+        setEnv({ NODE_ENV: 'production', MONGO_DB_NAME: undefined });
+        ({ resolveDatabaseName } = freshDatabaseName());
+        logTest('Production missing name rejected', expectThrows(resolveDatabaseName));
+
+        // 4. Production whitespace name rejected.
+        setEnv({ MONGO_DB_NAME: '   ' });
+        ({ resolveDatabaseName } = freshDatabaseName());
+        logTest('Production whitespace name rejected', expectThrows(resolveDatabaseName));
+
+        // 5. Production development database name rejected.
+        setEnv({ MONGO_DB_NAME: 'zap_shift_db' });
+        ({ resolveDatabaseName } = freshDatabaseName());
+        logTest('Production development database name rejected', expectThrows(resolveDatabaseName));
+
+        // 6. Valid production database name accepted.
+        setEnv({ MONGO_DB_NAME: 'sarabo_production' });
+        ({ resolveDatabaseName } = freshDatabaseName());
+        logTest('Valid production database name accepted', resolveDatabaseName() === 'sarabo_production');
+
+        // 7. Invalid prohibited characters rejected.
+        setEnv({ MONGO_DB_NAME: 'bad$name' });
+        ({ resolveDatabaseName } = freshDatabaseName());
+        logTest('Prohibited-character database name rejected', expectThrows(resolveDatabaseName));
+
+        // 8. Null byte rejected. Exercised via a direct call to
+        // validateDatabaseNameShape, not through process.env - Node (like
+        // every OS-level environment variable mechanism) truncates a string
+        // at an embedded null byte when it's assigned to process.env, so a
+        // real null byte could never actually reach this code through
+        // MONGO_DB_NAME; the check still guards the exported function itself
+        // against being called with one directly.
+        const { validateDatabaseNameShape } = freshDatabaseName();
+        logTest(
+            'Null-byte database name rejected',
+            expectThrows(() => validateDatabaseNameShape('bad\0name'))
+        );
+
+        // 9. Test mode production-name collision rejected (no "test" marker).
+        setEnv({ NODE_ENV: 'test', MONGO_DB_NAME: 'sarabo_production' });
+        ({ resolveDatabaseName } = freshDatabaseName());
+        logTest('Test mode rejects a non-test-marked database name', expectThrows(resolveDatabaseName));
+
+        // 10. Test cleanup safety blocks a non-test database - requiring the
+        // whole config/database.js module (not just databaseName.js) must
+        // throw before any collection/index code can run against it.
+        logTest('Requiring config/database.js throws under the same collision', expectThrows(freshDatabaseModule));
+
+        // 11 & 12. Index initialization / all collections target the
+        // selected database - Collection#dbName is synchronous and requires
+        // no connection, so this is inspected without connecting.
+        setEnv({ NODE_ENV: 'test', MONGO_DB_NAME: 'sarabo_test_selection_check' });
+        const { collections: freshCollections } = freshDatabaseModule();
+        const expectedDbNames = Object.values(freshCollections).map(c => c.dbName);
+        logTest(
+            'All collections resolve from the selected database',
+            expectedDbNames.every(name => name === 'sarabo_test_selection_check')
+        );
+    } finally {
+        setEnv(originalEnv);
+        delete require.cache[databaseNamePath];
+        delete require.cache[databasePath];
+        require('./config/database');
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -6528,6 +6679,7 @@ async function runAllTests() {
     console.log('');
 
     await testProductionConfigValidation();
+    await testDatabaseNameValidation();
 
     await testStatusTransitions();
     await testInitialRequestStatus();

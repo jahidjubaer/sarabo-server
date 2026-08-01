@@ -1,4 +1,5 @@
 const { MongoClient, ServerApiVersion } = require("mongodb");
+const { resolveDatabaseName } = require('./databaseName');
 
 const uri = process.env.MONGO_URI;
 
@@ -10,13 +11,19 @@ const client = new MongoClient(uri, {
     },
 });
 
+// Fails fast at module load if MONGO_DB_NAME is missing/invalid in
+// production, or lacks an explicit test marker under NODE_ENV=test - see
+// config/databaseName.js for the exact rules. Development keeps a
+// backwards-compatible fallback to the historical 'zap_shift_db' name.
+const DB_NAME = resolveDatabaseName();
+
 // Collection handles are synchronous and side-effect-free - creating them
 // does not require an active connection, only a MongoClient instance. This
 // lets routes/models/controllers be built and registered immediately at
 // module load, before the connection itself resolves. Actual queries against
 // these collections require connectDatabase() to have resolved first, which
 // is enforced per-request by middleware/database.js.
-const db = client.db("zap_shift_db");
+const db = client.db(DB_NAME);
 const collections = {
     users: db.collection("users"),
     parcels: db.collection("parcels"),
