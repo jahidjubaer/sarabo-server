@@ -5,6 +5,13 @@ const { createCheckoutSessionManager } = require('../services/checkoutSessionMan
 const { getPaymentEligibility } = require('../services/paymentEligibility');
 const { createNotificationService } = require('../services/notificationService');
 const { PAYMENT_CURRENCY, toSmallestUnit } = require('../config/paymentConfig');
+const { normalizeSiteOrigin } = require('../config/siteOrigin');
+
+// Fails fast at module load (server startup) rather than at first checkout
+// request - the same normalized origin config/cors.js uses as the production
+// CORS allowlist entry, so the allowlist and the Stripe redirect target can
+// never disagree about what SITE_DOMAIN actually is.
+const SITE_ORIGIN = normalizeSiteOrigin(process.env.SITE_DOMAIN);
 
 // Stripe Checkout Session IDs are base62-ish (letters, digits, underscores).
 // A generous max length guards against pathological inputs without coupling
@@ -139,8 +146,8 @@ class PaymentController {
                             trackingId: parcel.trackingId
                         },
                         customer_email: req.decoded_email,
-                        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-                        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+                        success_url: `${SITE_ORIGIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+                        cancel_url: `${SITE_ORIGIN}/dashboard/payment-cancelled`,
                     },
                     // Ties this Stripe API call to our own claim record, so a
                     // network-level retry of this exact request (e.g. our own

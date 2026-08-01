@@ -523,10 +523,17 @@ async function testSecureCheckoutSession() {
             'Stripe receives only safe metadata (parcelId, trackingId - no other fields)',
             Object.keys(captured.metadata).sort().join(',') === 'parcelId,trackingId'
         );
+        const { normalizeSiteOrigin } = require('./config/siteOrigin');
+        const expectedOrigin = normalizeSiteOrigin(process.env.SITE_DOMAIN);
         logTest(
-            'Success/cancel URLs come from server config (SITE_DOMAIN), not the client',
-            captured.success_url.startsWith(process.env.SITE_DOMAIN) &&
-            captured.cancel_url.startsWith(process.env.SITE_DOMAIN)
+            'Success/cancel URLs come from server config (normalized SITE_DOMAIN), not the client',
+            captured.success_url.startsWith(expectedOrigin) &&
+            captured.cancel_url.startsWith(expectedOrigin)
+        );
+        logTest(
+            'Success/cancel URLs contain no double slash after the origin',
+            !captured.success_url.slice(expectedOrigin.length).includes('//') &&
+            !captured.cancel_url.slice(expectedOrigin.length).includes('//')
         );
 
         // --- Non-owners rejected, including admin/technician accounts. ---
@@ -6249,6 +6256,99 @@ async function testPaymentNotificationIntegration() {
     console.log('');
 }
 
+// Exercises config/cors.js and config/siteOrigin.js directly, in-process,
+// under manufactured env combinations - these are load-time/module-level
+// behaviors (production detection, SITE_DOMAIN validation, the allowlist
+// itself) that the live external server under test at localhost:3000 already
+// has baked in from whatever env it booted with, so they cannot be observed
+// through the HTTP-level Test 10 above. Every env var this touches is
+// restored exactly, and the require cache is reset back to a build of the
+// real environment before returning, so no other test section is affected.
+async function testProductionConfigValidation() {
+    console.log('11. Testing Production Config Validation (CORS + SITE_DOMAIN)');
+    console.log('-'.repeat(60));
+
+    const corsPath = require.resolve('./config/cors');
+    const originalEnv = {
+        SITE_DOMAIN: process.env.SITE_DOMAIN,
+        NODE_ENV: process.env.NODE_ENV,
+        VERCEL: process.env.VERCEL,
+        VERCEL_ENV: process.env.VERCEL_ENV,
+    };
+
+    function setEnv(vars) {
+        for (const [key, value] of Object.entries(vars)) {
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+        }
+    }
+
+    function freshCors() {
+        delete require.cache[corsPath];
+        return require('./config/cors');
+    }
+
+    function checkOrigin(corsOptions, origin) {
+        let allowed = null;
+        let errored = false;
+        corsOptions.origin(origin, (err, ok) => {
+            if (err) errored = true;
+            else allowed = ok;
+        });
+        return { allowed, errored };
+    }
+
+    try {
+        // Dev/non-production: localhost dev origin allowed.
+        setEnv({ NODE_ENV: undefined, VERCEL: undefined, VERCEL_ENV: undefined });
+        let { corsOptions } = freshCors();
+        let result = checkOrigin(corsOptions, 'http://localhost:5173');
+        logTest('Dev CORS allows localhost dev origin', result.allowed === true);
+
+        // Production (simulated via NODE_ENV, no VERCEL involved): localhost
+        // must now be rejected; the exact SITE_DOMAIN origin - configured
+        // here with a trailing slash to also exercise normalization - must be
+        // allowed without the trailing slash.
+        setEnv({ NODE_ENV: 'production', SITE_DOMAIN: 'https://example-app.test/' });
+        ({ corsOptions } = freshCors());
+        result = checkOrigin(corsOptions, 'http://localhost:5173');
+        logTest('Production CORS rejects localhost dev origin', result.errored === true);
+
+        result = checkOrigin(corsOptions, 'https://example-app.test');
+        logTest(
+            'Production CORS allows exact SITE_DOMAIN with trailing slash normalized away',
+            result.allowed === true
+        );
+
+        // Malformed SITE_DOMAIN must fail loudly at load time, never silently
+        // produce a broken/empty allowlist.
+        setEnv({ SITE_DOMAIN: 'not a url' });
+        let threw = false;
+        try {
+            freshCors();
+        } catch {
+            threw = true;
+        }
+        logTest('Malformed SITE_DOMAIN throws a config error at load time', threw);
+
+        // Missing SITE_DOMAIN in production must also fail loudly.
+        setEnv({ SITE_DOMAIN: undefined });
+        threw = false;
+        try {
+            freshCors();
+        } catch {
+            threw = true;
+        }
+        logTest('Missing SITE_DOMAIN in production throws a config error', threw);
+    } finally {
+        setEnv(originalEnv);
+        delete require.cache[corsPath];
+        require('./config/cors');
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -6426,6 +6526,8 @@ async function runAllTests() {
         'GET / (rejected unknown origin)'
     );
     console.log('');
+
+    await testProductionConfigValidation();
 
     await testStatusTransitions();
     await testInitialRequestStatus();
