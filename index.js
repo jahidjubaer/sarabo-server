@@ -18,6 +18,13 @@ const publicTrackingRoutes = require('./routes/publicTracking');
 const notificationRoutes = require('./routes/notifications');
 
 const app = express();
+// Vercel's edge network is the sole reverse proxy in front of this function,
+// so trusting exactly one hop is correct here - it lets express-rate-limit
+// (see routes/publicTracking.js) read the real client IP from Vercel's own
+// X-Forwarded-For header instead of throwing ERR_ERL_UNEXPECTED_X_FORWARDED_FOR,
+// without over-trusting an attacker-supplied proxy chain (`true` would trust
+// every hop, including a spoofable leftmost entry).
+app.set('trust proxy', 1);
 const port = process.env.PORT || 3000;
 // Vercel sets this in every deployed serverless invocation; it is unset for local `node index.js`.
 const isServerless = !!process.env.VERCEL;

@@ -8,3 +8,4 @@ zap-shift-firebase-adminsdk.json
 *.key
 *service-account*.json
 *firebase-adminsdk*.json
+.env*
