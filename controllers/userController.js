@@ -37,20 +37,29 @@ class UserController {
         }
     }
 
-    async getUserRole(req, res) {
+    // Returns the ROLE of the caller's own account, derived entirely from
+    // the verified Firebase token (req.decoded_email) - never from a URL,
+    // query, or body-supplied identity. Replaces the old GET
+    // /users/:email/role (Phase 5.10 privacy hardening): no email can ever
+    // appear in this route's path, so Vercel's own platform-level request
+    // logging (which happens before any application-log sanitization) can
+    // no longer record a real email address for this endpoint. The
+    // cross-user-by-email lookup the old route also allowed for admins is
+    // intentionally not preserved here - GET /users (search/list) and GET
+    // /users/:id already cover that need without an email ever appearing in
+    // a URL.
+    async getMyRole(req, res) {
         try {
-            const email = req.params.email;
-            
-            // Users can only check their own role, or admins can check any
-            if (email !== req.decoded_email) {
-                const currentUser = await this.User.findByEmail(req.decoded_email);
-                if (!currentUser || currentUser.role !== 'admin') {
-                    return res.status(403).send({ message: 'forbidden access' });
-                }
+            const email = req.decoded_email;
+            if (!email) {
+                // Verified token without an email claim - extremely
+                // unlikely for this app's Google/password providers, but
+                // must fail safely here rather than ever falling back to a
+                // URL/query/body-supplied value.
+                return res.status(401).send({ message: 'unauthorized access', code: 'AUTHENTICATION_REQUIRED' });
             }
-            
-            const user = await this.User.findByEmail(email);
-            res.send({ role: user?.role || 'user' });
+            const role = await this.User.findRoleByEmail(email);
+            res.send({ role: role || 'user' });
         } catch (error) {
             res.status(500).send({ message: 'Error fetching user role', error: error.message });
         }

@@ -6861,6 +6861,124 @@ async function testRequestIdAndLoggingHardening() {
     console.log('');
 }
 
+// Phase 5.10: URL Privacy Hardening. GET /users/:email/role -> GET
+// /users/me/role. Since no real Firebase token can be minted here, items
+// that need a specific caller identity call UserController.getMyRole
+// directly in-process with a fakeReq.decoded_email set exactly as
+// verifyFBToken would - the same established pattern testStatusTransitions()
+// above already uses for authenticated routes.
+async function testUserRolePrivacyHardening() {
+    console.log('26. Testing User Role Privacy Hardening (Phase 5.10)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; },
+            json(payload) { this.body = payload; return this; }
+        };
+    }
+
+    await connectDatabase();
+    const models = initializeModels(collections);
+    const controllers = initializeControllers(models, collections);
+    const userController = controllers.user;
+
+    // 1. GET /users/me/role without token returns 401 (real HTTP - genuine
+    // end-to-end check of the live dev server's verifyFBToken gate).
+    await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/users/me/role', method: 'GET' },
+        401,
+        '1. GET /users/me/role without token returns 401'
+    );
+
+    const userCountBefore = await collections.users.countDocuments();
+
+    // 2. Valid customer token returns customer role.
+    const customerRes = fakeRes();
+    await userController.getMyRole({ decoded_email: CUSTOMER_EMAIL }, customerRes);
+    logTest('2. Valid customer token returns customer (user) role', customerRes.body?.role === 'user');
+
+    // 3. Valid technician token returns rider role.
+    const technicianRes = fakeRes();
+    await userController.getMyRole({ decoded_email: RIDER_EMAIL }, technicianRes);
+    logTest('3. Valid technician token returns rider role', technicianRes.body?.role === 'rider');
+
+    // 4. Valid admin token returns admin role.
+    const adminRes = fakeRes();
+    await userController.getMyRole({ decoded_email: ADMIN_EMAIL }, adminRes);
+    logTest('4. Valid admin token returns admin role', adminRes.body?.role === 'admin');
+
+    // 5 & 6. Token-derived identity is used; URL/body/query email supplied
+    // alongside a valid token can never override it - getMyRole never reads
+    // req.params/req.query/req.body at all, only req.decoded_email.
+    const spoofedRes = fakeRes();
+    await userController.getMyRole({
+        decoded_email: CUSTOMER_EMAIL,
+        params: { email: ADMIN_EMAIL },
+        query: { email: ADMIN_EMAIL },
+        body: { email: ADMIN_EMAIL, role: 'admin' }
+    }, spoofedRes);
+    logTest(
+        '5/6. Spoofed params/query/body email cannot override the token-derived role',
+        spoofedRes.body?.role === 'user'
+    );
+
+    // 7. Unknown authenticated user follows existing safe behavior (defaults
+    // to 'user', never a 404/500, matching the prior route's exact contract).
+    const unknownRes = fakeRes();
+    await userController.getMyRole({ decoded_email: 'nobody-phase510@example.invalid' }, unknownRes);
+    logTest('7. Unknown authenticated user safely defaults to role "user"', unknownRes.body?.role === 'user');
+
+    // 8. Missing token email fails safely (401, never a 500 crash, never a
+    // fallback to any other identity source).
+    const missingEmailRes = fakeRes();
+    await userController.getMyRole({ decoded_email: undefined }, missingEmailRes);
+    logTest(
+        '8. Missing token email fails safely with 401',
+        missingEmailRes.statusCode === 401 && missingEmailRes.body?.code === 'AUTHENTICATION_REQUIRED'
+    );
+
+    // 9 & 10. No raw token or authenticated email ever reaches a log line -
+    // verified via source-level inspection of the real, unmodified
+    // controller method (it never calls logSafeError/console.log at all).
+    const userControllerSource = require('fs').readFileSync(
+        require.resolve('./controllers/userController'), 'utf8'
+    );
+    const getMyRoleMatch = userControllerSource.match(/async getMyRole\(req, res\) \{[\s\S]*?\n    \}/);
+    const getMyRoleText = getMyRoleMatch ? getMyRoleMatch[0] : '';
+    logTest(
+        '9/10. getMyRole never logs the token or the authenticated email',
+        getMyRoleText.length > 0 && !/console\.(log|error)/.test(getMyRoleText)
+    );
+
+    // 11. Old /users/:email/role route is absent - any path matching that
+    // old shape now falls through to the real 404 handler.
+    await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/users/some-other-user@example.com/role', method: 'GET' },
+        404,
+        '11. Old email-bearing /users/:email/role route is absent (404)'
+    );
+
+    // 13. Existing role authorization tests still pass - covered by the
+    // full suite (verifyAdmin/verifyRider sections elsewhere) continuing to
+    // pass unchanged; this section does not touch those middlewares.
+
+    // 14. No database write occurs - getMyRole only ever calls the
+    // read-only findRoleByEmail; confirm the users collection count is
+    // unchanged after every call above.
+    const userCountAfter = await collections.users.countDocuments();
+    logTest('14. No database write occurs (users count unchanged)', userCountAfter === userCountBefore);
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -6926,9 +7044,9 @@ async function runAllTests() {
         'GET /users/:id (no auth)'
     );
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/users/test@example.com/role', method: 'GET' },
+        { hostname: 'localhost', port: 3000, path: '/users/me/role', method: 'GET' },
         401,
-        'GET /users/:email/role (no auth)'
+        'GET /users/me/role (no auth)'
     );
     console.log('');
 
@@ -7063,6 +7181,7 @@ async function runAllTests() {
     await testPaymentNotificationIntegration();
     await testHealthAndObservability();
     await testRequestIdAndLoggingHardening();
+    await testUserRolePrivacyHardening();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

@@ -45,6 +45,31 @@ scopes only, never values.
   when the database is reachable; `503` with `{"status":"unavailable","database":"error",...}`
   otherwise. Never exposes the connection string, hostname, or credentials.
 
+## URL privacy (current-user endpoints)
+
+- **Current-user role**: `GET /users/me/role` - identity is derived entirely
+  from the verified Firebase token (`Authorization: Bearer <idToken>`),
+  never from the URL. The old `GET /users/:email/role` route (Phase 5.10)
+  put a real email address in the request path, which Vercel's platform
+  logging records before any application-level log sanitization runs - that
+  route has been removed, not deprecated, since it had no external consumer.
+- Any future "current user's own X" endpoint should follow the same
+  pattern: read identity from the verified token, not a URL/query/body
+  parameter, so a real email/UID never appears in a request path.
+- **Account-switch cache safety**: the client's role query cache
+  (`src/hooks/roleKeys.js`) is explicitly cleared on logout/account change
+  in `AuthProvider.jsx`, the same pattern already used for the notification
+  cache - this prevents a previously-signed-in account's role from ever
+  being shown to a different account signing in afterward.
+- **Post-deployment verification**: after this change ships, confirm via
+  `vercel logs` that new entries show `GET /users/me/role` and that no new
+  `GET /users/<email>/role` entries appear. Do not consider this fix
+  verified until that's confirmed against live traffic, not just local
+  tests.
+- Admin cross-user lookups continue to use `GET /users` (search/list) and
+  `GET /users/:id` (MongoDB document ID) - neither ever placed an email in
+  a URL, so neither needed to change.
+
 ## Common failure symptoms
 
 | Symptom | Likely cause | Where to look |

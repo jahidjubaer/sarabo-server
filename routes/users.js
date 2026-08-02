@@ -10,8 +10,9 @@ function userRoutes(app, controllers) {
     // Get user by ID
     app.get('/users/:id', verifyFBToken, ensureDatabaseReady, (req, res) => userController.getUserById(req, res));
 
-    // Get user role by email
-    app.get('/users/:email/role', verifyFBToken, ensureDatabaseReady, (req, res) => userController.getUserRole(req, res));
+    // Get the caller's own role - identity comes only from the verified
+    // Firebase token (see userController.getMyRole), never from the URL.
+    app.get('/users/me/role', verifyFBToken, ensureDatabaseReady, (req, res) => userController.getMyRole(req, res));
 
     // Create/sync the authenticated caller's own user record - requires a
     // verified Firebase token; identity and role are always server-derived
