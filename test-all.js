@@ -157,13 +157,13 @@ function makeRequest(options, expectedStatus, testName) {
             res.on('end', () => {
                 const passed = res.statusCode === expectedStatus;
                 logTest(testName, passed, `Status: ${res.statusCode} (expected: ${expectedStatus})`);
-                resolve({ status: res.statusCode, data, passed });
+                resolve({ status: res.statusCode, data, passed, headers: res.headers });
             });
         });
-        
+
         req.on('error', (err) => {
             logTest(testName, false, `Error: ${err.message}`);
-            resolve({ status: 0, data: '', passed: false });
+            resolve({ status: 0, data: '', passed: false, headers: {} });
         });
         
         if (options.body) {
@@ -6500,6 +6500,367 @@ async function testDatabaseNameValidation() {
     console.log('');
 }
 
+// Phase 5.9: Production Stabilization and Observability.
+//
+// The live dev server under test (localhost:3000) runs as a SEPARATE OS
+// process from this test script - they only communicate over HTTP. Any
+// monkey-patch this script makes to its own require-cache or console.error
+// is invisible to that other process. So: checks that only need a real
+// end-to-end round trip (status codes, response headers/bodies as actually
+// observed by a client) go over real HTTP; checks that need to simulate a
+// failure or intercept a log line run in-process instead, the same pattern
+// testStatusTransitions() above already uses for routes with no mintable
+// token. Never touches the real shared MongoClient.
+async function testHealthAndObservability() {
+    console.log('24. Testing Health and Observability (Phase 5.9)');
+    console.log('-'.repeat(60));
+
+    const dbHealth = require('./config/dbHealth');
+    const { logSafeError } = require('./utils/safeLogger');
+    const HealthController = require('./controllers/healthController');
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            json(payload) { this.body = payload; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    // 1. GET / remains 200 (real HTTP).
+    await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/', method: 'GET' },
+        200,
+        '1. GET / remains 200'
+    );
+
+    // 2. GET /health returns 200 when DB is connected (real HTTP - genuine
+    // end-to-end check against the live dev server and real database).
+    const healthyResult = await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/health', method: 'GET' },
+        200,
+        '2. GET /health returns 200 when DB is connected'
+    );
+
+    // 3 & 4. No secret/URI/host/credential fields in the healthy response.
+    const forbiddenPatterns = [
+        /mongodb(\+srv)?:\/\//i, /MONGO_URI/i, /sk_(live|test)_/i, /whsec_/i,
+        /BEGIN PRIVATE KEY/i, /FB_SERVICE_KEY/i, /password/i, /authorization/i,
+        /cluster\d*\.[a-z0-9-]+\.mongodb\.net/i,
+    ];
+    const healthyBodyClean = !forbiddenPatterns.some((re) => re.test(healthyResult.data));
+    logTest('3. Health response contains no secret fields', healthyBodyClean);
+    logTest('4. Health response contains no URI/host credentials', healthyBodyClean);
+
+    let healthyParsed = {};
+    try { healthyParsed = JSON.parse(healthyResult.data); } catch { /* checked by shape assertion below */ }
+    logTest(
+        '2b. Health response shape (status/service/database/timestamp)',
+        healthyParsed.status === 'ok' &&
+        healthyParsed.service === 'sarabo-server' &&
+        healthyParsed.database === 'connected' &&
+        typeof healthyParsed.timestamp === 'string'
+    );
+
+    // 5 & 6. DB failure simulation - run in-process against the real
+    // HealthController class, monkey-patching config/dbHealth.js's
+    // checkDatabaseConnection in THIS process (the only way the patch can
+    // actually take effect). Never touches the real shared MongoClient.
+    const healthController = new HealthController();
+    const originalCheck = dbHealth.checkDatabaseConnection;
+    dbHealth.checkDatabaseConnection = async () => {
+        throw new Error('simulated outage for test - mongodb://should:never@leak-in-response');
+    };
+    const unhealthyRes = fakeRes();
+    try {
+        await healthController.getHealth({ method: 'GET', path: '/health', requestId: 'test-req-id-health' }, unhealthyRes);
+    } finally {
+        dbHealth.checkDatabaseConnection = originalCheck;
+    }
+    logTest('5. DB failure returns 503', unhealthyRes.statusCode === 503);
+    const unhealthyBodyText = JSON.stringify(unhealthyRes.body || {});
+    const unhealthyBodyGeneric =
+        unhealthyRes.body?.status === 'unavailable' &&
+        unhealthyRes.body?.database === 'error' &&
+        !/should:never@leak/i.test(unhealthyBodyText) &&
+        !/simulated outage/i.test(unhealthyBodyText);
+    logTest('6. DB failure response remains generic', unhealthyBodyGeneric);
+
+    // Sanity: the real connection still works after restoring the original
+    // check, both in-process and over real HTTP - the simulated failure
+    // above left no lasting state.
+    const healthyAgainRes = fakeRes();
+    await healthController.getHealth({ method: 'GET', path: '/health', requestId: 'test-req-id-health-2' }, healthyAgainRes);
+    logTest('5b(i). Health recovers to 200 in-process after restoring the real DB check', healthyAgainRes.statusCode === 200);
+    await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/health', method: 'GET' },
+        200,
+        '5b(ii). Health recovers to 200 over HTTP after restoring the real DB check'
+    );
+
+    // 7. Request ID response header exists (real HTTP - genuine check of the
+    // requestId middleware running in the live dev server process).
+    const rootResult = await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/', method: 'GET' },
+        200,
+        '7pre. Baseline request for header check'
+    );
+    logTest('7. X-Request-Id header present on response', !!rootResult.headers['x-request-id']);
+
+    // 8. Existing (Vercel-style) request ID is reused safely where supported.
+    const incomingId = 'test-vercel-id-abc123';
+    const reusedResult = await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/', method: 'GET', headers: { 'x-vercel-id': incomingId } },
+        200,
+        '8pre. Request carrying an existing x-vercel-id'
+    );
+    logTest('8. Existing request ID is reused (X-Request-Id echoes x-vercel-id)', reusedResult.headers['x-request-id'] === incomingId);
+
+    // 9 & 10. Error logs include request ID; Authorization-shaped content can
+    // never reach a log line - exercised in-process directly against
+    // utils/safeLogger.js's logSafeError, the single choke point every safe
+    // error log in this app goes through (used by both the CORS-rejection
+    // handler and ensureDatabaseReady). console.error interception only
+    // works here because the call happens in this same process.
+    const capturedLogs = [];
+    const originalConsoleError = console.error;
+    console.error = (...args) => { capturedLogs.push(args.map(String).join(' ')); };
+    try {
+        logSafeError({
+            requestId: 'test-req-id-safelog-999',
+            method: 'GET',
+            path: '/',
+            status: 403,
+            category: 'FORBIDDEN',
+        });
+    } finally {
+        console.error = originalConsoleError;
+    }
+    let parsedLogEntry = null;
+    for (const line of capturedLogs) {
+        try {
+            const parsed = JSON.parse(line);
+            if (parsed && parsed.category) { parsedLogEntry = parsed; break; }
+        } catch { /* not a structured log line */ }
+    }
+    logTest('9. Error logs include request ID', parsedLogEntry?.requestId === 'test-req-id-safelog-999');
+    const joinedSafeLogs = capturedLogs.join('\n');
+    logTest(
+        '10. Authorization header is never logged',
+        !/authorization/i.test(joinedSafeLogs) && !/Bearer /i.test(joinedSafeLogs)
+    );
+
+    // Confirm the real CORS-rejection path over HTTP still behaves correctly
+    // (status code only - log content is verified above, in-process,
+    // against the exact same logSafeError call site index.js uses).
+    await makeRequest(
+        {
+            hostname: 'localhost', port: 3000, path: '/', method: 'GET',
+            headers: { Origin: 'http://evil-not-allowed.example', Authorization: 'Bearer super-secret-canary-token' }
+        },
+        403,
+        '9b. CORS rejection over real HTTP still returns 403 with an Authorization header present'
+    );
+
+    // 11. Webhook raw body is never logged - verified via source-level
+    // inspection of the real, unmodified webhook handler (payment logic is
+    // out of this phase's scope to touch), confirming its error logging
+    // never references the request body/payload/event data.
+    const paymentControllerSource = require('fs').readFileSync(
+        require.resolve('./controllers/paymentController'), 'utf8'
+    );
+    const webhookFnMatch = paymentControllerSource.match(
+        /async handleStripeWebhook\(req, res\) \{[\s\S]*?\n    \}/
+    );
+    const webhookFnText = webhookFnMatch ? webhookFnMatch[0] : '';
+    const webhookLogsOnlySafeFields =
+        webhookFnText.length > 0 &&
+        !/console\.(error|log)\([^)]*\b(req\.body|payload|event\.data)\b/.test(webhookFnText);
+    logTest('11. Webhook raw body is never logged (source-verified)', webhookLogsOnlySafeFields);
+
+    // Confirm the real webhook route still behaves correctly over HTTP too.
+    await makeRequest(
+        {
+            hostname: 'localhost', port: 3000, path: '/stripe-webhook', method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'stripe-signature': 'invalid_signature_for_test' },
+            body: JSON.stringify({ canary: 'RAW_BODY_SHOULD_NEVER_BE_LOGGED_998877' })
+        },
+        400,
+        '11b. Webhook signature failure over real HTTP still returns 400'
+    );
+
+    // 12. Existing API behavior remains unchanged - representative spot check
+    // (broader coverage already provided by every other section in this suite).
+    await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/parcels', method: 'GET' },
+        401,
+        '12. Existing API behavior unchanged (GET /parcels still 401 without auth)'
+    );
+
+    console.log('');
+}
+
+// Phase 5.9A: Final Observability Hardening. Request-ID input validation and
+// safe-path/safe-logger review. Validation-rule checks run in-process
+// against the exported helpers directly (the fastest, most precise way to
+// exercise every rejection branch); a few representative checks also go
+// over real HTTP against the live dev server to confirm the middleware
+// wiring itself behaves the same way end-to-end.
+async function testRequestIdAndLoggingHardening() {
+    console.log('25. Testing Request-ID and Logging Hardening (Phase 5.9A)');
+    console.log('-'.repeat(60));
+
+    const { sanitizeIncomingRequestId, MAX_REQUEST_ID_LENGTH } = require('./middleware/requestId');
+    const { logSafeError, getSafeLogPath } = require('./utils/safeLogger');
+
+    // 1. Valid x-vercel-id reused (real HTTP, exercises the live middleware).
+    const validId = 'iad1::abc12-1700000000000-abcdef123456';
+    const validIdResult = await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/', method: 'GET', headers: { 'x-vercel-id': validId } },
+        200,
+        '1pre. Request carrying a valid x-vercel-id'
+    );
+    logTest('1. Valid x-vercel-id is reused exactly', validIdResult.headers['x-request-id'] === validId);
+
+    // 2. Missing x-vercel-id generates a UUID (real HTTP).
+    const noIdResult = await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/', method: 'GET' },
+        200,
+        '2pre. Request with no x-vercel-id'
+    );
+    const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    logTest('2. Missing x-vercel-id generates a UUID', UUID_PATTERN.test(noIdResult.headers['x-request-id'] || ''));
+
+    // 3. Oversized request ID rejected and replaced (in-process unit check).
+    const oversized = 'a'.repeat(MAX_REQUEST_ID_LENGTH + 1);
+    logTest('3. Oversized request ID rejected', sanitizeIncomingRequestId(oversized) === null);
+
+    // 4. Whitespace/control-character request ID rejected.
+    logTest('4a. Internal-whitespace request ID rejected', sanitizeIncomingRequestId('abc 123') === null);
+    logTest('4b. Newline-containing request ID rejected', sanitizeIncomingRequestId('abc\n123') === null);
+    logTest('4c. Control-character request ID rejected', sanitizeIncomingRequestId('abc\x00123') === null);
+    logTest('4d. Whitespace-only request ID rejected', sanitizeIncomingRequestId('   ') === null);
+    logTest('4e. Outer-whitespace-only request ID is trimmed and accepted', sanitizeIncomingRequestId('  abc123  ') === 'abc123');
+
+    // 5. Unsupported-character request ID rejected.
+    logTest('5a. Comma-containing request ID rejected', sanitizeIncomingRequestId('abc,123') === null);
+    logTest('5b. Slash-containing request ID rejected', sanitizeIncomingRequestId('abc/123') === null);
+    logTest('5c. Well-formed id (letters/digits/-/_/:/.), accepted', sanitizeIncomingRequestId('iad1::abc-12_34.56') === 'iad1::abc-12_34.56');
+
+    // 6. Array/multiple request ID rejected.
+    logTest('6a. Array-valued request ID rejected', sanitizeIncomingRequestId(['id1', 'id2']) === null);
+    logTest('6b. Non-string request ID rejected', sanitizeIncomingRequestId(12345) === null);
+    logTest('6c. Undefined request ID rejected (falls back)', sanitizeIncomingRequestId(undefined) === null);
+
+    // 7. X-Request-Id response header is always safe (real HTTP, malicious
+    // input). Node's own http client refuses to transmit a header value
+    // containing a raw CR/LF/NUL at all (ERR_INVALID_CHAR, a built-in
+    // header-injection guard - ordinary tooling cannot even construct that
+    // request), so this uses transportable-but-still-unsafe characters
+    // (spaces, angle brackets) instead. The literal control-character
+    // rejection path is already unit-tested directly above (4b/4c).
+    const REQUEST_ID_HEADER_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+    const maliciousIdResult = await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/', method: 'GET', headers: { 'x-vercel-id': 'bad id with spaces <script>alert(1)</script>' } },
+        200,
+        '7pre. Request carrying a malformed/malicious x-vercel-id'
+    );
+    logTest(
+        '7. X-Request-Id response header is always safe even for malicious input',
+        REQUEST_ID_HEADER_PATTERN.test(maliciousIdResult.headers['x-request-id'] || '')
+    );
+
+    // 8. Logged path excludes query strings.
+    logTest(
+        '8. Logged path excludes query strings',
+        getSafeLogPath({ path: '/public/trackings/ABC123?token=secret&foo=bar' }) === '/public/trackings/ABC123'
+    );
+    logTest(
+        '8b. Logged path excludes URL fragments',
+        getSafeLogPath({ path: '/health#fragment-value' }) === '/health'
+    );
+
+    // 9. Logged path prefers route template where available.
+    logTest(
+        '9. Logged path prefers the matched route template over the concrete path',
+        getSafeLogPath({
+            path: '/public/trackings/SRB-realvalue',
+            route: { path: '/public/trackings/:trackingCode' },
+            baseUrl: ''
+        }) === '/public/trackings/:trackingCode'
+    );
+    logTest(
+        '9b. Falls back to req.path when no route has matched yet',
+        getSafeLogPath({ path: '/', route: undefined }) === '/'
+    );
+
+    // 10. Logger rejects/maps unknown categories safely (never crashes).
+    const capturedCategoryLogs = [];
+    const originalConsoleError1 = console.error;
+    console.error = (...args) => { capturedCategoryLogs.push(args.map(String).join(' ')); };
+    let threwOnUnknownCategory = false;
+    try {
+        logSafeError({ requestId: null, method: 'GET', path: '/', status: 500, category: 'TOTALLY_MADE_UP_CATEGORY' });
+    } catch {
+        threwOnUnknownCategory = true;
+    } finally {
+        console.error = originalConsoleError1;
+    }
+    let unknownCategoryEntry = null;
+    try { unknownCategoryEntry = JSON.parse(capturedCategoryLogs[0] || '{}'); } catch { /* checked below */ }
+    logTest(
+        '10. Unknown category safely maps to INTERNAL_ERROR without crashing',
+        !threwOnUnknownCategory && unknownCategoryEntry?.category === 'INTERNAL_ERROR'
+    );
+
+    // 11. Logger does not serialize arbitrary extra properties.
+    const capturedExtraLogs = [];
+    const originalConsoleError2 = console.error;
+    console.error = (...args) => { capturedExtraLogs.push(args.map(String).join(' ')); };
+    try {
+        logSafeError({
+            requestId: 'test-req-id-extra-props',
+            method: 'GET',
+            path: '/',
+            status: 403,
+            category: 'FORBIDDEN',
+            authorization: 'Bearer super-secret-should-not-appear',
+            mongoUri: 'mongodb://should:never@appear',
+            fullUserDocument: { email: 'nobody@example.com', password: 'hunter2' },
+        });
+    } finally {
+        console.error = originalConsoleError2;
+    }
+    const joinedExtraLogs = capturedExtraLogs.join('\n');
+    let extraLogEntry = null;
+    try { extraLogEntry = JSON.parse(capturedExtraLogs[0] || '{}'); } catch { /* checked below */ }
+    const expectedKeys = ['timestamp', 'requestId', 'method', 'path', 'status', 'category', 'durationMs', 'runtime'];
+    const onlyExpectedKeys = extraLogEntry ? Object.keys(extraLogEntry).every((k) => expectedKeys.includes(k)) : false;
+    logTest(
+        '11. Logger does not serialize arbitrary extra properties',
+        onlyExpectedKeys &&
+        !/hunter2/i.test(joinedExtraLogs) &&
+        !/super-secret-should-not-appear/i.test(joinedExtraLogs) &&
+        !/should:never@appear/i.test(joinedExtraLogs)
+    );
+
+    // 12. Health response remains secret-free (real HTTP, re-confirmed after hardening).
+    const healthResult = await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/health', method: 'GET' },
+        200,
+        '12pre. GET /health after hardening'
+    );
+    const stillSecretFree = ![
+        /mongodb(\+srv)?:\/\//i, /MONGO_URI/i, /sk_(live|test)_/i, /whsec_/i,
+        /BEGIN PRIVATE KEY/i, /FB_SERVICE_KEY/i,
+    ].some((re) => re.test(healthResult.data));
+    logTest('12. Health response remains secret-free after hardening', stillSecretFree);
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -6700,6 +7061,8 @@ async function runAllTests() {
     await testTechnicianNotificationIntegration();
     await testRepairLifecycleNotificationIntegration();
     await testPaymentNotificationIntegration();
+    await testHealthAndObservability();
+    await testRequestIdAndLoggingHardening();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

@@ -6,6 +6,8 @@ const { collections } = require('./config/database');
 const { corsOptions } = require('./config/cors');
 const { initializeModels } = require('./models');
 const { initializeControllers } = require('./controllers');
+const { requestId } = require('./middleware/requestId');
+const { logSafeError, getSafeLogPath, ERROR_CATEGORIES } = require('./utils/safeLogger');
 
 // Import routes
 const userRoutes = require('./routes/users');
@@ -16,6 +18,7 @@ const riderRoutes = require('./routes/riders');
 const trackingRoutes = require('./routes/trackings');
 const publicTrackingRoutes = require('./routes/publicTracking');
 const notificationRoutes = require('./routes/notifications');
+const healthRoutes = require('./routes/healthRoutes');
 
 const app = express();
 // Vercel's edge network is the sole reverse proxy in front of this function,
@@ -28,6 +31,11 @@ app.set('trust proxy', 1);
 const port = process.env.PORT || 3000;
 // Vercel sets this in every deployed serverless invocation; it is unset for local `node index.js`.
 const isServerless = !!process.env.VERCEL;
+
+// Attaches req.requestId / X-Request-Id before anything else, including the
+// raw-body webhook route below - it only reads headers and sets a response
+// header, so it cannot interfere with express.raw()'s exact-bytes capture.
+app.use(requestId);
 
 // Collection handles (see config/database.js) are synchronous and
 // side-effect-free - building models/controllers from them does not require
@@ -49,6 +57,13 @@ app.use(cors(corsOptions));
 // falling through to Express's default error handler.
 app.use((err, req, res, next) => {
     if (err && err.message === 'Not allowed by CORS') {
+        logSafeError({
+            requestId: req.requestId,
+            method: req.method,
+            path: getSafeLogPath(req),
+            status: 403,
+            category: ERROR_CATEGORIES.FORBIDDEN,
+        });
         return res.status(403).send({ message: 'Origin not allowed' });
     }
     next(err);
@@ -73,6 +88,7 @@ riderRoutes(app, controllers);
 trackingRoutes(app, controllers);
 publicTrackingRoutes(app, controllers);
 notificationRoutes(app, controllers);
+healthRoutes(app, controllers);
 
 // Start server (only for local/traditional hosting - Vercel invokes the
 // exported app directly per request and does not use a listening port)

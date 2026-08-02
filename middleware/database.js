@@ -1,4 +1,5 @@
 const { connectDatabase, collections } = require('../config/database');
+const { logSafeError, getSafeLogPath, ERROR_CATEGORIES } = require('../utils/safeLogger');
 
 // Confirms the shared, cached database connection is ready before any
 // database-backed route handler runs. Placed after auth middleware in each
@@ -12,6 +13,13 @@ const ensureDatabaseReady = async (req, res, next) => {
         req.collections = collections;
         next();
     } catch (error) {
+        logSafeError({
+            requestId: req.requestId,
+            method: req.method,
+            path: getSafeLogPath(req),
+            status: 503,
+            category: ERROR_CATEGORIES.DATABASE_UNAVAILABLE,
+        });
         res.status(503).send({ message: 'Service temporarily unavailable, please try again shortly' });
     }
 };
