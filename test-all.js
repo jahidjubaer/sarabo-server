@@ -3264,6 +3264,7 @@ async function testTechnicianApprovalTransaction() {
 
     const createdRiderIds = [];
     const createdUserEmails = [];
+    const createdParcelIds = [];
 
     function fakeRes() {
         return {
@@ -3287,8 +3288,34 @@ async function testTechnicianApprovalTransaction() {
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
         const riderController = controllers.rider;
+        const parcelController = controllers.parcel;
 
-        async function createTestRider(marker, { status = 'pending', email } = {}) {
+        async function createTestParcel(marker, { deliveryStatus = 'pending-pickup', riderId } = {}) {
+            const doc = {
+                parcelName: marker,
+                cost: 30,
+                senderEmail: CUSTOMER_EMAIL,
+                deliveryStatus,
+                trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                createdAt: new Date()
+            };
+            if (riderId !== undefined) doc.riderId = riderId;
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function callAssign(parcelId, riderId) {
+            const r = fakeRes();
+            return parcelController.assignRiderToParcel({ params: { id: parcelId }, body: { riderId } }, r).then(() => r);
+        }
+
+        function callCompleteStatus(parcelId) {
+            const r = fakeRes();
+            return parcelController.updateParcelStatus({ params: { id: parcelId }, body: { deliveryStatus: 'parcel_delivered' }, decoded_email: ADMIN_EMAIL }, r).then(() => r);
+        }
+
+        async function createTestRider(marker, { status = 'pending', email, workStatus = 'available' } = {}) {
             const doc = {
                 name: marker,
                 email: email || `${marker.toLowerCase()}@test.local`,
@@ -3299,7 +3326,7 @@ async function testTechnicianApprovalTransaction() {
                 nid: 'TEST-NID-0000',
                 bike: 'Test',
                 status,
-                workStatus: 'available',
+                workStatus,
                 createdAt: new Date()
             };
             const result = await collections.riders.insertOne(doc);
@@ -3521,6 +3548,163 @@ async function testTechnicianApprovalTransaction() {
         // --- 21-24. Regression coverage note: existing assignment, auth,
         // payment, and cancellation behavior are reconfirmed by re-running
         // the full suite alongside this section, not duplicated here.
+
+        // --- Phase 6.2 Unit 2A: approval/rejection workStatus consistency. ---
+
+        // 1. Pending -> approved, no active assignment: workStatus available.
+        const emailIdle1 = `test-approve-idle1-${Date.now()}@test.local`;
+        const rIdle1 = await createTestRider(`TEST-APPROVE-IDLE1-${Date.now()}`, { email: emailIdle1 });
+        await createTestUser(emailIdle1, 'user');
+        res = await callUpdateRiderStatus(rIdle1.id, { status: 'approved' });
+        riderAfter = await collections.riders.findOne({ _id: new ObjectId(rIdle1.id) });
+        logTest(
+            '1. Pending approval with no active assignment: approved + available',
+            res.statusCode === 200 && riderAfter.status === 'approved' && riderAfter.workStatus === 'available'
+        );
+
+        // 2. Rejected -> approved, no active assignment: workStatus available.
+        const emailIdle2 = `test-approve-idle2-${Date.now()}@test.local`;
+        const rIdle2 = await createTestRider(`TEST-APPROVE-IDLE2-${Date.now()}`, { status: 'rejected', email: emailIdle2 });
+        await createTestUser(emailIdle2, 'user');
+        res = await callUpdateRiderStatus(rIdle2.id, { status: 'approved' });
+        riderAfter = await collections.riders.findOne({ _id: new ObjectId(rIdle2.id) });
+        logTest(
+            '2. Rejected-to-approved with no active assignment: approved + available',
+            res.statusCode === 200 && riderAfter.status === 'approved' && riderAfter.workStatus === 'available'
+        );
+
+        // 3. Approval with an active assignment already on record (historical/
+        // manual-data-inconsistency scenario): must become in_delivery, never
+        // available, and the approval itself must still be allowed to succeed.
+        const emailActive1 = `test-approve-active-${Date.now()}@test.local`;
+        const rActive1 = await createTestRider(`TEST-APPROVE-ACTIVE-${Date.now()}`, { email: emailActive1 });
+        await createTestUser(emailActive1, 'user');
+        const pActive1 = await createTestParcel(`TEST-APPROVE-ACTIVE-${Date.now()}`, { deliveryStatus: 'driver_assigned', riderId: rActive1.id });
+        res = await callUpdateRiderStatus(rActive1.id, { status: 'approved' });
+        riderAfter = await collections.riders.findOne({ _id: new ObjectId(rActive1.id) });
+        logTest(
+            '3. Approval with an existing active assignment: approved + in_delivery, never available',
+            res.statusCode === 200 && riderAfter.status === 'approved' && riderAfter.workStatus === 'in_delivery'
+        );
+
+        // 4. Reapproval (approved -> approved) of a technician who genuinely
+        // still holds an active assignment: in_delivery preserved.
+        const emailReapproveActive = `test-reapprove-active-${Date.now()}@test.local`;
+        const rReapproveActive = await createTestRider(`TEST-REAPPROVE-ACTIVE-${Date.now()}`, { status: 'approved', workStatus: 'in_delivery', email: emailReapproveActive });
+        await createTestUser(emailReapproveActive, 'rider');
+        const pReapproveActive = await createTestParcel(`TEST-REAPPROVE-ACTIVE-${Date.now()}`, { deliveryStatus: 'rider_arriving', riderId: rReapproveActive.id });
+        res = await callUpdateRiderStatus(rReapproveActive.id, { status: 'approved' });
+        riderAfter = await collections.riders.findOne({ _id: new ObjectId(rReapproveActive.id) });
+        logTest(
+            '4. Reapproval of an actively-assigned technician preserves in_delivery',
+            res.statusCode === 200 && res.body.alreadyConsistent === true && riderAfter.workStatus === 'in_delivery'
+        );
+
+        // 5. Reapproval of an approved technician whose workStatus is
+        // (incorrectly) in_delivery but who holds no active assignment at
+        // all: corrected to available.
+        const emailReapproveIdle = `test-reapprove-idle-${Date.now()}@test.local`;
+        const rReapproveIdle = await createTestRider(`TEST-REAPPROVE-IDLE-${Date.now()}`, { status: 'approved', workStatus: 'in_delivery', email: emailReapproveIdle });
+        await createTestUser(emailReapproveIdle, 'rider');
+        res = await callUpdateRiderStatus(rReapproveIdle.id, { status: 'approved' });
+        riderAfter = await collections.riders.findOne({ _id: new ObjectId(rReapproveIdle.id) });
+        logTest(
+            '5. Reapproval of an idle (no active assignment) technician corrects workStatus to available',
+            res.statusCode === 200 && res.body.alreadyConsistent === true && riderAfter.workStatus === 'available'
+        );
+
+        // 7/8/9/10. Rejection of an actively-assigned technician is blocked
+        // outright - no rider field, no user role, and no notification change.
+        const emailRejectActive = `test-reject-active-${Date.now()}@test.local`;
+        const rRejectActive = await createTestRider(`TEST-REJECT-ACTIVE-${Date.now()}`, { status: 'approved', workStatus: 'in_delivery', email: emailRejectActive });
+        await createTestUser(emailRejectActive, 'rider');
+        const pRejectActive = await createTestParcel(`TEST-REJECT-ACTIVE-${Date.now()}`, { deliveryStatus: 'parcel_picked_up', riderId: rRejectActive.id });
+        const notifBeforeRejectActive = await collections.notifications.countDocuments({ entityId: rRejectActive.id });
+        res = await callUpdateRiderStatus(rRejectActive.id, { status: 'rejected' });
+        logTest('7. Rejection of an actively-assigned technician is blocked (409 TECHNICIAN_HAS_ACTIVE_ASSIGNMENT)', res.statusCode === 409 && res.body.code === 'TECHNICIAN_HAS_ACTIVE_ASSIGNMENT');
+        riderAfter = await collections.riders.findOne({ _id: new ObjectId(rRejectActive.id) });
+        userAfter = await collections.users.findOne({ email: emailRejectActive });
+        const notifAfterRejectActive = await collections.notifications.countDocuments({ entityId: rRejectActive.id });
+        logTest(
+            '8/9/10. Blocked rejection changes no rider field, no user role, and creates no notification',
+            riderAfter.status === 'approved' && riderAfter.workStatus === 'in_delivery' &&
+            userAfter.role === 'rider' && notifAfterRejectActive === notifBeforeRejectActive
+        );
+
+        // 16/17. Idempotent approval/rejection (already exercised above via
+        // r10/r11) create no additional notification.
+        const notifR10Before = await collections.notifications.countDocuments({ entityId: r10.id });
+        res = await callUpdateRiderStatus(r10.id, { status: 'approved' });
+        const notifR10After = await collections.notifications.countDocuments({ entityId: r10.id });
+        logTest('16. Idempotent approval creates no additional notification', res.statusCode === 200 && notifR10After === notifR10Before);
+
+        const notifR11Before = await collections.notifications.countDocuments({ entityId: r11.id });
+        res = await callUpdateRiderStatus(r11.id, { status: 'rejected' });
+        const notifR11After = await collections.notifications.countDocuments({ entityId: r11.id });
+        logTest('17. Idempotent rejection creates no additional notification', res.statusCode === 200 && notifR11After === notifR11Before);
+
+        // 18. Concurrent reapproval vs. a fresh assignment attempt on the same
+        // technician: whichever order they land in, the final workStatus must
+        // match whether the assignment actually committed.
+        const emailRaceApprove = `test-race-approveassign-${Date.now()}@test.local`;
+        const rRaceApprove = await createTestRider(`TEST-RACE-APPROVEASSIGN-${Date.now()}`, { status: 'approved', email: emailRaceApprove });
+        await createTestUser(emailRaceApprove, 'rider');
+        const pRaceApprove = await createTestParcel(`TEST-RACE-APPROVEASSIGN-${Date.now()}`);
+        const [reapproveRaceRes, assignRaceRes] = await Promise.all([
+            callUpdateRiderStatus(rRaceApprove.id, { status: 'approved' }),
+            callAssign(pRaceApprove.id, rRaceApprove.id)
+        ]);
+        const riderRaceApproveAfter = await collections.riders.findOne({ _id: new ObjectId(rRaceApprove.id) });
+        const pRaceApproveAfter = await models.Parcel.findById(pRaceApprove.id);
+        const raceApproveAssignmentSucceeded = pRaceApproveAfter.riderId === rRaceApprove.id && pRaceApproveAfter.deliveryStatus === 'driver_assigned';
+        logTest(
+            '18. Concurrent reapproval vs. assignment: final workStatus always matches whether the assignment actually committed',
+            reapproveRaceRes.statusCode === 200 &&
+            (raceApproveAssignmentSucceeded ? riderRaceApproveAfter.workStatus === 'in_delivery' : riderRaceApproveAfter.workStatus === 'available')
+        );
+
+        // 19. Concurrent rejection vs. a fresh assignment attempt on the same
+        // technician: must never end up rejected while holding an active
+        // assignment, regardless of which one wins.
+        const emailRaceReject = `test-race-rejectassign-${Date.now()}@test.local`;
+        const rRaceReject = await createTestRider(`TEST-RACE-REJECTASSIGN-${Date.now()}`, { status: 'approved', email: emailRaceReject });
+        await createTestUser(emailRaceReject, 'rider');
+        const pRaceReject = await createTestParcel(`TEST-RACE-REJECTASSIGN-${Date.now()}`);
+        const [assignRaceRes2, rejectRaceRes] = await Promise.all([
+            callAssign(pRaceReject.id, rRaceReject.id),
+            callUpdateRiderStatus(rRaceReject.id, { status: 'rejected' })
+        ]);
+        const riderRaceRejectAfter = await collections.riders.findOne({ _id: new ObjectId(rRaceReject.id) });
+        const pRaceRejectAfter = await models.Parcel.findById(pRaceReject.id);
+        const neverRejectedWithActiveAssignment = !(
+            riderRaceRejectAfter.status === 'rejected' &&
+            pRaceRejectAfter.riderId === rRaceReject.id &&
+            pRaceRejectAfter.deliveryStatus === 'driver_assigned'
+        );
+        const raceRejectAtLeastOneSucceeded = assignRaceRes2.statusCode === 200 || rejectRaceRes.statusCode === 200;
+        logTest(
+            '19. Concurrent rejection vs. assignment: never ends up rejected while holding an active assignment',
+            neverRejectedWithActiveAssignment && raceRejectAtLeastOneSucceeded
+        );
+
+        // 20. Concurrent completion vs. reapproval: with exactly one active
+        // assignment that completion legitimately finishes, the technician
+        // must converge to available regardless of interleaving.
+        const emailRaceComplete = `test-race-completereapprove-${Date.now()}@test.local`;
+        const rRaceComplete = await createTestRider(`TEST-RACE-COMPLETEREAPPROVE-${Date.now()}`, { status: 'approved', workStatus: 'in_delivery', email: emailRaceComplete });
+        await createTestUser(emailRaceComplete, 'rider');
+        const pRaceComplete = await createTestParcel(`TEST-RACE-COMPLETEREAPPROVE-${Date.now()}`, { deliveryStatus: 'parcel_picked_up', riderId: rRaceComplete.id });
+        const [completeRaceRes, reapproveRaceRes2] = await Promise.all([
+            callCompleteStatus(pRaceComplete.id),
+            callUpdateRiderStatus(rRaceComplete.id, { status: 'approved' })
+        ]);
+        const riderRaceCompleteAfter = await collections.riders.findOne({ _id: new ObjectId(rRaceComplete.id) });
+        const pRaceCompleteAfter = await models.Parcel.findById(pRaceComplete.id);
+        logTest(
+            '20. Concurrent completion vs. reapproval: request completes and technician converges to available',
+            completeRaceRes.statusCode === 200 && reapproveRaceRes2.statusCode === 200 &&
+            pRaceCompleteAfter.deliveryStatus === 'parcel_delivered' && riderRaceCompleteAfter.workStatus === 'available'
+        );
     } finally {
         // Phase 5.2 Unit 3 wired real notification creation into
         // updateRiderStatus, so every genuine approval/rejection transition
@@ -3529,6 +3713,16 @@ async function testTechnicianApprovalTransaction() {
         // function's own created rider ids).
         if (createdRiderIds.length) {
             await collections.notifications.deleteMany({ entityId: { $in: createdRiderIds } });
+        }
+        // Phase 6.2 Unit 2A: the assignment/completion races above also
+        // create real technician_assigned/new_repair_assignment/
+        // repair_completed documents - scoped and removed by entityId (this
+        // function's own created parcel ids), never by recipient.
+        if (createdParcelIds.length) {
+            await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
+        }
+        for (const id of createdParcelIds) {
+            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
         }
         for (const id of createdRiderIds) {
             await collections.riders.deleteOne({ _id: new ObjectId(id) });

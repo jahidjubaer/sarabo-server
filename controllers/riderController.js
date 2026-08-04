@@ -3,6 +3,7 @@ const { client } = require('../config/database');
 const { normalize } = require('../services/paymentProcessor');
 const { createNotificationService } = require('../services/notificationService');
 const { REQUESTABLE_STATUSES, ROLE_FOR_STATUS, isValidRiderTransition } = require('../utils/riderStatus');
+const { ACTIVE_STATUSES } = require('../utils/parcelStatus');
 
 class RiderController {
     constructor(models, collections) {
@@ -141,6 +142,19 @@ class RiderController {
         }));
     }
 
+    // Whether any repair request currently in an active lifecycle status
+    // (utils/parcelStatus.js's ACTIVE_STATUSES) names this technician as its
+    // assigned rider. Read inside the caller's own transaction session so
+    // the check is consistent with everything else read/written in that
+    // same transaction attempt.
+    async hasActiveAssignment(riderId, session) {
+        const activeParcel = await this.collections.parcels.findOne(
+            { riderId: riderId.toString(), deliveryStatus: { $in: ACTIVE_STATUSES } },
+            { session, projection: { _id: 1 } }
+        );
+        return !!activeParcel;
+    }
+
     // Admin-only technician approval/rejection. The application's status and
     // the linked user's role are one transactionally consistent operation -
     // both commit together or neither does. Previously these were two
@@ -192,6 +206,31 @@ class RiderController {
                         // as success.
                         const linkedUser = email ? await this.collections.users.findOne({ email }, { session: mongoSession }) : null;
                         if (linkedUser && linkedUser.role === ROLE_FOR_STATUS[requestedStatus]) {
+                            // Reapproval (approved -> approved) recalculates
+                            // workStatus from actual assignment state rather
+                            // than just reporting success - this is the only
+                            // place workStatus can silently drift back to
+                            // 'available' out from under an active
+                            // assignment (e.g. an admin re-approving a
+                            // technician the assignment path itself had
+                            // already correctly marked in_delivery). Never
+                            // touches `status`, never sends a notification -
+                            // still genuinely idempotent from the caller's
+                            // perspective. Guarded on the read workStatus too
+                            // so a concurrent assignment/completion between
+                            // the read above and this write is detected
+                            // rather than silently overwritten.
+                            if (requestedStatus === 'approved') {
+                                const activeNow = await this.hasActiveAssignment(technician._id, mongoSession);
+                                const correctWorkStatus = activeNow ? 'in_delivery' : 'available';
+                                if (technician.workStatus !== correctWorkStatus) {
+                                    await this.collections.riders.updateOne(
+                                        { _id: technician._id, status: currentStatus, workStatus: technician.workStatus },
+                                        { $set: { workStatus: correctWorkStatus } },
+                                        { session: mongoSession }
+                                    );
+                                }
+                            }
                             outcome = { idempotent: true };
                             return;
                         }
@@ -232,12 +271,35 @@ class RiderController {
                         return;
                     }
 
+                    // BL-004 follow-up: workStatus must reflect real
+                    // assignment state, not just get reset to 'available' on
+                    // every status change. Rejection of an actively-assigned
+                    // technician is refused outright (rejecting someone
+                    // mid-repair is a product decision this unit doesn't
+                    // make); approval derives the correct workStatus instead
+                    // of assuming one.
+                    const activeAssignment = await this.hasActiveAssignment(technician._id, mongoSession);
+                    if (requestedStatus === 'rejected' && activeAssignment) {
+                        outcome = {
+                            httpStatus: 409, code: 'TECHNICIAN_HAS_ACTIVE_ASSIGNMENT',
+                            message: 'technician has an active repair assignment and cannot be rejected'
+                        };
+                        return;
+                    }
+                    const newWorkStatus = requestedStatus === 'approved'
+                        ? (activeAssignment ? 'in_delivery' : 'available')
+                        : 'available';
+
                     // Guarded atomically against a concurrent admin action on
-                    // the same application - re-verifies the status is still
-                    // what was just read, not just a read-then-write check.
+                    // the same application, AND against a concurrent
+                    // assignment/completion changing workStatus between the
+                    // read above and this write - the predicate includes
+                    // both fields we actually read, not just the one we're
+                    // changing, so either kind of concurrent change is
+                    // detected here rather than silently overwritten.
                     const technicianUpdateResult = await this.collections.riders.updateOne(
-                        { _id: technician._id, status: currentStatus },
-                        { $set: { status: requestedStatus, workStatus: 'available' } },
+                        { _id: technician._id, status: currentStatus, workStatus: technician.workStatus },
+                        { $set: { status: requestedStatus, workStatus: newWorkStatus } },
                         { session: mongoSession }
                     );
                     if (technicianUpdateResult.matchedCount === 0) {
