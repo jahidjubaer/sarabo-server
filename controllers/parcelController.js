@@ -3,7 +3,7 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const { client } = require('../config/database');
 const { generateSecureTrackingId } = require('../utils/trackingId');
 const { logTracking } = require('../middleware/logging');
-const { VALID_STATUSES, isValidTransition } = require('../utils/parcelStatus');
+const { VALID_STATUSES, ACTIVE_STATUSES, isValidTransition } = require('../utils/parcelStatus');
 const { normalize } = require('../services/paymentProcessor');
 const { createNotificationService } = require('../services/notificationService');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
@@ -479,9 +479,30 @@ class ParcelController {
                         return;
                     }
 
+                    // Phase 6.2 Unit 2 defense in depth: under the current
+                    // one-active-assignment invariant this should never find
+                    // anything (a technician can't be assigned a second
+                    // active request while already holding one), but
+                    // historical data drift or a direct/manual edit could
+                    // still leave one. Freeing the technician anyway would
+                    // let them be assigned yet another request while still
+                    // actually holding this other one - so completion of
+                    // *this* request still proceeds (there's a safer,
+                    // narrower fix than blocking it), it just leaves the
+                    // technician's workStatus untouched rather than
+                    // incorrectly marking them available.
+                    const otherActiveAssignment = await this.collections.parcels.findOne(
+                        {
+                            riderId: technician._id.toString(),
+                            deliveryStatus: { $in: ACTIVE_STATUSES },
+                            _id: { $ne: freshParcel._id }
+                        },
+                        { session: mongoSession }
+                    );
+
                     const riderUpdateResult = await this.collections.riders.updateOne(
                         { _id: technician._id },
-                        { $set: { workStatus: 'available' } },
+                        { $set: { workStatus: otherActiveAssignment ? technician.workStatus : 'available' } },
                         { session: mongoSession }
                     );
                     if (riderUpdateResult.matchedCount === 0) {
@@ -577,8 +598,41 @@ class ParcelController {
                 return res.status(409).send({ message: 'technician is not approved', code: 'TECHNICIAN_NOT_APPROVED' });
             }
 
+            // A request to (re-)assign a technician to a parcel they are
+            // *already* the assigned technician for is not a new-assignment
+            // scenario BL-004 is about - it's the pre-existing redundant-
+            // reassignment case, which the transaction below already
+            // rejects correctly (REQUEST_ALREADY_ASSIGNED, via the parcel no
+            // longer being pending-pickup). Skipping the two checks below in
+            // that one case preserves that existing, more specific reason
+            // instead of masking it behind a workStatus check that's true
+            // only because of this exact parcel.
+            const isAlreadyThisTechnician = parcel.riderId === technician._id.toString();
+            if (!isAlreadyThisTechnician) {
+                if (technician.workStatus !== 'available') {
+                    return res.status(409).send({ message: 'technician is not currently available', code: 'RIDER_UNAVAILABLE' });
+                }
+                // Defense in depth beyond workStatus (BL-004): a fast,
+                // friendly pre-check for the case where historical data
+                // drift left workStatus 'available' while some other
+                // request still records this technician as its active
+                // assignment. This is not the race-safety mechanism itself
+                // (the guarded rider update inside the transaction below
+                // is) - it only produces a faster, clearer rejection in the
+                // common non-concurrent case.
+                const existingActiveAssignment = await this.collections.parcels.findOne({
+                    riderId: technician._id.toString(),
+                    deliveryStatus: { $in: ACTIVE_STATUSES },
+                    _id: { $ne: parcel._id }
+                });
+                if (existingActiveAssignment) {
+                    return res.status(409).send({ message: 'technician already has an active assignment', code: 'RIDER_ALREADY_ASSIGNED' });
+                }
+            }
+
             const mongoSession = client.startSession();
             let conflict = false;
+            let conflictCode = null;
             try {
                 await mongoSession.withTransaction(async () => {
                     // The repair request's owner is resolved from the real
@@ -595,6 +649,29 @@ class ParcelController {
                             new Error('repair request owner role could not be resolved'),
                             { code: 'REPAIR_OWNER_ROLE_UNRESOLVED' }
                         );
+                    }
+
+                    // Re-verifies the active-parcel defense above inside this
+                    // transaction's own snapshot, immediately before any
+                    // write - closes the window between the preliminary
+                    // check and here. The actual concurrency guarantee
+                    // against two *different* parcels racing for the *same*
+                    // technician still comes from the guarded rider update
+                    // below (workStatus: 'available' in its filter), not
+                    // from this query - a plain read can't by itself
+                    // prevent a race the way a conditional write can.
+                    const activeAssignmentInTransaction = await this.collections.parcels.findOne(
+                        {
+                            riderId: technician._id.toString(),
+                            deliveryStatus: { $in: ACTIVE_STATUSES },
+                            _id: { $ne: parcel._id }
+                        },
+                        { session: mongoSession }
+                    );
+                    if (activeAssignmentInTransaction) {
+                        conflict = true;
+                        conflictCode = 'RIDER_ALREADY_ASSIGNED';
+                        return;
                     }
 
                     // Guarded atomically against a concurrent customer
@@ -627,21 +704,35 @@ class ParcelController {
                         return;
                     }
 
-                    // Re-guards the technician's approval status atomically
-                    // at write time, not just at the preliminary read above.
+                    // Re-guards the technician's approval status AND
+                    // availability atomically at write time, not just at the
+                    // preliminary reads above (BL-004). This single
+                    // conditional update is the actual concurrency guarantee
+                    // against two different parcels racing for the same
+                    // technician: MongoDB only lets one of two concurrent
+                    // transactions match+modify this document while
+                    // workStatus is still 'available', so a losing
+                    // concurrent request always sees matchedCount 0 here.
                     const riderUpdateResult = await this.collections.riders.updateOne(
-                        { _id: technician._id, status: 'approved' },
+                        { _id: technician._id, status: 'approved', workStatus: 'available' },
                         { $set: { workStatus: 'in_delivery' } },
                         { session: mongoSession }
                     );
 
                     if (riderUpdateResult.matchedCount === 0) {
-                        // The technician stopped being approved between the
-                        // preliminary check and this write - abort the whole
-                        // transaction (including the parcel update above)
-                        // rather than leave a request assigned to a
-                        // technician whose own state update never happened.
-                        throw Object.assign(new Error('technician update failed during assignment'), { code: 'TECHNICIAN_UPDATE_FAILED' });
+                        // The technician stopped being approved/available
+                        // between the preliminary checks and this write -
+                        // most commonly a genuine concurrent assignment to
+                        // the same technician winning this race. Throwing
+                        // (rather than just flagging and returning) is
+                        // required here, not optional - the parcel update
+                        // above already applied within this same
+                        // transaction, and only a thrown error causes
+                        // withTransaction to abort/roll it back too, rather
+                        // than committing a parcel marked assigned to a
+                        // technician whose own state was never actually
+                        // claimed.
+                        throw Object.assign(new Error('technician became unavailable during assignment'), { code: 'ASSIGNMENT_CONFLICT' });
                     }
 
                     await logTracking(this.collections.trackings, parcel.trackingId, 'driver_assigned', mongoSession);
@@ -682,6 +773,9 @@ class ParcelController {
             }
 
             if (conflict) {
+                if (conflictCode === 'RIDER_ALREADY_ASSIGNED') {
+                    return res.status(409).send({ message: 'technician already has an active assignment', code: 'RIDER_ALREADY_ASSIGNED' });
+                }
                 // Determine the transaction-bound current reason for an
                 // accurate, controlled response.
                 const latest = await this.Parcel.findById(parcelId);
@@ -703,9 +797,14 @@ class ParcelController {
                 console.error('Assignment transaction aborted: repair request owner role could not be resolved');
                 return res.status(409).send({ message: 'repair request owner account could not be verified', code: 'REPAIR_OWNER_ROLE_UNRESOLVED' });
             }
-            if (error.code === 'TECHNICIAN_UPDATE_FAILED') {
-                console.error('Assignment transaction aborted: technician update failed');
-                return res.status(500).send({ message: 'Error updating technician during assignment', code: 'TECHNICIAN_UPDATE_FAILED' });
+            if (error.code === 'ASSIGNMENT_CONFLICT') {
+                // Not a server failure - the technician's approval/
+                // availability state changed between the preliminary checks
+                // and the guarded write, almost always because a concurrent
+                // assignment to the same technician committed first. The
+                // transaction above has already rolled back the parcel
+                // claim, so nothing partial is left behind.
+                return res.status(409).send({ message: 'technician is no longer available for assignment', code: 'ASSIGNMENT_CONFLICT' });
             }
             console.error('Assignment transaction aborted:', error.message);
             res.status(500).send({ message: 'Error assigning technician to repair request', code: 'ASSIGNMENT_FAILED' });

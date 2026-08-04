@@ -2651,8 +2651,13 @@ async function testTechnicianAssignment() {
             collections.riders.updateOne = originalRiderUpdateOne;
         }
         logTest(
-            'Technician-update failure surfaces as 500 TECHNICIAN_UPDATE_FAILED',
-            res.statusCode === 500 && res.body.code === 'TECHNICIAN_UPDATE_FAILED'
+            // Phase 6.2 Unit 2: the rider claim guard now also covers
+            // workStatus, so a matchedCount-0 rider update is treated as a
+            // genuine (if simulated) availability conflict - a controlled
+            // 409, not a 500 - since this is exactly what a real concurrent
+            // assignment winning the race looks like from here.
+            'Technician-update failure surfaces as 409 ASSIGNMENT_CONFLICT',
+            res.statusCode === 409 && res.body.code === 'ASSIGNMENT_CONFLICT'
         );
         const p3After = await models.Parcel.findById(p3.id);
         const p3Logs = await trackingLogsFor(p3.trackingId);
@@ -2803,6 +2808,125 @@ async function testTechnicianAssignment() {
             'Public tracking shows exactly one sanitized driver_assigned entry with no rider PII',
             publicRes.statusCode === 200 && assignedEntries.length === 1 &&
             Object.keys(assignedEntries[0]).sort().join(',') === 'status,timestamp'
+        );
+
+        function notificationsFor(parcelId) {
+            return collections.notifications.find({ entityId: parcelId }).toArray();
+        }
+
+        // --- Phase 6.2 Unit 2 (BL-004): technician double-booking prevention. ---
+
+        // 3. Rejected technician's own application status.
+        const pRejectedTarget = await createTestParcel(`TEST-ASSIGN-REJECTEDRIDER-${Date.now()}`);
+        const rejectedTechnician = await createTestRider(`TEST-RIDER-REJECTED-${Date.now()}`, { status: 'rejected' });
+        res = await assignReq(pRejectedTarget.id, { riderId: rejectedTechnician.id });
+        logTest('Rejected technician rejected (409 TECHNICIAN_NOT_APPROVED)', res.statusCode === 409 && res.body.code === 'TECHNICIAN_NOT_APPROVED');
+
+        // 4. Approved but currently busy (workStatus in_delivery) technician.
+        const pUnavailableTarget = await createTestParcel(`TEST-ASSIGN-UNAVAILABLE-${Date.now()}`);
+        const busyTechnician = await createTestRider(`TEST-RIDER-BUSY-${Date.now()}`, { workStatus: 'in_delivery' });
+        res = await assignReq(pUnavailableTarget.id, { riderId: busyTechnician.id });
+        logTest('Unavailable (busy) technician rejected (409 RIDER_UNAVAILABLE)', res.statusCode === 409 && res.body.code === 'RIDER_UNAVAILABLE');
+        const pUnavailableTargetAfter = await models.Parcel.findById(pUnavailableTarget.id);
+        logTest('Rejected-for-unavailability attempt leaves the target request unchanged', pUnavailableTargetAfter.deliveryStatus === 'pending-pickup' && !pUnavailableTargetAfter.riderId);
+
+        // 5. Defense in depth: workStatus says available, but another active
+        // request still names this technician - simulates historical drift,
+        // not reachable through the API itself under the new invariant.
+        const driftedTechnician = await createTestRider(`TEST-RIDER-DRIFT-${Date.now()}`, { workStatus: 'available' });
+        const pDriftExisting = await createTestParcel(`TEST-ASSIGN-DRIFT-EXISTING-${Date.now()}`, { deliveryStatus: 'rider_arriving' });
+        await collections.parcels.updateOne({ _id: new ObjectId(pDriftExisting.id) }, { $set: { riderId: driftedTechnician.id, riderEmail: driftedTechnician.email } });
+        const pDriftNew = await createTestParcel(`TEST-ASSIGN-DRIFT-NEW-${Date.now()}`);
+        res = await assignReq(pDriftNew.id, { riderId: driftedTechnician.id });
+        logTest(
+            'Technician with an existing active assignment rejected even though workStatus says available',
+            res.statusCode === 409 && res.body.code === 'RIDER_ALREADY_ASSIGNED'
+        );
+        const pDriftNewAfter = await models.Parcel.findById(pDriftNew.id);
+        logTest('Drift-defense rejection leaves the new target request unchanged', pDriftNewAfter.deliveryStatus === 'pending-pickup' && !pDriftNewAfter.riderId);
+
+        // 7. Completed parcel rejected.
+        const pCompleted = await createTestParcel(`TEST-ASSIGN-COMPLETED-${Date.now()}`, { deliveryStatus: 'parcel_delivered' });
+        const riderForCompleted = await createTestRider(`TEST-RIDER-FORCOMPLETED-${Date.now()}`);
+        res = await assignReq(pCompleted.id, { riderId: riderForCompleted.id });
+        logTest('Completed request rejected for assignment (409)', res.statusCode === 409 && ['REQUEST_ALREADY_ASSIGNED', 'ASSIGNMENT_NOT_ALLOWED'].includes(res.body.code));
+        const riderForCompletedAfter = await collections.riders.findOne({ _id: new ObjectId(riderForCompleted.id) });
+        logTest('Technician untouched after a rejected completed-request assignment', riderForCompletedAfter.workStatus === 'available');
+
+        // 8. Cancelled parcel rejected (direct, not just via the cancellation race).
+        const pCancelledTarget = await createTestParcel(`TEST-ASSIGN-CANCELLEDDIRECT-${Date.now()}`, { deliveryStatus: 'cancelled' });
+        const riderForCancelled = await createTestRider(`TEST-RIDER-FORCANCELLED-${Date.now()}`);
+        res = await assignReq(pCancelledTarget.id, { riderId: riderForCancelled.id });
+        logTest('Cancelled request rejected for assignment (409 REQUEST_CANCELLED)', res.statusCode === 409 && res.body.code === 'REQUEST_CANCELLED');
+
+        // 17/18. Notification content on success; absence on failure.
+        const p2Notifications = await notificationsFor(p2.id);
+        const ownerNotif = p2Notifications.find(n => n.type === 'technician_assigned');
+        const riderNotif = p2Notifications.find(n => n.type === 'new_repair_assignment');
+        logTest(
+            'Successful assignment creates exactly the expected owner + technician notifications',
+            !!ownerNotif && ownerNotif.recipientEmail === CUSTOMER_EMAIL &&
+            !!riderNotif && riderNotif.recipientEmail === realRider.email
+        );
+        const failedNotifTargetNotifications = await notificationsFor(pUnavailableTarget.id);
+        logTest('Failed assignment (unavailable technician) creates no notifications', failedNotifTargetNotifications.length === 0);
+
+        // 22/24/25. Core BL-004 test: two concurrent assignments of two
+        // DIFFERENT parcels to the SAME technician must produce exactly one
+        // winner, never two, and never a duplicated/orphaned notification.
+        const pRaceX = await createTestParcel(`TEST-ASSIGN-SAMERIDER-X-${Date.now()}`);
+        const pRaceY = await createTestParcel(`TEST-ASSIGN-SAMERIDER-Y-${Date.now()}`);
+        const sharedTechnician = await createTestRider(`TEST-RIDER-SHARED-${Date.now()}`);
+        const [sameRiderResX, sameRiderResY] = await Promise.all([
+            assignReq(pRaceX.id, { riderId: sharedTechnician.id }),
+            assignReq(pRaceY.id, { riderId: sharedTechnician.id })
+        ]);
+        const sameRiderStatuses = [sameRiderResX.statusCode, sameRiderResY.statusCode].sort();
+        logTest(
+            'Two concurrent assignments of the SAME technician to two DIFFERENT requests produce exactly one winner',
+            sameRiderStatuses[0] === 200 && sameRiderStatuses[1] === 409
+        );
+        const sharedTechnicianAfter = await collections.riders.findOne({ _id: new ObjectId(sharedTechnician.id) });
+        logTest('Winning assignment leaves the shared technician busy exactly once (not double-booked)', sharedTechnicianAfter.workStatus === 'in_delivery');
+
+        const pRaceXAfter = await models.Parcel.findById(pRaceX.id);
+        const pRaceYAfter = await models.Parcel.findById(pRaceY.id);
+        const winningParcel = pRaceXAfter.deliveryStatus === 'driver_assigned' ? pRaceXAfter : pRaceYAfter;
+        const losingParcel = pRaceXAfter.deliveryStatus === 'driver_assigned' ? pRaceYAfter : pRaceXAfter;
+        logTest(
+            'Exactly one of the two requests actually shows the technician assigned; the other stays pending',
+            winningParcel.riderId === sharedTechnician.id && losingParcel.deliveryStatus === 'pending-pickup' && !losingParcel.riderId
+        );
+
+        const winningParcelNotifications = await notificationsFor(winningParcel._id.toString());
+        const losingParcelNotifications = await notificationsFor(losingParcel._id.toString());
+        logTest(
+            'Race winner has exactly one pair of notifications; the race loser has none',
+            winningParcelNotifications.filter(n => n.type === 'technician_assigned').length === 1 &&
+            winningParcelNotifications.filter(n => n.type === 'new_repair_assignment').length === 1 &&
+            losingParcelNotifications.length === 0
+        );
+
+        // 29. Existing admin-only authorization on this route remains intact.
+        const { verifyAdmin } = require('./middleware/auth');
+        function fakeMwRes() {
+            return { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; } };
+        }
+        async function callVerifyAdmin(decoded_email) {
+            const mwReq = { collections, decoded_email };
+            const mwRes = fakeMwRes();
+            let nextCalled = false;
+            await verifyAdmin(mwReq, mwRes, () => { nextCalled = true; });
+            return { res: mwRes, nextCalled };
+        }
+        const customerMw = await callVerifyAdmin(CUSTOMER_EMAIL);
+        const riderMw = await callVerifyAdmin(RIDER_EMAIL);
+        const adminMw = await callVerifyAdmin(ADMIN_EMAIL);
+        logTest(
+            'Assignment route authorization (verifyAdmin) remains intact',
+            customerMw.res.statusCode === 403 && !customerMw.nextCalled &&
+            riderMw.res.statusCode === 403 && !riderMw.nextCalled &&
+            adminMw.nextCalled === true
         );
     } finally {
         // logTracking() writes made outside a transaction (none in the
@@ -3792,6 +3916,34 @@ async function testRepairCompletionTransaction() {
         // cancellation, and payment behavior are reconfirmed by re-running the
         // full suite (sections 13-22) alongside this section, not duplicated
         // here.
+
+        // --- Phase 6.2 Unit 2 (BL-004): completion does not free a
+        // technician who still holds another active assignment. Under the
+        // new one-active-assignment invariant this situation can't arise
+        // through the API itself - it's simulated directly here as the kind
+        // of historical/manual-edit drift the defense in depth exists for. ---
+        const techDualBusy = await createTestTechnician(`TEST-COMPLETE-DUALACTIVE-${Date.now()}`, { workStatus: 'in_delivery' });
+        const pDualMain = await createTestParcel(`TEST-COMPLETE-DUALACTIVE-MAIN-${Date.now()}`, {
+            deliveryStatus: 'parcel_picked_up', riderId: techDualBusy.id, riderEmail: techDualBusy.email
+        });
+        const pDualOther = await createTestParcel(`TEST-COMPLETE-DUALACTIVE-OTHER-${Date.now()}`, {
+            deliveryStatus: 'driver_assigned', riderId: techDualBusy.id, riderEmail: techDualBusy.email
+        });
+        res = await callUpdateStatus(pDualMain.id, 'parcel_delivered', techDualBusy.email);
+        logTest(
+            'Completion of one request still succeeds even when the technician holds another active one',
+            res.statusCode === 200 && res.body.deliveryStatus === 'parcel_delivered'
+        );
+        const techDualBusyAfter = await collections.riders.findOne({ _id: new ObjectId(techDualBusy.id) });
+        logTest(
+            'Technician is NOT freed to available while another active assignment (pDualOther) still exists',
+            techDualBusyAfter.workStatus === 'in_delivery'
+        );
+        const pDualOtherAfter = await models.Parcel.findById(pDualOther.id);
+        logTest(
+            'The other active request itself is completely untouched by the unrelated completion',
+            pDualOtherAfter.deliveryStatus === 'driver_assigned'
+        );
     } finally {
         for (const id of createdParcelIds) {
             await collections.parcels.deleteOne({ _id: new ObjectId(id) });
