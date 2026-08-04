@@ -8,7 +8,7 @@ const HealthController = require('./healthController');
 
 function initializeControllers(models, collections) {
     return {
-        user: new UserController(models),
+        user: new UserController(models, collections),
         parcel: new ParcelController(models, collections),
         rider: new RiderController(models, collections),
         payment: new PaymentController(models, collections),

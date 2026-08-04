@@ -6979,6 +6979,280 @@ async function testUserRolePrivacyHardening() {
     console.log('');
 }
 
+// Phase 6.2 Unit 1 (BL-002 / BL-005): PATCH /users/:id/role hardening -
+// valid-role enforcement, ObjectId validation, self-demotion guard,
+// concurrency-safe last-admin guard, and rider-role consistency.
+async function testUserRoleUpdateSafety() {
+    console.log('27. Testing User Role Update Safety (Phase 6.2 Unit 1)');
+    console.log('-'.repeat(60));
+
+    const { ObjectId } = require('mongodb');
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; },
+            json(payload) { this.body = payload; return this; }
+        };
+    }
+
+    await connectDatabase();
+    const models = initializeModels(collections);
+    const controllers = initializeControllers(models, collections);
+    const userController = controllers.user;
+
+    const createdUserEmails = [];
+    const createdRiderIds = [];
+
+    async function createTestUser(email, role = 'user', extraFields = {}) {
+        createdUserEmails.push(email);
+        const doc = { email, role, createdAt: new Date(), ...extraFields };
+        const result = await collections.users.insertOne(doc);
+        return result.insertedId;
+    }
+
+    async function createTestRider(marker, { status = 'pending', email } = {}) {
+        const doc = {
+            name: marker,
+            email: email || `${marker.toLowerCase()}@test.local`,
+            region: 'Test Region',
+            district: 'Test District',
+            address: 'Test Address',
+            license: 'Test License',
+            nid: 'TEST-NID-0000',
+            bike: 'Test',
+            status,
+            workStatus: 'available',
+            createdAt: new Date()
+        };
+        const result = await collections.riders.insertOne(doc);
+        createdRiderIds.push(result.insertedId.toString());
+        return result.insertedId;
+    }
+
+    function callUpdateUserRole(targetId, role, actingEmail) {
+        const req = { params: { id: targetId }, body: { role }, decoded_email: actingEmail };
+        const res = fakeRes();
+        return userController.updateUserRole(req, res).then(() => res);
+    }
+
+    try {
+        const adminDoc = await collections.users.findOne({ email: ADMIN_EMAIL });
+
+        // --- 1/2. Promote then demote a plain user via the real endpoint. ---
+        const plainEmail = `test-role-plain-${Date.now()}@test.local`;
+        const plainId = (await createTestUser(plainEmail, 'user')).toString();
+
+        let res = await callUpdateUserRole(plainId, 'admin', ADMIN_EMAIL);
+        logTest('1. Existing admin can promote another valid user to admin', res.statusCode === 200 && res.body?.role === 'admin');
+
+        res = await callUpdateUserRole(plainId, 'user', ADMIN_EMAIL);
+        logTest('2. Existing admin can change another valid user to user', res.statusCode === 200 && res.body?.role === 'user');
+
+        // --- 3/4/5. Invalid role values. ---
+        res = await callUpdateUserRole(plainId, 'superadmin', ADMIN_EMAIL);
+        logTest('3. Unknown role rejected', res.statusCode === 400 && res.body?.code === 'INVALID_ROLE');
+
+        res = await callUpdateUserRole(plainId, '', ADMIN_EMAIL);
+        const emptyOk = res.statusCode === 400 && res.body?.code === 'INVALID_ROLE';
+        res = await callUpdateUserRole(plainId, '   ', ADMIN_EMAIL);
+        logTest('4. Empty/whitespace-only role rejected', emptyOk && res.statusCode === 400 && res.body?.code === 'INVALID_ROLE');
+
+        let allNonStringRejected = true;
+        for (const badRole of [123, true, false, null, ['admin'], { role: 'admin' }]) {
+            const r = await callUpdateUserRole(plainId, badRole, ADMIN_EMAIL);
+            if (!(r.statusCode === 400 && r.body?.code === 'INVALID_ROLE')) allNonStringRejected = false;
+        }
+        logTest('5. Non-string role values (number/boolean/null/array/object) rejected', allNonStringRejected);
+
+        // --- 6/7. Object ID validation. ---
+        res = await callUpdateUserRole('not-a-valid-object-id', 'admin', ADMIN_EMAIL);
+        logTest('6. Malformed user ObjectId returns 400', res.statusCode === 400 && res.body?.code === 'INVALID_USER_ID');
+
+        res = await callUpdateUserRole('000000000000000000000000', 'admin', ADMIN_EMAIL);
+        logTest('7. Valid but missing user returns 404', res.statusCode === 404 && res.body?.code === 'USER_NOT_FOUND');
+
+        // --- 8. Self-demotion guard. ---
+        res = await callUpdateUserRole(adminDoc._id.toString(), 'user', ADMIN_EMAIL);
+        const adminAfterSelfAttempt = await collections.users.findOne({ _id: adminDoc._id });
+        logTest(
+            '8. Admin cannot demote self',
+            res.statusCode === 409 && res.body?.code === 'SELF_DEMOTION_BLOCKED' && adminAfterSelfAttempt.role === 'admin'
+        );
+
+        // --- 10. One admin can be demoted while another remains. ---
+        const extraAdminEmail = `test-role-extraadmin-${Date.now()}@test.local`;
+        const extraAdminId = (await createTestUser(extraAdminEmail, 'admin')).toString();
+        res = await callUpdateUserRole(extraAdminId, 'user', ADMIN_EMAIL);
+        logTest('10. One admin can be demoted when another remains', res.statusCode === 200 && res.body?.role === 'user');
+
+        // --- 12/13/14/15. Rider-role consistency (BL-005). ---
+        const noRiderEmail = `test-role-norider-${Date.now()}@test.local`;
+        const noRiderId = (await createTestUser(noRiderEmail, 'user')).toString();
+        res = await callUpdateUserRole(noRiderId, 'rider', ADMIN_EMAIL);
+        logTest('12. Role rider rejected when no rider document exists', res.statusCode === 409 && res.body?.code === 'RIDER_RECORD_NOT_FOUND');
+
+        const pendingRiderEmail = `test-role-pending-${Date.now()}@test.local`;
+        await createTestRider(`TEST-ROLE-PENDING-${Date.now()}`, { status: 'pending', email: pendingRiderEmail });
+        const pendingUserId = (await createTestUser(pendingRiderEmail, 'user')).toString();
+        res = await callUpdateUserRole(pendingUserId, 'rider', ADMIN_EMAIL);
+        logTest('13. Role rider rejected when rider status is pending', res.statusCode === 409 && res.body?.code === 'RIDER_NOT_APPROVED');
+
+        const rejectedRiderEmail = `test-role-rejected-${Date.now()}@test.local`;
+        await createTestRider(`TEST-ROLE-REJECTED-${Date.now()}`, { status: 'rejected', email: rejectedRiderEmail });
+        const rejectedUserId = (await createTestUser(rejectedRiderEmail, 'user')).toString();
+        res = await callUpdateUserRole(rejectedUserId, 'rider', ADMIN_EMAIL);
+        logTest('14. Role rider rejected when rider status is rejected', res.statusCode === 409 && res.body?.code === 'RIDER_NOT_APPROVED');
+
+        const approvedRiderEmail = `test-role-approved-${Date.now()}@test.local`;
+        await createTestRider(`TEST-ROLE-APPROVED-${Date.now()}`, { status: 'approved', email: approvedRiderEmail });
+        const approvedUserId = (await createTestUser(approvedRiderEmail, 'user')).toString();
+        res = await callUpdateUserRole(approvedUserId, 'rider', ADMIN_EMAIL);
+        logTest('15. Role rider accepted when approved rider exists', res.statusCode === 200 && res.body?.role === 'rider');
+
+        // --- 16. Failed role change performs no database write. ---
+        const beforeRole = (await collections.users.findOne({ _id: new ObjectId(noRiderId) })).role;
+        await callUpdateUserRole(noRiderId, 'not-a-real-role', ADMIN_EMAIL);
+        const afterRole = (await collections.users.findOne({ _id: new ObjectId(noRiderId) })).role;
+        logTest('16. Failed role change performs no database write', beforeRole === afterRole);
+
+        // --- 17. Unrelated user fields remain unchanged. ---
+        const fieldsEmail = `test-role-fields-${Date.now()}@test.local`;
+        const fixedCreatedAt = new Date('2020-01-01T00:00:00.000Z');
+        const fieldsId = (await createTestUser(fieldsEmail, 'user', { displayName: 'Test Display Name', createdAt: fixedCreatedAt })).toString();
+        await callUpdateUserRole(fieldsId, 'admin', ADMIN_EMAIL);
+        const fieldsAfter = await collections.users.findOne({ _id: new ObjectId(fieldsId) });
+        logTest(
+            '17. Unrelated user fields remain unchanged',
+            fieldsAfter.email === fieldsEmail &&
+            fieldsAfter.displayName === 'Test Display Name' &&
+            fieldsAfter.createdAt.getTime() === fixedCreatedAt.getTime() &&
+            fieldsAfter.role === 'admin'
+        );
+
+        // --- 18. No private email/token appears in logs (source inspection,
+        // same technique as section 26's test 9/10). ---
+        const userControllerSource = require('fs').readFileSync(
+            require.resolve('./controllers/userController'), 'utf8'
+        );
+        const updateRoleMatch = userControllerSource.match(/async updateUserRole\(req, res\) \{[\s\S]*?\n    \}/);
+        const updateRoleText = updateRoleMatch ? updateRoleMatch[0] : '';
+        const loggingCalls = updateRoleText.match(/console\.(log|error)\([^)]*\)/g) || [];
+        const onlyLogsSafeErrorMessage = loggingCalls.every(call => /error\.message/.test(call) && !/email|decoded_email|actingAdmin|targetUser/.test(call));
+        logTest(
+            '18. updateUserRole never logs an email/token - only a generic error message',
+            updateRoleText.length > 0 && onlyLogsSafeErrorMessage
+        );
+
+        // --- 19. Existing admin route authorization remains intact. ---
+        const { verifyAdmin } = require('./middleware/auth');
+        function fakeMwRes() {
+            return { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; } };
+        }
+        async function callVerifyAdmin(decoded_email) {
+            const req = { collections, decoded_email };
+            const r = fakeMwRes();
+            let nextCalled = false;
+            await verifyAdmin(req, r, () => { nextCalled = true; });
+            return { res: r, nextCalled };
+        }
+        const customerMw = await callVerifyAdmin(CUSTOMER_EMAIL);
+        const riderMw = await callVerifyAdmin(RIDER_EMAIL);
+        const adminMw = await callVerifyAdmin(ADMIN_EMAIL);
+        logTest(
+            '19. Existing admin route authorization remains intact',
+            customerMw.res.statusCode === 403 && !customerMw.nextCalled &&
+            riderMw.res.statusCode === 403 && !riderMw.nextCalled &&
+            adminMw.nextCalled === true
+        );
+
+        // --- Duplicate/no-op transition (Phase J). ---
+        res = await callUpdateUserRole(plainId, 'user', ADMIN_EMAIL);
+        logTest('Duplicate/no-op role transition succeeds idempotently', res.statusCode === 200 && res.body?.alreadyConsistent === true);
+
+        // --- 9/11. Last-admin protection, including the concurrent two-
+        // different-admins race. This is the only place in this suite that
+        // temporarily touches non-test-created documents (every real admin
+        // account), and only for the narrow duration of this one check -
+        // every original role is captured first and restored in the finally
+        // block below, unconditionally, so a failed assertion can never
+        // leave a real admin account demoted. Placed last, and this is the
+        // final test section in the whole suite, specifically so nothing
+        // downstream ever depends on admin roles during the brief window
+        // they're altered.
+        const realAdminsBefore = await collections.users.find({ role: 'admin' }).toArray();
+        const realAdminIds = realAdminsBefore.map(a => a._id);
+        const soleAdminEmail = `test-role-soleadmin-${Date.now()}@test.local`;
+        const soleAdminId = await createTestUser(soleAdminEmail, 'admin');
+        try {
+            if (realAdminIds.length) {
+                await collections.users.updateMany({ _id: { $in: realAdminIds } }, { $set: { role: 'user' } });
+            }
+
+            // 9. Exactly one admin (soleAdminEmail) exists now. The only
+            // account that could even pass this route's admin gate is that
+            // same account, so this necessarily also is a self-demotion -
+            // that is not a test gap, it is the actual security property:
+            // self-demotion-block + acting-must-currently-be-admin together
+            // make "a different admin demotes the last admin" structurally
+            // unreachable. What matters is the outcome: the attempt is
+            // blocked and at least one admin still exists afterward.
+            res = await callUpdateUserRole(soleAdminId.toString(), 'user', soleAdminEmail);
+            const soleAdminAfter = await collections.users.findOne({ _id: soleAdminId });
+            logTest(
+                '9. Final admin cannot be demoted',
+                res.statusCode === 409 && soleAdminAfter.role === 'admin'
+            );
+
+            // 11. Concurrent cross-demotion between two different admins,
+            // starting from exactly two total admins - the scenario the
+            // fence (the same-value touch on every other admin inside the
+            // transaction) exists to protect.
+            const adminAEmail = `test-role-concurrenta-${Date.now()}@test.local`;
+            const adminAId = await createTestUser(adminAEmail, 'admin');
+            const adminBEmail = `test-role-concurrentb-${Date.now()}@test.local`;
+            const adminBId = await createTestUser(adminBEmail, 'admin');
+            // Demote the temporary sole-admin out of the way first so
+            // exactly two admins (A, B) exist for the race.
+            await collections.users.updateOne({ _id: soleAdminId }, { $set: { role: 'user' } });
+
+            const [raceResA, raceResB] = await Promise.all([
+                callUpdateUserRole(adminBId.toString(), 'user', adminAEmail),
+                callUpdateUserRole(adminAId.toString(), 'user', adminBEmail)
+            ]);
+            const raceSucceeded = [raceResA, raceResB].filter(r => r.statusCode === 200).length;
+            const raceAdminCount = await collections.users.countDocuments({ _id: { $in: [adminAId, adminBId] }, role: 'admin' });
+            logTest(
+                '11. Concurrent final-admin demotion attempts cannot result in zero admins',
+                raceSucceeded === 1 && raceAdminCount === 1
+            );
+        } finally {
+            if (realAdminIds.length) {
+                await collections.users.updateMany({ _id: { $in: realAdminIds } }, { $set: { role: 'admin' } });
+            }
+            const restoredCount = await collections.users.countDocuments({ _id: { $in: realAdminIds }, role: 'admin' });
+            logTest('Real admin accounts fully restored after concurrency test', restoredCount === realAdminIds.length);
+        }
+
+        // 20 is the full 769+ suite passing end-to-end, not an assertion here.
+
+    } finally {
+        if (createdUserEmails.length) {
+            await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        }
+        for (const id of createdRiderIds) {
+            await collections.riders.deleteOne({ _id: new ObjectId(id) });
+        }
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -7182,6 +7456,7 @@ async function runAllTests() {
     await testHealthAndObservability();
     await testRequestIdAndLoggingHardening();
     await testUserRolePrivacyHardening();
+    await testUserRoleUpdateSafety();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
