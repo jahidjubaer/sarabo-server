@@ -7599,6 +7599,159 @@ async function testUserRoleUpdateSafety() {
     console.log('');
 }
 
+// Phase 6.3 Unit 1: Product/repair taxonomy foundation. Pure in-memory
+// constant/validation tests - no database, no HTTP, no fixtures, nothing to
+// clean up.
+async function testServiceTaxonomyFoundation() {
+    console.log('28. Testing Service Taxonomy Foundation (Phase 6.3 Unit 1)');
+    console.log('-'.repeat(60));
+
+    const {
+        PRODUCT_CATEGORIES, PRODUCT_CATEGORY_SLUGS,
+        isValidProductCategorySlug, getProductCategoryBySlug, isActiveProductCategory
+    } = require('./utils/productCategory');
+    const {
+        REPAIR_CATEGORIES, REPAIR_CATEGORY_SLUGS,
+        isValidRepairCategorySlug, getRepairCategoryBySlug, isActiveRepairCategory
+    } = require('./utils/repairCategory');
+    const {
+        PRODUCT_REPAIR_CATEGORY_MAP, getAllowedRepairCategories,
+        isRepairCategoryAllowedForProduct, validateProductRepairPair
+    } = require('./utils/serviceTaxonomy');
+
+    // --- 1/2. Exact locked category counts. ---
+    logTest('1. Exactly 8 product categories', PRODUCT_CATEGORIES.length === 8);
+    logTest('2. Exactly 13 repair categories', REPAIR_CATEGORIES.length === 13);
+
+    // --- 3/4. Slug uniqueness. ---
+    logTest('3. Product slugs unique', new Set(PRODUCT_CATEGORY_SLUGS).size === PRODUCT_CATEGORY_SLUGS.length);
+    logTest('4. Repair slugs unique', new Set(REPAIR_CATEGORY_SLUGS).size === REPAIR_CATEGORY_SLUGS.length);
+
+    // --- 5/6. Required metadata present on every entry. ---
+    const productMetadataOk = PRODUCT_CATEGORIES.every((c) =>
+        typeof c.slug === 'string' && c.slug.length > 0 &&
+        typeof c.label === 'string' && c.label.length > 0 &&
+        typeof c.description === 'string' && c.description.length > 0 &&
+        typeof c.iconKey === 'string' && c.iconKey.length > 0 &&
+        typeof c.brandModelRequired === 'boolean' &&
+        typeof c.serialNumberRelevant === 'boolean' &&
+        typeof c.isActive === 'boolean'
+    );
+    const repairMetadataOk = REPAIR_CATEGORIES.every((c) =>
+        typeof c.slug === 'string' && c.slug.length > 0 &&
+        typeof c.label === 'string' && c.label.length > 0 &&
+        typeof c.description === 'string' && c.description.length > 0 &&
+        ['yes', 'partial', 'no'].includes(c.remoteDiagnosisMode) &&
+        typeof c.imageEvidenceUseful === 'boolean' &&
+        typeof c.inspectionNormallyRequired === 'boolean' &&
+        typeof c.isActive === 'boolean'
+    );
+    logTest('5. Every category has required metadata', productMetadataOk && repairMetadataOk);
+    logTest('6. Every iconKey is non-empty', PRODUCT_CATEGORIES.every((c) => c.iconKey.trim().length > 0));
+
+    // --- 7/8. Mapping references only valid slugs; every product has >=1 repair category. ---
+    const mappingReferencesValidSlugs = Object.entries(PRODUCT_REPAIR_CATEGORY_MAP).every(
+        ([productSlug, repairSlugs]) =>
+            isValidProductCategorySlug(productSlug) &&
+            repairSlugs.every((slug) => isValidRepairCategorySlug(slug))
+    );
+    logTest('7. Every product-to-repair mapping references valid slugs', mappingReferencesValidSlugs);
+    logTest(
+        '8. Every selected product has at least one supported repair category',
+        PRODUCT_CATEGORY_SLUGS.every((slug) => getAllowedRepairCategories(slug).length > 0)
+    );
+
+    // --- 9. Diagnosis universally available. ---
+    logTest(
+        '9. diagnosis is valid for every product category',
+        PRODUCT_CATEGORY_SLUGS.every((slug) => isRepairCategoryAllowedForProduct(slug, 'diagnosis'))
+    );
+
+    // --- 10-13. Known valid/invalid pairs. ---
+    logTest('10. Valid smartphone/display-screen pair accepted', validateProductRepairPair('smartphone', 'display-screen').valid === true);
+    let result = validateProductRepairPair('smartphone', 'compressor-cooling');
+    logTest('11. Invalid smartphone/compressor-cooling pair rejected', result.valid === false && result.code === 'REPAIR_CATEGORY_NOT_SUPPORTED');
+    logTest('12. Valid refrigerator/compressor-cooling pair accepted', validateProductRepairPair('refrigerator', 'compressor-cooling').valid === true);
+    result = validateProductRepairPair('refrigerator', 'software-os');
+    logTest('13. Invalid refrigerator/software-os pair rejected', result.valid === false && result.code === 'REPAIR_CATEGORY_NOT_SUPPORTED');
+
+    // --- 14-17. Invalid input handling. ---
+    result = validateProductRepairPair('bogus-product', 'other');
+    logTest('14. Invalid product slug rejected', result.valid === false && result.code === 'INVALID_PRODUCT_CATEGORY');
+    result = validateProductRepairPair('smartphone', 'bogus-repair');
+    logTest('15. Invalid repair slug rejected', result.valid === false && result.code === 'INVALID_REPAIR_CATEGORY');
+    logTest('16. Empty slug rejected', !isValidProductCategorySlug('') && !isValidRepairCategorySlug(''));
+    logTest(
+        '17. Non-string slug rejected (number/boolean/null/array/object)',
+        [123, true, null, ['smartphone'], { slug: 'smartphone' }].every((v) => !isValidProductCategorySlug(v) && !isValidRepairCategorySlug(v))
+    );
+
+    // --- 18/19. Normalization: trim-only, no guessing. ---
+    logTest(
+        '18. Whitespace is trimmed but case/content is never guessed',
+        isValidProductCategorySlug('  smartphone  ') === true &&
+        isValidProductCategorySlug('Smartphone') === false
+    );
+    logTest(
+        '19. No automatic label-to-slug guessing',
+        isValidProductCategorySlug('Mobile Phone') === false && isValidRepairCategorySlug('Display / Screen') === false
+    );
+
+    // --- 20-22. Immutability of returned values. ---
+    const productCopy = getProductCategoryBySlug('smartphone');
+    productCopy.label = 'MUTATED';
+    productCopy.isActive = false;
+    logTest(
+        '20. Returned product object cannot mutate canonical state',
+        getProductCategoryBySlug('smartphone').label === 'Mobile Phone' && isActiveProductCategory('smartphone') === true
+    );
+
+    const repairCopy = getRepairCategoryBySlug('display-screen');
+    repairCopy.label = 'MUTATED';
+    repairCopy.isActive = false;
+    logTest(
+        '21. Returned repair object cannot mutate canonical state',
+        getRepairCategoryBySlug('display-screen').label === 'Display / Screen' && isActiveRepairCategory('display-screen') === true
+    );
+
+    const allowedCopy = getAllowedRepairCategories('smartphone');
+    allowedCopy.push('bogus-injected');
+    allowedCopy.length = 0;
+    logTest(
+        '22. Returned allowed-category array cannot mutate canonical mapping',
+        getAllowedRepairCategories('smartphone').length > 0 && !getAllowedRepairCategories('smartphone').includes('bogus-injected')
+    );
+
+    // --- 23. Inactive-category behavior is testable without touching exported state. ---
+    // isActiveProductCategory/isActiveRepairCategory are pure functions of the
+    // frozen canonical catalog - there is no exported mutator to flip
+    // isActive, by design (a future admin-catalog unit would own that, likely
+    // backed by a real collection). Confirmed here by checking every current
+    // entry defaults to isActive: true and the checker correctly reflects it,
+    // without needing to (and being unable to) flip any entry for the test.
+    logTest(
+        '23. Active-category checks correctly reflect the canonical isActive flag',
+        PRODUCT_CATEGORY_SLUGS.every((slug) => isActiveProductCategory(slug) === true) &&
+        REPAIR_CATEGORY_SLUGS.every((slug) => isActiveRepairCategory(slug) === true) &&
+        isActiveProductCategory('bogus-product') === false
+    );
+
+    // --- 24. Validation returns controlled, structured codes - never throws. ---
+    let threwOnInvalidInput = false;
+    try {
+        validateProductRepairPair(undefined, undefined);
+        validateProductRepairPair(123, {});
+        validateProductRepairPair([], []);
+    } catch {
+        threwOnInvalidInput = true;
+    }
+    logTest('24. Validation never throws a raw error on malformed input, always returns a controlled code', !threwOnInvalidInput);
+
+    // 25 is the full 820+ suite passing end-to-end, not an assertion here.
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -7803,6 +7956,7 @@ async function runAllTests() {
     await testRequestIdAndLoggingHardening();
     await testUserRolePrivacyHardening();
     await testUserRoleUpdateSafety();
+    await testServiceTaxonomyFoundation();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
