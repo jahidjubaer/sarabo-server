@@ -71,6 +71,23 @@ class RiderModel {
             { session }
         );
     }
+
+    // Bounded candidate fetch for eligible-technician evaluation (Phase 6.3
+    // Unit 5). Explicit inclusion projection - never a bare find() - so a
+    // future field added to this collection is never accidentally pulled
+    // into eligibility evaluation/response building. `approvedOnly: false`
+    // (diagnostic mode only) additionally fetches non-approved riders solely
+    // so the diagnostic response can report TECHNICIAN_NOT_APPROVED for
+    // them; the default (non-diagnostic) path never needs to see them at
+    // all, since they could never be eligible regardless.
+    async findEligibilityCandidates({ approvedOnly }) {
+        const filter = approvedOnly ? { status: 'approved' } : {};
+        const projection = {
+            name: 1, email: 1, region: 1, district: 1, avatar: 1,
+            status: 1, workStatus: 1, expertise: 1
+        };
+        return await this.collection.find(filter, { projection }).toArray();
+    }
 }
 
 module.exports = RiderModel;

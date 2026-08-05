@@ -123,6 +123,35 @@ async function connectDatabase() {
                     { repairCategorySlug: 1 },
                     { name: 'serviceDefinitions_repairCategorySlug' }
                 );
+                // Eligible-technician evaluation (Phase 6.3 Unit 5). The
+                // candidate-fetch query filters on status+workStatus
+                // together, so one compound index serves it. expertise's two
+                // fields are each their own array (multikey) path -
+                // MongoDB does not allow a single compound index across two
+                // separate multikey (array) fields in one document, so each
+                // gets its own standalone index rather than being combined.
+                await collections.riders.createIndex(
+                    { status: 1, workStatus: 1 },
+                    { name: 'riders_status_workStatus' }
+                );
+                await collections.riders.createIndex(
+                    { 'expertise.productCategorySlug': 1 },
+                    { name: 'riders_expertise_productCategorySlug' }
+                );
+                await collections.riders.createIndex(
+                    { 'expertise.repairCategorySlugs': 1 },
+                    { name: 'riders_expertise_repairCategorySlugs' }
+                );
+                // Serves both the active-assignment set lookup (filtered to
+                // ACTIVE_STATUSES) and the completed-repair-count aggregation
+                // (filtered to 'parcel_delivered') - both query riderId
+                // together with deliveryStatus, so one compound index serves
+                // either regardless of which deliveryStatus values are
+                // actually matched.
+                await collections.parcels.createIndex(
+                    { riderId: 1, deliveryStatus: 1 },
+                    { name: 'parcels_riderId_deliveryStatus' }
+                );
                 return { db, collections };
             })
             .catch((error) => {

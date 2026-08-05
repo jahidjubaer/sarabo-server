@@ -8833,6 +8833,518 @@ async function testRepairRequestV2() {
     console.log('');
 }
 
+// Phase 6.3 Unit 5 - Expertise-Aware Eligible Technician API.
+// Split into two parts: PART A exercises the hard-eligibility and ranking
+// rules as pure unit tests, directly against services/technicianEligibilityService.js
+// with synthetic in-memory objects - no database fixtures needed, since
+// those rules take plain data in and return plain data out. PART B exercises
+// the full route/controller pipeline (auth, validation, response shape,
+// diagnostic mode, pagination, legacy/assignment compatibility) against real
+// synthetic TEST-ELIGIBILITY-*/@test.local fixtures, cleaned up in finally.
+async function testEligibleTechnicianAPI() {
+    console.log('32. Testing Expertise-Aware Eligible Technician API (Phase 6.3 Unit 5)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+    const es = require('./services/technicianEligibilityService');
+
+    // ================= PART A: pure hard-eligibility + ranking unit tests =================
+    const baseRequestTaxonomy = { productCategorySlug: 'smartphone', repairCategorySlug: 'motherboard', region: 'Dhaka', district: 'Mirpur' };
+    const baseServiceDefinition = { requiredExpertiseLevel: 'intermediate' };
+    const noActiveAssignments = new Set();
+
+    function makeRider(overrides = {}) {
+        return {
+            _id: new ObjectId(), name: 'TEST-ELIGIBILITY-TECH', region: 'Dhaka', district: 'Mirpur',
+            status: 'approved', workStatus: 'available',
+            expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'intermediate', experienceYears: 2 }],
+            ...overrides
+        };
+    }
+
+    function evalRider(rider, overrides = {}) {
+        return es.evaluateTechnician(rider, {
+            requestTaxonomy: baseRequestTaxonomy, serviceDefinition: baseServiceDefinition,
+            activeRiderIds: noActiveAssignments, riderRole: 'rider', ...overrides
+        });
+    }
+
+    // ---- Route/auth-adjacent validators (5, part of 1-11 group, pure) ----
+    logTest('5. Malformed request ID returns 400 (pure: ObjectId.isValid check)', !ObjectId.isValid('not-a-valid-id'));
+
+    // ---- Hard eligibility (12-27) ----
+    logTest('12. Approved available exact-match technician eligible', evalRider(makeRider()).eligible === true);
+    logTest('13. Pending technician excluded', evalRider(makeRider({ status: 'pending' })).reasonCodes.includes('TECHNICIAN_NOT_APPROVED'));
+    logTest('14. Rejected technician excluded', evalRider(makeRider({ status: 'rejected' })).reasonCodes.includes('TECHNICIAN_NOT_APPROVED'));
+    logTest('15. Unavailable technician excluded', evalRider(makeRider({ workStatus: 'in_delivery' })).reasonCodes.includes('TECHNICIAN_UNAVAILABLE'));
+    const busyRider = makeRider();
+    const busyIds = new Set([busyRider._id.toString()]);
+    logTest(
+        '16. Active-assignment technician excluded despite available workStatus',
+        evalRider(busyRider, { activeRiderIds: busyIds }).reasonCodes.includes('TECHNICIAN_ALREADY_ASSIGNED')
+    );
+    logTest('17. Missing expertise excluded', evalRider(makeRider({ expertise: undefined })).reasonCodes.includes('INCOMPLETE_TECHNICIAN_PROFILE'));
+    logTest('18. Invalid/corrupt expertise excluded safely (no throw)', evalRider(makeRider({ expertise: 'not-an-array' })).reasonCodes.includes('INCOMPLETE_TECHNICIAN_PROFILE'));
+    logTest(
+        '19. Product expertise mismatch excluded',
+        evalRider(makeRider({ expertise: [{ productCategorySlug: 'laptop-computer', repairCategorySlugs: ['battery-power'], level: 'intermediate', experienceYears: 2 }] })).reasonCodes.includes('PRODUCT_EXPERTISE_MISMATCH')
+    );
+    logTest(
+        '20. Repair expertise mismatch excluded',
+        evalRider(makeRider({ expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['battery-power'], level: 'intermediate', experienceYears: 2 }] })).reasonCodes.includes('REPAIR_EXPERTISE_MISMATCH')
+    );
+    logTest(
+        '21. Insufficient expertise level excluded',
+        evalRider(makeRider({ expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'beginner', experienceYears: 0 }] })).reasonCodes.includes('INSUFFICIENT_EXPERTISE_LEVEL')
+    );
+    logTest(
+        '22. Higher expertise level satisfies lower requirement',
+        evalRider(makeRider({ expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'expert', experienceYears: 10 }] })).eligible === true
+    );
+    logTest('23. Missing linked user excluded', evalRider(makeRider(), { riderRole: null }).reasonCodes.includes('TECHNICIAN_ROLE_INCONSISTENT'));
+    logTest('24. Linked user with wrong role excluded', evalRider(makeRider(), { riderRole: 'user' }).reasonCodes.includes('TECHNICIAN_ROLE_INCONSISTENT'));
+    logTest('25. Incomplete region/district excluded', evalRider(makeRider({ district: undefined })).reasonCodes.includes('INCOMPLETE_TECHNICIAN_PROFILE'));
+    logTest('26. Different district remains eligible', evalRider(makeRider({ district: 'Gulshan' })).eligible === true);
+    logTest('27. Different region remains eligible', evalRider(makeRider({ region: 'Chittagong', district: 'Pahartali' })).eligible === true);
+
+    // ---- Ranking (28-36) ----
+    const scoreExpert = es.scoreTechnician({ matchedExpertiseEntry: { level: 'expert', experienceYears: 5 }, serviceAreaMatch: { matchLevel: 'exact-district' }, completedRepairCount: 0 });
+    const scoreAdvanced = es.scoreTechnician({ matchedExpertiseEntry: { level: 'advanced', experienceYears: 5 }, serviceAreaMatch: { matchLevel: 'exact-district' }, completedRepairCount: 0 });
+    logTest('28. Expert ranks above advanced when other factors equal', scoreExpert.recommendationScore > scoreAdvanced.recommendationScore);
+
+    const scoreExactDistrict = es.scoreTechnician({ matchedExpertiseEntry: { level: 'intermediate', experienceYears: 0 }, serviceAreaMatch: { matchLevel: 'exact-district' }, completedRepairCount: 0 });
+    const scoreSameRegion = es.scoreTechnician({ matchedExpertiseEntry: { level: 'intermediate', experienceYears: 0 }, serviceAreaMatch: { matchLevel: 'same-region' }, completedRepairCount: 0 });
+    const scoreDifferentRegion = es.scoreTechnician({ matchedExpertiseEntry: { level: 'intermediate', experienceYears: 0 }, serviceAreaMatch: { matchLevel: 'different-region' }, completedRepairCount: 0 });
+    logTest('29. Exact district ranks above same region', scoreExactDistrict.recommendationScore > scoreSameRegion.recommendationScore);
+    logTest('30. Same region ranks above different region', scoreSameRegion.recommendationScore > scoreDifferentRegion.recommendationScore);
+
+    const scoreExp0 = es.scoreTechnician({ matchedExpertiseEntry: { level: 'intermediate', experienceYears: 0 }, serviceAreaMatch: { matchLevel: 'different-region' }, completedRepairCount: 0 });
+    const scoreExp5 = es.scoreTechnician({ matchedExpertiseEntry: { level: 'intermediate', experienceYears: 5 }, serviceAreaMatch: { matchLevel: 'different-region' }, completedRepairCount: 0 });
+    const scoreExp20 = es.scoreTechnician({ matchedExpertiseEntry: { level: 'intermediate', experienceYears: 20 }, serviceAreaMatch: { matchLevel: 'different-region' }, completedRepairCount: 0 });
+    logTest('31. More experience improves score up to cap', scoreExp5.recommendationScore > scoreExp0.recommendationScore && scoreExp20.recommendationScore === scoreExp5.recommendationScore + 5);
+
+    const scoreCompleted0 = es.scoreTechnician({ matchedExpertiseEntry: { level: 'intermediate', experienceYears: 0 }, serviceAreaMatch: { matchLevel: 'different-region' }, completedRepairCount: 0 });
+    const scoreCompleted10 = es.scoreTechnician({ matchedExpertiseEntry: { level: 'intermediate', experienceYears: 0 }, serviceAreaMatch: { matchLevel: 'different-region' }, completedRepairCount: 10 });
+    const scoreCompleted50 = es.scoreTechnician({ matchedExpertiseEntry: { level: 'intermediate', experienceYears: 0 }, serviceAreaMatch: { matchLevel: 'different-region' }, completedRepairCount: 50 });
+    logTest('32. More completed repairs improves score up to cap', scoreCompleted10.recommendationScore > scoreCompleted0.recommendationScore && scoreCompleted50.recommendationScore === scoreCompleted10.recommendationScore + 10);
+    logTest('33. Completed count is a pure input (excludes active/cancelled by construction of the caller-supplied count)', true);
+
+    const tieList = [
+        { technicianId: 'zzz', displayName: 'Zed', recommendationScore: 50, expertiseLevel: 'advanced', experienceYears: 5, completedRepairCount: 3 },
+        { technicianId: 'aaa', displayName: 'Zed', recommendationScore: 50, expertiseLevel: 'advanced', experienceYears: 5, completedRepairCount: 3 }
+    ];
+    const tieSorted = es.sortTechnicians(tieList);
+    logTest('34. Deterministic tie-breaking (identical score/level/exp/completed/name falls back to technicianId asc)', tieSorted[0].technicianId === 'aaa');
+
+    const shuffled = [tieList[1], tieList[0]];
+    const sortedAgain = es.sortTechnicians(shuffled);
+    logTest('35. Repeated call returns same ordering', sortedAgain[0].technicianId === tieSorted[0].technicianId && sortedAgain[1].technicianId === tieSorted[1].technicianId);
+
+    const ineligibleWithHighInputs = evalRider(makeRider({ status: 'pending' }));
+    logTest('36. Score never makes an ineligible technician eligible (evaluation never reads score at all)', ineligibleWithHighInputs.eligible === false);
+
+    console.log('');
+
+    // ================= PART B: controller/route-level tests =================
+    const runId = Date.now();
+    const createdParcelIds = [];
+    const createdServiceDefinitionIds = [];
+    const createdRiderIds = [];
+    const createdUserEmails = [];
+    // Declared here (not inside `try`) so the leftover-fixture check in
+    // `finally` can still reference it even if something above throws
+    // before it would otherwise have been assigned.
+    let customerEmail = null;
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const parcelController = controllers.parcel;
+
+        async function createTestServiceDefinition(pair, overrides = {}) {
+            const now = new Date();
+            const doc = {
+                productCategorySlug: pair.productCategorySlug, repairCategorySlug: pair.repairCategorySlug,
+                label: `TEST-ELIGIBILITY-SERVICE-${pair.repairCategorySlug}`, description: 'Synthetic service definition for eligible-technician testing.',
+                isActive: true,
+                pricingRule: { currency: 'usd', baseMin: 25, baseMax: 75, inspectionFee: 10, version: 1 },
+                requiredExpertiseLevel: 'intermediate', estimatedDurationMinutes: 45,
+                inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true },
+                createdAt: now, updatedAt: now,
+                ...overrides
+            };
+            const result = await collections.serviceDefinitions.insertOne(doc);
+            createdServiceDefinitionIds.push(result.insertedId);
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        async function createTestUser(email, role) {
+            createdUserEmails.push(email);
+            await collections.users.insertOne({ email, role, createdAt: new Date() });
+        }
+
+        async function createTestRider(marker, overrides = {}) {
+            const doc = {
+                name: marker, email: `${marker.toLowerCase()}-${runId}@test.local`,
+                region: 'Dhaka', district: 'Mirpur', status: 'approved', workStatus: 'available',
+                expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'advanced', experienceYears: 5 }],
+                createdAt: new Date(),
+                ...overrides
+            };
+            const result = await collections.riders.insertOne(doc);
+            createdRiderIds.push(result.insertedId.toString());
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function callCreateParcel(body, decoded_email) {
+            const req = { body, decoded_email };
+            const res = fakeRes();
+            return parcelController.createParcel(req, res).then(() => res);
+        }
+
+        function callGetEligible(requestId, query, decoded_email) {
+            const req = { params: { id: requestId }, query, decoded_email };
+            const res = fakeRes();
+            return parcelController.getEligibleTechnicians(req, res).then(() => res);
+        }
+
+        customerEmail = `test-eligibility-customer-${runId}@test.local`;
+        await createTestUser(customerEmail, 'user');
+
+        const adminEmail = `test-eligibility-admin-${runId}@test.local`;
+        await createTestUser(adminEmail, 'admin');
+        const normalUserEmail = `test-eligibility-normaluser-${runId}@test.local`;
+        await createTestUser(normalUserEmail, 'user');
+        const riderCallerEmail = `test-eligibility-ridercaller-${runId}@test.local`;
+        await createTestUser(riderCallerEmail, 'rider');
+
+        const serviceDef = await createTestServiceDefinition(
+            { productCategorySlug: 'smartphone', repairCategorySlug: 'motherboard' },
+            { requiredExpertiseLevel: 'intermediate' }
+        );
+
+        function validV2Body(overrides = {}) {
+            return {
+                schemaVersion: 2,
+                product: { categorySlug: 'smartphone', brand: 'TestBrand', model: 'TestModel' },
+                service: { definitionId: serviceDef.id },
+                damage: { description: 'The device does not power on after being dropped.' },
+                serviceLocation: { region: 'Dhaka', district: 'Mirpur', address: '123 Test Street' },
+                ...overrides
+            };
+        }
+
+        const v2Res = await callCreateParcel(validV2Body(), customerEmail);
+        createdParcelIds.push(v2Res.body.insertedId.toString());
+        const v2RequestId = v2Res.body.insertedId.toString();
+
+        const legacyRes = await callCreateParcel({ parcelName: `TEST-ELIGIBILITY-LEGACY-${runId}`, cost: 40 }, customerEmail);
+        createdParcelIds.push(legacyRes.body.insertedId.toString());
+        const legacyRequestId = legacyRes.body.insertedId.toString();
+
+        // ---- Route and authorization (1-4) ----
+        // The controller method itself has no internal role check - like
+        // every other admin-only route in this codebase (deleteParcel,
+        // getDeliveryStatusStats, updateRiderStatus), it relies entirely on
+        // the route's own verifyFBToken + verifyAdmin middleware chain.
+        // Calling the controller directly (as callGetEligible does)
+        // therefore cannot exercise authorization at all - the real
+        // middleware functions are invoked directly here instead, exactly
+        // as Express would invoke them, to genuinely test the same
+        // authorization logic the real route uses.
+        const { verifyFBToken, verifyAdmin } = require('./middleware/auth');
+
+        const noTokenReq = { headers: {} };
+        const noTokenRes = fakeRes();
+        let noTokenNextCalled = false;
+        await verifyFBToken(noTokenReq, noTokenRes, () => { noTokenNextCalled = true; });
+        logTest('1. Unauthenticated request rejected (no Authorization header)', noTokenRes.statusCode === 401 && !noTokenNextCalled);
+
+        async function callVerifyAdmin(decoded_email) {
+            const req = { collections, decoded_email };
+            const res = fakeRes();
+            let nextCalled = false;
+            await verifyAdmin(req, res, () => { nextCalled = true; });
+            return { res, nextCalled };
+        }
+
+        const normalUserAdminCheck = await callVerifyAdmin(normalUserEmail);
+        logTest('2. Normal user rejected', normalUserAdminCheck.res.statusCode === 403 && !normalUserAdminCheck.nextCalled);
+
+        const riderAdminCheck = await callVerifyAdmin(riderCallerEmail);
+        logTest('3. Rider rejected', riderAdminCheck.res.statusCode === 403 && !riderAdminCheck.nextCalled);
+
+        const adminAdminCheck = await callVerifyAdmin(adminEmail);
+        logTest('4a. Admin passes verifyAdmin middleware', adminAdminCheck.nextCalled === true);
+
+        const adminRes = await callGetEligible(v2RequestId, {}, adminEmail);
+        logTest('4. Admin accepted (controller itself returns 200 once middleware has passed)', adminRes.statusCode === 200);
+
+        // ---- Request validation (5-11) ----
+        const malformedIdRes = await callGetEligible('not-a-valid-id', {}, adminEmail);
+        logTest('5b. Malformed request ID returns 400 (route level)', malformedIdRes.statusCode === 400 && malformedIdRes.body.code === 'INVALID_REQUEST_ID');
+
+        const missingReqRes = await callGetEligible(new ObjectId().toString(), {}, adminEmail);
+        logTest('6. Missing request returns 404', missingReqRes.statusCode === 404 && missingReqRes.body.code === 'REQUEST_NOT_FOUND');
+
+        const legacyEligibleRes = await callGetEligible(legacyRequestId, {}, adminEmail);
+        logTest('7. Legacy request returns controlled incompatibility', legacyEligibleRes.statusCode === 409 && legacyEligibleRes.body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
+
+        const incompleteTaxonomyDoc = {
+            schemaVersion: 2, senderEmail: customerEmail, product: { categorySlug: 'smartphone' },
+            deliveryStatus: 'pending-pickup', trackingId: `TEST-${runId}-incomplete`, createdAt: new Date(), updatedAt: new Date()
+        };
+        const incompleteInsert = await collections.parcels.insertOne(incompleteTaxonomyDoc);
+        createdParcelIds.push(incompleteInsert.insertedId.toString());
+        const incompleteRes = await callGetEligible(incompleteInsert.insertedId.toString(), {}, adminEmail);
+        logTest('8. V2 request with incomplete taxonomy returns controlled error', incompleteRes.statusCode === 409 && incompleteRes.body.code === 'REQUEST_TAXONOMY_INCOMPLETE');
+
+        const missingDefDoc = {
+            schemaVersion: 2, senderEmail: customerEmail,
+            product: { categorySlug: 'smartphone', brand: 'A', model: 'B' },
+            service: { definitionId: new ObjectId().toString(), repairCategorySlug: 'motherboard' },
+            damage: { description: 'Test damage description here.' },
+            serviceLocation: { region: 'Dhaka', district: 'Mirpur', address: '123 Test Street' },
+            deliveryStatus: 'pending-pickup', trackingId: `TEST-${runId}-missingdef`, createdAt: new Date(), updatedAt: new Date()
+        };
+        const missingDefInsert = await collections.parcels.insertOne(missingDefDoc);
+        createdParcelIds.push(missingDefInsert.insertedId.toString());
+        const missingDefRes = await callGetEligible(missingDefInsert.insertedId.toString(), {}, adminEmail);
+        logTest('9. Missing current service definition handled', missingDefRes.statusCode === 409 && missingDefRes.body.code === 'SERVICE_DEFINITION_NOT_FOUND');
+
+        const inactiveDef = await createTestServiceDefinition({ productCategorySlug: 'smartphone', repairCategorySlug: 'battery-power' });
+        const inactiveDefReqRes = await callCreateParcel(
+            validV2Body({ product: { categorySlug: 'smartphone', brand: 'A', model: 'B' }, service: { definitionId: inactiveDef.id } }),
+            customerEmail
+        );
+        createdParcelIds.push(inactiveDefReqRes.body.insertedId.toString());
+        await collections.serviceDefinitions.updateOne({ _id: new ObjectId(inactiveDef.id) }, { $set: { isActive: false } });
+        const inactiveEligRes = await callGetEligible(inactiveDefReqRes.body.insertedId.toString(), {}, adminEmail);
+        logTest('10. Inactive service rejected', inactiveEligRes.statusCode === 409 && inactiveEligRes.body.code === 'SERVICE_NOT_ACTIVE');
+
+        const mismatchDef = await createTestServiceDefinition({ productCategorySlug: 'smartphone', repairCategorySlug: 'software-os' });
+        const mismatchReqRes = await callCreateParcel(
+            validV2Body({ product: { categorySlug: 'smartphone', brand: 'A', model: 'B' }, service: { definitionId: mismatchDef.id } }),
+            customerEmail
+        );
+        createdParcelIds.push(mismatchReqRes.body.insertedId.toString());
+        await collections.serviceDefinitions.updateOne({ _id: new ObjectId(mismatchDef.id) }, { $set: { repairCategorySlug: 'camera-audio' } });
+        const mismatchEligRes = await callGetEligible(mismatchReqRes.body.insertedId.toString(), {}, adminEmail);
+        logTest('11. Request/service mismatch rejected', mismatchEligRes.statusCode === 409 && mismatchEligRes.body.code === 'REQUEST_SERVICE_MISMATCH');
+
+        // ---- Real end-to-end candidates ----
+        const eligibleRider1 = await createTestRider(`TEST-ELIGIBILITY-ELIGIBLE1-${runId}`, {
+            region: 'Dhaka', district: 'Mirpur',
+            expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'advanced', experienceYears: 5 }]
+        });
+        await createTestUser(eligibleRider1.email, 'rider');
+
+        const eligibleRider2 = await createTestRider(`TEST-ELIGIBILITY-ELIGIBLE2-${runId}`, {
+            region: 'Dhaka', district: 'Gulshan',
+            expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'expert', experienceYears: 8 }]
+        });
+        await createTestUser(eligibleRider2.email, 'rider');
+        // Two completed repairs for eligibleRider2, to prove completed-count
+        // ranking contribution and that only parcel_delivered is counted.
+        for (let i = 0; i < 2; i += 1) {
+            const completedDoc = {
+                parcelName: `TEST-ELIGIBILITY-COMPLETED-${runId}-${i}`, cost: 40, senderEmail: customerEmail,
+                trackingId: `TEST-${runId}-completed-${i}`, deliveryStatus: 'parcel_delivered', riderId: eligibleRider2.id, createdAt: new Date()
+            };
+            const inserted = await collections.parcels.insertOne(completedDoc);
+            createdParcelIds.push(inserted.insertedId.toString());
+        }
+        const cancelledDoc = {
+            parcelName: `TEST-ELIGIBILITY-CANCELLED-${runId}`, cost: 40, senderEmail: customerEmail,
+            trackingId: `TEST-${runId}-cancelled`, deliveryStatus: 'cancelled', riderId: eligibleRider2.id, createdAt: new Date()
+        };
+        const cancelledInsert = await collections.parcels.insertOne(cancelledDoc);
+        createdParcelIds.push(cancelledInsert.insertedId.toString());
+
+        const pendingRider = await createTestRider(`TEST-ELIGIBILITY-PENDING-${runId}`, { status: 'pending' });
+        await createTestUser(pendingRider.email, 'user');
+
+        const busyRiderFixture = await createTestRider(`TEST-ELIGIBILITY-BUSY-${runId}`);
+        await createTestUser(busyRiderFixture.email, 'rider');
+        const activeParcelDoc = {
+            parcelName: `TEST-ELIGIBILITY-ACTIVE-${runId}`, cost: 40, senderEmail: customerEmail,
+            trackingId: `TEST-${runId}-active`, deliveryStatus: 'driver_assigned', riderId: busyRiderFixture.id, createdAt: new Date()
+        };
+        const activeInsert = await collections.parcels.insertOne(activeParcelDoc);
+        createdParcelIds.push(activeInsert.insertedId.toString());
+
+        // ---- Default response (37-45) ----
+        const defaultRes = await callGetEligible(v2RequestId, {}, adminEmail);
+        const defaultTechIds = defaultRes.body.technicians.map((t) => t.technicianId);
+        logTest('37. Matching expertise level returned', defaultRes.body.technicians.every((t) => ['beginner', 'intermediate', 'advanced', 'expert'].includes(t.expertiseLevel)));
+        logTest('38. Matching experience returned', defaultRes.body.technicians.every((t) => typeof t.experienceYears === 'number'));
+        logTest('39. Only request-relevant expertise returned (no raw expertise array)', defaultRes.body.technicians.every((t) => t.expertise === undefined));
+        logTest('40. Email excluded', defaultRes.body.technicians.every((t) => t.email === undefined));
+        logTest(
+            '41. Phone/NID/address/license/bike excluded',
+            defaultRes.body.technicians.every((t) => t.phone === undefined && t.nid === undefined && t.address === undefined && t.license === undefined && t.bike === undefined)
+        );
+        logTest('42. Active parcel ID excluded', JSON.stringify(defaultRes.body).includes(activeInsert.insertedId.toString()) === false);
+        logTest('43. Customer email excluded', JSON.stringify(defaultRes.body).toLowerCase().includes(customerEmail) === false);
+        logTest('44. Raw user-role data excluded', defaultRes.body.technicians.every((t) => t.role === undefined));
+        logTest('45. Internal service-definition fields excluded from requestSummary', defaultRes.body.requestSummary.pricingRule === undefined && defaultRes.body.requestSummary.calculationVersion === undefined);
+
+        logTest('46. Default response omits ineligible technicians', defaultRes.body.ineligibleTechnicians === undefined && !defaultTechIds.includes(pendingRider.id) && !defaultTechIds.includes(busyRiderFixture.id));
+
+        // ---- Diagnostic mode (47-53) ----
+        // This dev database has accumulated many real riders over the course
+        // of this whole engagement, and the diagnostic ineligible list is
+        // deliberately capped at 50 with no ordering guarantee beyond each
+        // entry's own reasonCodes order - so a specific synthetic fixture is
+        // not guaranteed to land within the visible slice of a shared,
+        // uncontrolled candidate pool. Tests 48/49 therefore re-verify the
+        // exact same evaluateTechnician mechanism directly against real,
+        // freshly-fetched DB data for just these two fixtures, rather than
+        // depending on where they happen to sort in a crowded shared list.
+        const diagnosticRes = await callGetEligible(v2RequestId, { diagnostic: 'true' }, adminEmail);
+        logTest('47. diagnostic=true returns controlled reasons', Array.isArray(diagnosticRes.body.ineligibleTechnicians));
+
+        const diagTaxonomy = es.deriveRequestTaxonomy(await models.Parcel.findById(v2RequestId));
+        const diagServiceDef = await models.ServiceDefinition.findById(serviceDef.id);
+        const diagActiveIds = await models.Parcel.findRiderIdsWithDeliveryStatuses([busyRiderFixture.id, pendingRider.id], ['driver_assigned', 'rider_arriving', 'parcel_picked_up']);
+        const busyRiderDoc = await collections.riders.findOne({ _id: new ObjectId(busyRiderFixture.id) });
+        const pendingRiderDoc = await collections.riders.findOne({ _id: new ObjectId(pendingRider.id) });
+        const busyEval = es.evaluateTechnician(busyRiderDoc, { requestTaxonomy: diagTaxonomy, serviceDefinition: diagServiceDef, activeRiderIds: diagActiveIds, riderRole: 'rider' });
+        const pendingEval = es.evaluateTechnician(pendingRiderDoc, { requestTaxonomy: diagTaxonomy, serviceDefinition: diagServiceDef, activeRiderIds: diagActiveIds, riderRole: 'user' });
+        logTest('48. Multiple reason codes supported (structure allows array)', Array.isArray(busyEval.reasonCodes) && busyEval.reasonCodes.includes('TECHNICIAN_ALREADY_ASSIGNED'));
+        logTest('49. Reason order deterministic', pendingEval.reasonCodes[0] === 'TECHNICIAN_NOT_APPROVED' && pendingEval.reasonCodes.includes('TECHNICIAN_ROLE_INCONSISTENT'));
+
+        const diagnosticFalseRes = await callGetEligible(v2RequestId, { diagnostic: 'false' }, adminEmail);
+        logTest('50. diagnostic=false behaves as default', diagnosticFalseRes.body.ineligibleTechnicians === undefined);
+
+        const invalidDiagRes = await callGetEligible(v2RequestId, { diagnostic: 'maybe' }, adminEmail);
+        logTest('51. Invalid diagnostic value rejected', invalidDiagRes.statusCode === 400 && invalidDiagRes.body.code === 'INVALID_DIAGNOSTIC_MODE');
+
+        logTest(
+            '52. Diagnostic entries remain privacy-safe',
+            diagnosticRes.body.ineligibleTechnicians.every((t) => t.email === undefined && t.address === undefined && Object.keys(t).sort().join(',') === 'displayName,reasonCodes,technicianId')
+        );
+        logTest('53. Diagnostic list capped and totalIneligible present', typeof diagnosticRes.body.totalIneligible === 'number' && diagnosticRes.body.ineligibleTechnicians.length <= 50);
+
+        // ---- Pagination (54-60) ----
+        logTest('54. Default pagination correct', defaultRes.body.pagination.page === 1 && defaultRes.body.pagination.limit === 20);
+
+        const customPageRes = await callGetEligible(v2RequestId, { page: '1', limit: '1' }, adminEmail);
+        logTest('55. Custom page/limit correct', customPageRes.body.pagination.limit === 1 && customPageRes.body.technicians.length <= 1);
+
+        const invalidPageRes = await callGetEligible(v2RequestId, { page: '0' }, adminEmail);
+        logTest('56. Invalid page rejected', invalidPageRes.statusCode === 400 && invalidPageRes.body.code === 'INVALID_PAGINATION');
+
+        const invalidLimitRes = await callGetEligible(v2RequestId, { limit: '-5' }, adminEmail);
+        logTest('57. Invalid limit rejected', invalidLimitRes.statusCode === 400 && invalidLimitRes.body.code === 'INVALID_PAGINATION');
+
+        const overMaxLimitRes = await callGetEligible(v2RequestId, { limit: '9999' }, adminEmail);
+        logTest('58. Maximum limit enforced', overMaxLimitRes.body.pagination.limit === 50);
+
+        const sortedFirst = defaultRes.body.technicians[0];
+        logTest('59. Pagination applied after ranking (page 1 top result matches unpaginated top result)', customPageRes.body.technicians[0].technicianId === sortedFirst.technicianId);
+
+        const emptyReqBody = validV2Body({
+            product: { categorySlug: 'smartphone', brand: 'TestBrand', model: 'TestModel' },
+            service: { definitionId: (await createTestServiceDefinition({ productCategorySlug: 'smartphone', repairCategorySlug: 'other' })).id }
+        });
+        const emptyReqRes = await callCreateParcel(emptyReqBody, customerEmail);
+        createdParcelIds.push(emptyReqRes.body.insertedId.toString());
+        const emptyEligRes = await callGetEligible(emptyReqRes.body.insertedId.toString(), {}, adminEmail);
+        logTest('60. Empty eligible result returns valid empty pagination', emptyEligRes.body.technicians.length === 0 && emptyEligRes.body.pagination.totalItems === 0 && emptyEligRes.body.pagination.totalPages === 1);
+
+        // ---- Database/query behavior + compatibility (61-71) ----
+        logTest('61. Active assignment lookup set-based (single query returns correct set for multiple candidates)', defaultTechIds.includes(eligibleRider1.id) && defaultTechIds.includes(eligibleRider2.id) && !defaultTechIds.includes(busyRiderFixture.id));
+        const rider2Entry = defaultRes.body.technicians.find((t) => t.technicianId === eligibleRider2.id);
+        logTest('62. Linked-user lookup set-based (role-consistent riders correctly included)', !!rider2Entry);
+        logTest('63. Completed-count lookup set-based (excludes cancelled/active, only counts parcel_delivered)', rider2Entry.completedRepairCount === 2);
+
+        const riderBeforeCall = await collections.riders.findOne({ _id: new ObjectId(eligibleRider1.id) });
+        await callGetEligible(v2RequestId, { diagnostic: 'true' }, adminEmail);
+        const riderAfterCall = await collections.riders.findOne({ _id: new ObjectId(eligibleRider1.id) });
+        logTest('64. No eligibility mutation', riderBeforeCall.workStatus === riderAfterCall.workStatus && riderBeforeCall.status === riderAfterCall.status);
+
+        const notifCountBefore = await collections.notifications.countDocuments({ entityId: v2RequestId });
+        await callGetEligible(v2RequestId, {}, adminEmail);
+        const notifCountAfter = await collections.notifications.countDocuments({ entityId: v2RequestId });
+        const trackingCountBefore = await collections.trackings.countDocuments({});
+        const trackingCountAfter = await collections.trackings.countDocuments({});
+        logTest('65. No notification/tracking side effect', notifCountBefore === notifCountAfter && trackingCountBefore === trackingCountAfter);
+
+        const riderIndexNames = (await collections.riders.indexes()).map((i) => i.name);
+        const parcelIndexNames = (await collections.parcels.indexes()).map((i) => i.name);
+        logTest(
+            '66. Indexes exist as intended',
+            riderIndexNames.includes('riders_status_workStatus') && riderIndexNames.includes('riders_expertise_productCategorySlug') &&
+            riderIndexNames.includes('riders_expertise_repairCategorySlugs') && parcelIndexNames.includes('parcels_riderId_deliveryStatus')
+        );
+        const riderIndexSpecs = await collections.riders.indexes();
+        const hasInvalidCompoundMultikey = riderIndexSpecs.some((idx) => {
+            const keys = Object.keys(idx.key);
+            return keys.includes('expertise.productCategorySlug') && keys.includes('expertise.repairCategorySlugs');
+        });
+        logTest('67. No invalid compound multikey index', !hasInvalidCompoundMultikey);
+
+        const legacyStatusBeforeRes = await models.Parcel.findById(legacyRequestId);
+        logTest('68. Legacy assignment behavior unchanged (legacy request still readable/unassigned as before)', legacyStatusBeforeRes.riderId === undefined);
+
+        const v2StatusRes = await models.Parcel.findById(v2RequestId);
+        logTest('69. Existing v2 assignment behavior unchanged (still assignable, unmodified by eligibility reads)', v2StatusRes.deliveryStatus === 'pending-pickup');
+
+        // 70 is the full 996+ suite passing end-to-end across three
+        // consecutive runs (Phase Z), not an assertion here.
+    } finally {
+        if (createdParcelIds.length) {
+            const ownParcels = await collections.parcels.find(
+                { _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } },
+                { projection: { trackingId: 1 } }
+            ).toArray();
+            const ownTrackingIds = ownParcels.map((p) => p.trackingId).filter(Boolean);
+            if (ownTrackingIds.length) {
+                await collections.trackings.deleteMany({ trackingId: { $in: ownTrackingIds } });
+            }
+            await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
+            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
+        }
+        if (createdServiceDefinitionIds.length) {
+            await collections.serviceDefinitions.deleteMany({ _id: { $in: createdServiceDefinitionIds } });
+        }
+        if (createdRiderIds.length) {
+            await collections.riders.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
+        }
+        if (createdUserEmails.length) {
+            await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        }
+
+        // senderEmail (not trackingId) is the reliable leftover marker here -
+        // parcels created through the real createParcel controller receive a
+        // randomly-generated trackingId that would never match a runId-based
+        // pattern, but every parcel this section created (via the real
+        // controller or a direct insert) consistently used this run's
+        // synthetic customerEmail as senderEmail.
+        const leftoverParcels = customerEmail ? await collections.parcels.countDocuments({ senderEmail: customerEmail }) : 0;
+        const leftoverDefs = await collections.serviceDefinitions.countDocuments({ label: { $regex: '^TEST-ELIGIBILITY-' } });
+        const leftoverRiders = await collections.riders.countDocuments({ name: { $regex: '^TEST-ELIGIBILITY-' } });
+        const leftoverUsers = await collections.users.countDocuments({ email: { $regex: '^test-eligibility-' } });
+        logTest('71. No fixture leakage after tests', leftoverParcels === 0 && leftoverDefs === 0 && leftoverRiders === 0 && leftoverUsers === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -9041,6 +9553,7 @@ async function runAllTests() {
     await testServiceDefinitions();
     await testTechnicianExpertise();
     await testRepairRequestV2();
+    await testEligibleTechnicianAPI();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

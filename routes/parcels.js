@@ -16,6 +16,13 @@ function parcelRoutes(app, controllers) {
     // Get repair status stats (admin only)
     app.get('/parcels/delivery-status/stats', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.getDeliveryStatusStats(req, res));
 
+    // Admin-only, read-only eligible-technician recommendations (Phase 6.3
+    // Unit 5) - v2 requests only, no mutation. A distinct 3-segment path so
+    // Express can never structurally confuse this with the 2-segment
+    // /parcels/:id route below, matching the same convention already used
+    // for /notifications/:id/read and /riders/:id/expertise.
+    app.get('/parcels/:id/eligible-technicians', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.getEligibleTechnicians(req, res));
+
     // Admin request-management list - paginated/searchable/filterable,
     // deliberately separate from GET /parcels above (whose flat-array
     // response shape is already relied on by MyRequests and

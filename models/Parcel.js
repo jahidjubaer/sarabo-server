@@ -100,6 +100,37 @@ class ParcelModel {
         return await this.collection.deleteOne(query);
     }
 
+    // Set-based active-assignment lookup for eligible-technician evaluation
+    // (Phase 6.3 Unit 5) - one query for every candidate rider, never one
+    // query per rider. Deliberately generic (accepts the status list as a
+    // parameter rather than importing utils/parcelStatus.js's ACTIVE_STATUSES
+    // itself) so this model stays a thin query primitive and the caller
+    // (services/technicianEligibilityService.js) owns which statuses count
+    // as "active" for this purpose.
+    async findRiderIdsWithDeliveryStatuses(riderIds, statuses) {
+        if (riderIds.length === 0) return new Set();
+        const docs = await this.collection.find(
+            { riderId: { $in: riderIds }, deliveryStatus: { $in: statuses } },
+            { projection: { riderId: 1 } }
+        ).toArray();
+        return new Set(docs.map((doc) => doc.riderId));
+    }
+
+    // Set-based completed-repair count for eligible-technician ranking
+    // (Phase 6.3 Unit 5) - one aggregation for every candidate rider, never
+    // one query per rider. `completedStatus` is passed in by the caller
+    // rather than hardcoded here, for the same reason as
+    // findRiderIdsWithDeliveryStatuses above.
+    async aggregateCompletedCountsByRider(riderIds, completedStatus) {
+        if (riderIds.length === 0) return new Map();
+        const pipeline = [
+            { $match: { riderId: { $in: riderIds }, deliveryStatus: completedStatus } },
+            { $group: { _id: '$riderId', count: { $sum: 1 } } }
+        ];
+        const rows = await this.collection.aggregate(pipeline).toArray();
+        return new Map(rows.map((row) => [row._id, row.count]));
+    }
+
     async getDeliveryStatusStats() {
         const pipeline = [
             {

@@ -17,6 +17,11 @@ const {
     buildServiceLocationSnapshot, validateClientPricingAbsence
 } = require('../utils/repairRequestV2');
 const { getPricingEstimate } = require('../services/pricingService');
+const {
+    ELIGIBILITY_VERSION, DIAGNOSTIC_INELIGIBLE_CAP, validateDiagnosticFlag, validatePagination,
+    deriveRequestTaxonomy, validateCurrentServiceDefinition, deriveServiceAreaMatch, evaluateTechnician,
+    scoreTechnician, sortTechnicians, buildEligibleTechnicianEntry, buildIneligibleTechnicianEntry, paginate
+} = require('../services/technicianEligibilityService');
 
 const ADMIN_LIST_DEFAULT_LIMIT = 10;
 const ADMIN_LIST_MAX_LIMIT = 50;
@@ -357,6 +362,130 @@ class ParcelController {
             res.send(result);
         } catch (error) {
             res.status(500).send({ message: 'Error creating repair request', error: error.message });
+        }
+    }
+
+    // Admin-only, read-only eligible-technician recommendations (Phase 6.3
+    // Unit 5). Never mutates any record - no rider/parcel write, no
+    // notification, no tracking write, no assignment claim. Advisory only:
+    // the assignment transaction (a future unit) independently revalidates
+    // eligibility at commit time, exactly as it already does for approval
+    // status and availability today. All business logic (hard eligibility,
+    // ranking, safe shaping) lives in services/technicianEligibilityService.js;
+    // this method only orchestrates the set-based database reads that
+    // service needs, so no N+1 query pattern is introduced regardless of
+    // candidate count.
+    async getEligibleTechnicians(req, res) {
+        try {
+            const requestId = req.params.id;
+            if (!ObjectId.isValid(requestId)) {
+                return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
+            }
+
+            const diagnosticCheck = validateDiagnosticFlag(req.query.diagnostic);
+            if (!diagnosticCheck.valid) {
+                return res.status(400).send({ message: diagnosticCheck.message, code: diagnosticCheck.code });
+            }
+            const paginationCheck = validatePagination(req.query.page, req.query.limit);
+            if (!paginationCheck.valid) {
+                return res.status(400).send({ message: paginationCheck.message, code: paginationCheck.code });
+            }
+
+            const parcel = await this.Parcel.findById(requestId);
+            if (!parcel) {
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+            }
+
+            // Taxonomy always comes from the request's own persisted
+            // snapshot - never guessed from legacy fields (parcelName,
+            // receiverRegion, license, bike) for a legacy request, which is
+            // rejected outright instead.
+            const taxonomyResult = deriveRequestTaxonomy(parcel);
+            if (!taxonomyResult.valid) {
+                return res.status(409).send({ message: taxonomyResult.message, code: taxonomyResult.code });
+            }
+
+            // Current service activity/match is a hard requirement,
+            // independent of what the request's historical snapshot says -
+            // ServiceDefinition.findById already returns null for a
+            // malformed id, which correctly resolves to
+            // SERVICE_DEFINITION_NOT_FOUND below rather than throwing.
+            const serviceDefinition = await this.ServiceDefinition.findById(taxonomyResult.definitionId);
+            const definitionValidation = validateCurrentServiceDefinition(serviceDefinition, taxonomyResult);
+            if (!definitionValidation.valid) {
+                return res.status(409).send({ message: definitionValidation.message, code: definitionValidation.code });
+            }
+
+            const diagnostic = diagnosticCheck.value;
+            // Diagnostic mode additionally fetches non-approved candidates
+            // solely so it can report TECHNICIAN_NOT_APPROVED for them - the
+            // default path never needs to see them, since they could never
+            // be eligible regardless of anything else.
+            const candidates = await this.Rider.findEligibilityCandidates({ approvedOnly: !diagnostic });
+            const candidateIds = candidates.map((rider) => rider._id.toString());
+            const candidateEmails = candidates.map((rider) => normalize(rider.email)).filter(Boolean);
+
+            // Every per-candidate fact is fetched in exactly one set-based
+            // query/aggregation each - never one query per candidate.
+            const [activeRiderIds, completedCounts, linkedUserDocs] = await Promise.all([
+                this.Parcel.findRiderIdsWithDeliveryStatuses(candidateIds, ACTIVE_STATUSES),
+                this.Parcel.aggregateCompletedCountsByRider(candidateIds, 'parcel_delivered'),
+                candidateEmails.length
+                    ? this.collections.users.find({ email: { $in: candidateEmails } }, { projection: { email: 1, role: 1, _id: 0 } }).toArray()
+                    : []
+            ]);
+            const roleByEmail = new Map(linkedUserDocs.map((doc) => [normalize(doc.email), doc.role]));
+
+            const eligible = [];
+            const ineligible = [];
+
+            for (const rider of candidates) {
+                const riderRole = roleByEmail.get(normalize(rider.email)) || null;
+                const evaluation = evaluateTechnician(rider, {
+                    requestTaxonomy: taxonomyResult,
+                    serviceDefinition,
+                    activeRiderIds,
+                    riderRole
+                });
+
+                if (evaluation.eligible) {
+                    const serviceAreaMatch = deriveServiceAreaMatch(taxonomyResult, rider);
+                    const completedRepairCount = completedCounts.get(rider._id.toString()) || 0;
+                    const scoreResult = scoreTechnician({
+                        matchedExpertiseEntry: evaluation.matchedExpertiseEntry,
+                        serviceAreaMatch,
+                        completedRepairCount
+                    });
+                    eligible.push(buildEligibleTechnicianEntry(rider, evaluation, scoreResult, serviceAreaMatch, completedRepairCount));
+                } else if (diagnostic) {
+                    ineligible.push(buildIneligibleTechnicianEntry(rider, evaluation));
+                }
+            }
+
+            const sortedEligible = sortTechnicians(eligible);
+            const { pageItems, pagination } = paginate(sortedEligible, { page: paginationCheck.page, limit: paginationCheck.limit });
+
+            const response = {
+                requestId: parcel._id.toString(),
+                eligibilityVersion: ELIGIBILITY_VERSION,
+                requestSummary: {
+                    productCategorySlug: taxonomyResult.productCategorySlug,
+                    repairCategorySlug: taxonomyResult.repairCategorySlug,
+                    requiredExpertiseLevel: serviceDefinition.requiredExpertiseLevel,
+                    serviceArea: { region: taxonomyResult.region, district: taxonomyResult.district }
+                },
+                technicians: pageItems,
+                pagination
+            };
+
+            if (diagnostic) {
+                response.ineligibleTechnicians = ineligible.slice(0, DIAGNOSTIC_INELIGIBLE_CAP);
+                response.totalIneligible = ineligible.length;
+            }
+
+            res.send(response);
+        } catch (error) {
+            res.status(500).send({ message: 'Error fetching eligible technicians', error: error.message });
         }
     }
 
