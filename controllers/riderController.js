@@ -4,6 +4,7 @@ const { normalize } = require('../services/paymentProcessor');
 const { createNotificationService } = require('../services/notificationService');
 const { REQUESTABLE_STATUSES, ROLE_FOR_STATUS, isValidRiderTransition } = require('../utils/riderStatus');
 const { ACTIVE_STATUSES } = require('../utils/parcelStatus');
+const { validateTechnicianExpertise, normalizeTechnicianExpertise } = require('../utils/technicianExpertise');
 
 class RiderController {
     constructor(models, collections) {
@@ -87,9 +88,24 @@ class RiderController {
         }
     }
 
+    // expertise is optional on application (Phase 6.3 Unit 3) - a legacy
+    // request body without it is accepted exactly as before (the field is
+    // simply omitted from the persisted document, indistinguishable from an
+    // existing legacy rider). When present, it is validated strictly and
+    // normalized before persisting; every other field in the body remains
+    // completely unvalidated, matching this route's existing behavior.
     async createRider(req, res) {
         try {
             const rider = req.body;
+
+            if (rider.expertise !== undefined) {
+                const validation = validateTechnicianExpertise(rider.expertise);
+                if (!validation.valid) {
+                    return res.status(400).send({ message: validation.message, code: validation.code });
+                }
+                rider.expertise = normalizeTechnicianExpertise(rider.expertise);
+            }
+
             const result = await this.Rider.create(rider);
 
             // Best-effort admin fan-out - this route is unauthenticated
@@ -380,6 +396,116 @@ class RiderController {
             }
             console.error('Technician status transaction aborted:', error.message);
             res.status(500).send({ message: 'Error updating technician status', code: failureCode });
+        }
+    }
+
+    // Full-replacement expertise update (Phase 6.3 Unit 3). The technician
+    // may update their own expertise; an admin may update any technician;
+    // every other authenticated caller is forbidden. Deliberately does NOT
+    // reveal to a non-self, non-admin caller whether a given technician id
+    // even exists - a nonexistent id and an id belonging to someone else
+    // both produce the exact same 403 FORBIDDEN for such a caller, so this
+    // route can never be used as an existence oracle by an unrelated
+    // account. An admin caller still receives an honest 404 for a genuinely
+    // missing id, since an admin is privileged to manage any technician.
+    // This mirrors the "never distinguish absent from foreign" privacy
+    // pattern already established by models/Notification.js.
+    async updateTechnicianExpertise(req, res) {
+        try {
+            const riderId = req.params.id;
+            if (!ObjectId.isValid(riderId)) {
+                return res.status(400).send({ message: 'invalid technician id', code: 'INVALID_TECHNICIAN_ID' });
+            }
+
+            const requesterEmail = normalize(req.decoded_email);
+
+            // Read once, before the transaction/retry loop below -
+            // deliberately NOT re-read inside the transaction body.
+            // mongoSession.withTransaction retries its entire callback on a
+            // transient write conflict; if this read (and therefore the
+            // optimistic-concurrency guard it feeds) were inside that
+            // retried callback, a retry would transparently re-read the
+            // *other* writer's already-committed value and adopt it as its
+            // own new baseline, silently overwriting it again instead of
+            // ever reporting a conflict. Capturing it once here, outside the
+            // retry boundary, is what makes "exactly one winner, one
+            // controlled conflict" actually hold under a genuine race
+            // (verified empirically - the in-transaction-read version of
+            // this method let two concurrent updates both report success,
+            // the second one silently clobbering the first).
+            const requester = requesterEmail ? await this.collections.users.findOne({ email: requesterEmail }) : null;
+            const isAdmin = !!requester && requester.role === 'admin';
+            const technician = await this.collections.riders.findOne({ _id: new ObjectId(riderId) });
+
+            if (!technician) {
+                const notFound = isAdmin
+                    ? { httpStatus: 404, code: 'TECHNICIAN_NOT_FOUND', message: 'technician not found' }
+                    : { httpStatus: 403, code: 'FORBIDDEN', message: 'not authorized to update this technician\'s expertise' };
+                return res.status(notFound.httpStatus).send({ message: notFound.message, code: notFound.code });
+            }
+
+            const isSelf = !!requesterEmail && normalize(technician.email) === requesterEmail;
+            if (!isSelf && !isAdmin) {
+                return res.status(403).send({ message: 'not authorized to update this technician\'s expertise', code: 'FORBIDDEN' });
+            }
+
+            const expertiseInput = req.body && req.body.expertise;
+            const validation = validateTechnicianExpertise(expertiseInput);
+            if (!validation.valid) {
+                return res.status(400).send({ message: validation.message, code: validation.code });
+            }
+            const normalizedExpertise = normalizeTechnicianExpertise(expertiseInput);
+            const hasExpertiseField = Object.prototype.hasOwnProperty.call(technician, 'expertise');
+
+            const mongoSession = client.startSession();
+            let outcome = null;
+            try {
+                await mongoSession.withTransaction(async () => {
+                    // Re-checked fresh on every attempt, including any
+                    // automatic retry - unlike the expertise snapshot above,
+                    // this MUST reflect the latest committed state: if a
+                    // separate assignment transaction has committed since
+                    // the reads above, this has to detect it (on this
+                    // attempt or a retry) and block the write.
+                    const activeAssignment = await this.hasActiveAssignment(technician._id, mongoSession);
+                    if (activeAssignment) {
+                        outcome = {
+                            httpStatus: 409, code: 'TECHNICIAN_HAS_ACTIVE_ASSIGNMENT',
+                            message: 'technician has an active repair assignment and cannot update expertise'
+                        };
+                        return;
+                    }
+
+                    const updateResult = await this.Rider.replaceExpertise({
+                        id: technician._id,
+                        hasExpertiseField,
+                        expectedExpertise: technician.expertise,
+                        newExpertise: normalizedExpertise,
+                        session: mongoSession
+                    });
+                    if (updateResult.matchedCount === 0) {
+                        // Either a concurrent expertise update, or a
+                        // concurrent assignment that changed this document
+                        // between the reads above and this write - both are
+                        // reported the same way: the caller's snapshot was
+                        // stale, never silently overwritten.
+                        outcome = { httpStatus: 409, code: 'EXPERTISE_UPDATE_CONFLICT', message: 'technician expertise was changed concurrently' };
+                        return;
+                    }
+
+                    outcome = { success: true, expertise: normalizedExpertise };
+                });
+            } finally {
+                await mongoSession.endSession();
+            }
+
+            if (outcome.success) {
+                return res.send({ message: 'technician expertise updated', expertise: outcome.expertise });
+            }
+            return res.status(outcome.httpStatus).send({ message: outcome.message, code: outcome.code });
+        } catch (error) {
+            console.error('Technician expertise update transaction aborted:', error.message);
+            res.status(500).send({ message: 'Error updating technician expertise', code: 'EXPERTISE_UPDATE_FAILED' });
         }
     }
 }

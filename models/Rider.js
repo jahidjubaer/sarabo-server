@@ -16,7 +16,8 @@ class RiderModel {
         // collection.
         const projection = {
             name: 1, email: 1, region: 1, district: 1, address: 1,
-            license: 1, nid: 1, bike: 1, status: 1, workStatus: 1, createdAt: 1
+            license: 1, nid: 1, bike: 1, status: 1, workStatus: 1, createdAt: 1,
+            expertise: 1
         };
         const cursor = this.collection.find(filters, { projection });
         return await cursor.toArray();
@@ -51,6 +52,24 @@ class RiderModel {
             $set: { workStatus }
         };
         return await this.collection.updateOne(query, updatedDoc);
+    }
+
+    // Guarded full-replacement update (Phase 6.3 Unit 3) - the filter always
+    // includes the exact expertise state the caller read moments earlier
+    // (either the prior array value, or "the field does not exist yet" for
+    // a legacy rider), so a concurrent expertise update or an active
+    // assignment forming between the read and this write is detected via
+    // matchedCount === 0 rather than silently overwritten. Mirrors the
+    // "guard on every field read, not just the one being changed" pattern
+    // already used throughout riderController.js/parcelController.js.
+    async replaceExpertise({ id, hasExpertiseField, expectedExpertise, newExpertise, session }) {
+        const filter = { _id: new ObjectId(id) };
+        filter.expertise = hasExpertiseField ? expectedExpertise : { $exists: false };
+        return await this.collection.updateOne(
+            filter,
+            { $set: { expertise: newExpertise } },
+            { session }
+        );
     }
 }
 

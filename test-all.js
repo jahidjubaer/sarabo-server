@@ -8095,6 +8095,360 @@ async function testServiceDefinitions() {
     console.log('');
 }
 
+// Phase 6.3 Unit 3 - Technician Expertise Schema and Validation.
+// Test-database safety (Phase O): every rider/user/parcel fixture is
+// synthetic (TEST-EXPERTISE-* names, @test.local emails), the real shared
+// RIDER_EMAIL/CUSTOMER_EMAIL/ADMIN_EMAIL fixtures are never used as an
+// expertise-update target or requester, every created document is tracked
+// and deleted in `finally`, and no notification is ever created (this
+// section never calls createRider through the real notification fan-out
+// path with a live admin - it inserts rider fixtures directly and calls
+// updateTechnicianExpertise directly, neither of which sends notifications).
+async function testTechnicianExpertise() {
+    console.log('30. Testing Technician Expertise Schema and Validation (Phase 6.3 Unit 3)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+    const te = require('./utils/technicianExpertise');
+
+    const runId = Date.now();
+    const createdRiderIds = [];
+    const createdParcelIds = [];
+    const createdUserEmails = [];
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    function validEntry(overrides = {}) {
+        return { productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2, ...overrides };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const riderController = controllers.rider;
+
+        async function createTestRider(marker, { status = 'approved', workStatus = 'available', email, expertise } = {}) {
+            const doc = {
+                name: marker,
+                email: email || `${marker.toLowerCase()}-${runId}@test.local`,
+                region: 'Test Region', district: 'Test District', address: 'Test Address',
+                license: 'Test License', nid: 'TEST-NID-0000', bike: 'Test',
+                status, workStatus, createdAt: new Date()
+            };
+            if (expertise !== undefined) doc.expertise = expertise;
+            const result = await collections.riders.insertOne(doc);
+            createdRiderIds.push(result.insertedId.toString());
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        async function createTestUser(email, role = 'user') {
+            createdUserEmails.push(email);
+            await collections.users.insertOne({ email, role, createdAt: new Date() });
+        }
+
+        async function createActiveParcelFor(riderId, marker) {
+            const doc = {
+                parcelName: marker, cost: 30, senderEmail: `test-expertise-customer-${runId}@test.local`,
+                trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
+                deliveryStatus: 'driver_assigned', riderId, createdAt: new Date()
+            };
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId.toString());
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function callCreateRider(body) {
+            const req = { body };
+            const res = fakeRes();
+            return riderController.createRider(req, res).then(() => res);
+        }
+
+        function callUpdateExpertise(riderId, expertise, decoded_email) {
+            const req = { params: { id: riderId }, body: { expertise }, decoded_email };
+            const res = fakeRes();
+            return riderController.updateTechnicianExpertise(req, res).then(() => res);
+        }
+
+        // ================= Pure validation (1-15) =================
+        logTest('1. Valid single expertise entry', te.validateTechnicianExpertise([validEntry()]).valid === true);
+        logTest(
+            '2. Valid multiple product entries',
+            te.validateTechnicianExpertise([
+                validEntry(),
+                { productCategorySlug: 'refrigerator', repairCategorySlugs: ['compressor-cooling'], level: 'advanced', experienceYears: 5 }
+            ]).valid === true
+        );
+        logTest('3. Invalid product slug', te.validateTechnicianExpertise([validEntry({ productCategorySlug: 'not-a-real-product' })]).code === 'INVALID_PRODUCT_CATEGORY');
+        logTest('4. Invalid repair slug', te.validateTechnicianExpertise([validEntry({ repairCategorySlugs: ['not-a-real-repair'] })]).code === 'INVALID_REPAIR_CATEGORY');
+        logTest(
+            '5. Unsupported product/repair pair',
+            te.validateTechnicianExpertise([validEntry({ productCategorySlug: 'smartphone', repairCategorySlugs: ['compressor-cooling'] })]).code === 'REPAIR_CATEGORY_NOT_SUPPORTED'
+        );
+        logTest('6. Empty repair category array', te.validateTechnicianExpertise([validEntry({ repairCategorySlugs: [] })]).code === 'INVALID_EXPERTISE');
+        logTest(
+            '7. Duplicate repair category',
+            te.validateTechnicianExpertise([validEntry({ repairCategorySlugs: ['display-screen', 'display-screen'] })]).code === 'DUPLICATE_REPAIR_EXPERTISE'
+        );
+        logTest('8. Duplicate product entry', te.validateTechnicianExpertise([validEntry(), validEntry()]).code === 'DUPLICATE_PRODUCT_EXPERTISE');
+        logTest('9. Invalid level', te.validateTechnicianExpertise([validEntry({ level: 'wizard' })]).code === 'INVALID_EXPERTISE_LEVEL');
+        logTest('10. Non-integer experience', te.validateTechnicianExpertise([validEntry({ experienceYears: 2.5 })]).code === 'INVALID_EXPERIENCE_YEARS');
+        logTest('11. Negative experience', te.validateTechnicianExpertise([validEntry({ experienceYears: -1 })]).code === 'INVALID_EXPERIENCE_YEARS');
+        logTest('12. Experience above 50', te.validateTechnicianExpertise([validEntry({ experienceYears: 51 })]).code === 'INVALID_EXPERIENCE_YEARS');
+        logTest(
+            '13. Level/experience mismatch',
+            te.validateTechnicianExpertise([validEntry({ level: 'expert', experienceYears: 1 })]).code === 'EXPERTISE_LEVEL_EXPERIENCE_MISMATCH'
+        );
+        const nineProducts = ['smartphone', 'laptop-computer', 'television', 'refrigerator', 'washing-machine', 'air-conditioner', 'microwave-oven', 'other-electronics'];
+        const eightEntries = nineProducts.map((p) => ({ productCategorySlug: p, repairCategorySlugs: ['diagnosis'], level: 'beginner', experienceYears: 0 }));
+        logTest('14a. Exactly 8 entries accepted', te.validateTechnicianExpertise(eightEntries).valid === true);
+        const nineEntries = [...eightEntries, { productCategorySlug: 'smartphone', repairCategorySlugs: ['other'], level: 'beginner', experienceYears: 0 }];
+        logTest('14. More than 8 product entries', te.validateTechnicianExpertise(nineEntries).code === 'TOO_MANY_EXPERTISE_ENTRIES');
+        logTest('15. Unexpected expertise entry field', te.validateTechnicianExpertise([validEntry({ certificateUrl: 'https://example.test/cert.pdf' })]).code === 'INVALID_EXPERTISE');
+
+        // ================= Mutation safety (16-17) =================
+        const mutationSourceEntry = validEntry();
+        const normalized = te.normalizeTechnicianExpertise([mutationSourceEntry]);
+        normalized[0].level = 'expert';
+        normalized[0].repairCategorySlugs.push('tampered');
+        logTest('16. Input object mutation does not affect stored expertise', mutationSourceEntry.level === 'intermediate' && mutationSourceEntry.repairCategorySlugs.length === 1);
+
+        const canonicalExpertise = te.normalizeTechnicianExpertise([validEntry()]);
+        const readCopy = te.getExpertiseForProduct(canonicalExpertise, 'smartphone');
+        readCopy.level = 'expert';
+        readCopy.repairCategorySlugs.push('tampered');
+        const readCopyAgain = te.getExpertiseForProduct(canonicalExpertise, 'smartphone');
+        logTest('17. Stored/read expertise mutation does not alter canonical state', readCopyAgain.level === 'intermediate' && readCopyAgain.repairCategorySlugs.length === 1);
+
+        // ================= Legacy compatibility (18) =================
+        const legacyRider = await createTestRider(`TEST-EXPERTISE-LEGACY-${runId}`);
+        const legacyReadBack = await models.Rider.findById(legacyRider.id);
+        logTest(
+            '18. Legacy rider without expertise remains readable',
+            legacyReadBack !== null && legacyReadBack.name === legacyRider.name && legacyReadBack.expertise === undefined
+        );
+
+        // ================= Rider application behavior (19-21) =================
+        const applicantEmailNoExpertise = `test-expertise-applicant-noexp-${runId}@test.local`;
+        const createNoExpertiseRes = await callCreateRider({
+            name: `TEST-EXPERTISE-APPLY-NOEXP-${runId}`, email: applicantEmailNoExpertise,
+            region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B'
+        });
+        createdRiderIds.push(createNoExpertiseRes.body.insertedId.toString());
+        logTest('19. New rider without expertise remains accepted', createNoExpertiseRes.body.acknowledged === true);
+
+        const applicantEmailValidExpertise = `test-expertise-applicant-valid-${runId}@test.local`;
+        const createValidExpertiseRes = await callCreateRider({
+            name: `TEST-EXPERTISE-APPLY-VALID-${runId}`, email: applicantEmailValidExpertise,
+            region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B',
+            expertise: [validEntry()]
+        });
+        const validExpertiseRiderId = createValidExpertiseRes.body.insertedId.toString();
+        createdRiderIds.push(validExpertiseRiderId);
+        const validExpertiseRiderDoc = await collections.riders.findOne({ _id: new ObjectId(validExpertiseRiderId) });
+        logTest(
+            '20. New rider with valid expertise persists it',
+            createValidExpertiseRes.statusCode === 200 &&
+            Array.isArray(validExpertiseRiderDoc.expertise) &&
+            validExpertiseRiderDoc.expertise.length === 1 &&
+            validExpertiseRiderDoc.expertise[0].productCategorySlug === 'smartphone'
+        );
+
+        const applicantEmailInvalidExpertise = `test-expertise-applicant-invalid-${runId}@test.local`;
+        const riderCountBeforeInvalid = await collections.riders.countDocuments({ email: applicantEmailInvalidExpertise });
+        const createInvalidExpertiseRes = await callCreateRider({
+            name: `TEST-EXPERTISE-APPLY-INVALID-${runId}`, email: applicantEmailInvalidExpertise,
+            region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B',
+            expertise: [validEntry({ level: 'wizard' })]
+        });
+        const riderCountAfterInvalid = await collections.riders.countDocuments({ email: applicantEmailInvalidExpertise });
+        logTest(
+            '21. New rider with invalid expertise rejected, nothing persisted',
+            createInvalidExpertiseRes.statusCode === 400 &&
+            createInvalidExpertiseRes.body.code === 'INVALID_EXPERTISE_LEVEL' &&
+            riderCountBeforeInvalid === 0 && riderCountAfterInvalid === 0
+        );
+
+        // ================= Update authorization (22-27) =================
+        const selfEmail = `test-expertise-self-${runId}@test.local`;
+        const selfRider = await createTestRider(`TEST-EXPERTISE-SELF-${runId}`, { email: selfEmail });
+        const selfUpdateRes = await callUpdateExpertise(selfRider.id, [validEntry()], selfEmail);
+        const selfRiderAfter = await collections.riders.findOne({ _id: new ObjectId(selfRider.id) });
+        logTest(
+            '22. Technician can update own expertise',
+            selfUpdateRes.statusCode === 200 && selfRiderAfter.expertise.length === 1 && selfRiderAfter.expertise[0].productCategorySlug === 'smartphone'
+        );
+
+        const otherTechEmail = `test-expertise-other-tech-${runId}@test.local`;
+        await createTestRider(`TEST-EXPERTISE-OTHERTECH-${runId}`, { email: otherTechEmail });
+        const targetForOtherTech = await createTestRider(`TEST-EXPERTISE-TARGET-A-${runId}`);
+        const otherTechRes = await callUpdateExpertise(targetForOtherTech.id, [validEntry()], otherTechEmail);
+        logTest('23. Technician cannot update another technician', otherTechRes.statusCode === 403 && otherTechRes.body.code === 'FORBIDDEN');
+
+        const adminEmail = `test-expertise-admin-${runId}@test.local`;
+        await createTestUser(adminEmail, 'admin');
+        const targetForAdmin = await createTestRider(`TEST-EXPERTISE-TARGET-B-${runId}`);
+        const adminUpdateRes = await callUpdateExpertise(targetForAdmin.id, [validEntry()], adminEmail);
+        const targetForAdminAfter = await collections.riders.findOne({ _id: new ObjectId(targetForAdmin.id) });
+        logTest(
+            '24. Admin can update technician expertise',
+            adminUpdateRes.statusCode === 200 && targetForAdminAfter.expertise.length === 1
+        );
+
+        const normalUserEmail = `test-expertise-normaluser-${runId}@test.local`;
+        await createTestUser(normalUserEmail, 'user');
+        const targetForNormalUser = await createTestRider(`TEST-EXPERTISE-TARGET-C-${runId}`);
+        const normalUserRes = await callUpdateExpertise(targetForNormalUser.id, [validEntry()], normalUserEmail);
+        logTest('25. Normal user cannot update expertise', normalUserRes.statusCode === 403 && normalUserRes.body.code === 'FORBIDDEN');
+
+        const malformedIdRes = await callUpdateExpertise('not-a-valid-object-id', [validEntry()], adminEmail);
+        logTest('26. Malformed rider ID returns 400', malformedIdRes.statusCode === 400 && malformedIdRes.body.code === 'INVALID_TECHNICIAN_ID');
+
+        const nonexistentId = new ObjectId().toString();
+        const missingRiderRes = await callUpdateExpertise(nonexistentId, [validEntry()], adminEmail);
+        logTest('27. Missing rider returns 404 (for an admin caller)', missingRiderRes.statusCode === 404 && missingRiderRes.body.code === 'TECHNICIAN_NOT_FOUND');
+
+        // ================= Active-assignment protection (28-31) =================
+        const activeEmail = `test-expertise-active-${runId}@test.local`;
+        const activeRider = await createTestRider(`TEST-EXPERTISE-ACTIVE-${runId}`, { email: activeEmail, workStatus: 'in_delivery', expertise: [validEntry()] });
+        await createActiveParcelFor(activeRider.id, `TEST-EXPERTISE-ACTIVE-PARCEL-${runId}`);
+        const blockedRes = await callUpdateExpertise(activeRider.id, [validEntry({ level: 'expert', experienceYears: 10 })], activeEmail);
+        logTest('28. Active technician expertise update blocked', blockedRes.statusCode === 409 && blockedRes.body.code === 'TECHNICIAN_HAS_ACTIVE_ASSIGNMENT');
+
+        const activeRiderAfter = await collections.riders.findOne({ _id: new ObjectId(activeRider.id) });
+        logTest(
+            '29. Blocked update leaves expertise unchanged',
+            activeRiderAfter.expertise.length === 1 && activeRiderAfter.expertise[0].level === 'intermediate'
+        );
+        logTest('30. Blocked update leaves status/workStatus unchanged', activeRiderAfter.status === 'approved' && activeRiderAfter.workStatus === 'in_delivery');
+
+        // Real transactional assignment path, fully committed, THEN an
+        // expertise-update attempt - the deterministic resolution of the
+        // "assignment commits first" ordering Phase K describes, exercised
+        // through the actual assignRiderToParcel controller (not a raw
+        // pre-existing fixture like tests 28-30 above).
+        const parcelController = controllers.parcel;
+        function callAssign(parcelId, riderId) {
+            const req = { params: { id: parcelId }, body: { riderId }, decoded_email: adminEmail };
+            const res = fakeRes();
+            return parcelController.assignRiderToParcel(req, res).then(() => res);
+        }
+        const raceRiderEmail = `test-expertise-race-${runId}@test.local`;
+        const raceRider = await createTestRider(`TEST-EXPERTISE-RACE-${runId}`, { email: raceRiderEmail });
+        const raceParcelDoc = {
+            // senderEmail must be a real users-collection account - the
+            // assignment transaction resolves the owner's notification role
+            // from it, matching the same CUSTOMER_EMAIL convention already
+            // used throughout this file's other assignment-path tests.
+            parcelName: `TEST-EXPERTISE-RACE-PARCEL-${runId}`, cost: 30, senderEmail: CUSTOMER_EMAIL,
+            trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`, deliveryStatus: 'pending-pickup', createdAt: new Date()
+        };
+        const raceParcelInsert = await collections.parcels.insertOne(raceParcelDoc);
+        createdParcelIds.push(raceParcelInsert.insertedId.toString());
+        const assignFirstRes = await callAssign(raceParcelInsert.insertedId.toString(), raceRider.id);
+        const updateAfterAssignRes = await callUpdateExpertise(raceRider.id, [validEntry({ level: 'advanced', experienceYears: 4 })], raceRiderEmail);
+        logTest(
+            '31. Expertise update cannot commit after a real assignment has already made the technician active',
+            assignFirstRes.statusCode === 200 && updateAfterAssignRes.statusCode === 409 && updateAfterAssignRes.body.code === 'TECHNICIAN_HAS_ACTIVE_ASSIGNMENT'
+        );
+
+        // ================= Concurrent expertise updates (32) =================
+        // 32a: deterministic test of the actual stale-guard mechanism. A real
+        // Promise.all race against a remote database is not reliably
+        // guaranteed to genuinely overlap mid-flight (verified directly
+        // during development: repeated trials sometimes resolve sequentially
+        // with no real overlap at all, which is itself a legitimate,
+        // non-buggy outcome, not a race) - so the underlying mechanism is
+        // also verified directly and deterministically here, independent of
+        // network/timing luck.
+        const staleGuardEmail = `test-expertise-staleguard-${runId}@test.local`;
+        const staleGuardRider = await createTestRider(`TEST-EXPERTISE-STALEGUARD-${runId}`, { email: staleGuardEmail });
+        const winFirstRes = await callUpdateExpertise(staleGuardRider.id, [validEntry({ level: 'beginner', experienceYears: 0 })], staleGuardEmail);
+        logTest('32a. First update on a fresh rider succeeds', winFirstRes.statusCode === 200);
+        const staleWriteResult = await models.Rider.replaceExpertise({
+            id: staleGuardRider.id,
+            hasExpertiseField: false, // simulates a second request that read the ORIGINAL pre-update (no-expertise-field) state
+            expectedExpertise: undefined,
+            newExpertise: te.normalizeTechnicianExpertise([validEntry({ level: 'expert', experienceYears: 10 })])
+        });
+        logTest('32b. A write guarded on a stale (pre-first-update) snapshot is rejected, not applied', staleWriteResult.matchedCount === 0);
+        const staleGuardAfter = await collections.riders.findOne({ _id: new ObjectId(staleGuardRider.id) });
+        logTest('32c. Rejected stale write leaves the winning update intact', staleGuardAfter.expertise[0].level === 'beginner');
+
+        // 32d: best-effort genuine end-to-end race across several trials -
+        // every response must be a controlled outcome (200 or 409, never
+        // 500/other), and whenever a genuine conflict is actually detected,
+        // the stored state must exactly match the reported winner.
+        let sawGenuineConflict = false;
+        let anyInvalidOutcome = false;
+        for (let trial = 0; trial < 5; trial += 1) {
+            const trialEmail = `test-expertise-race2-${runId}-${trial}@test.local`;
+            const trialRider = await createTestRider(`TEST-EXPERTISE-RACE2-${runId}-${trial}`, { email: trialEmail });
+            const [rA, rB] = await Promise.all([
+                callUpdateExpertise(trialRider.id, [validEntry({ level: 'beginner', experienceYears: 0 })], trialEmail),
+                callUpdateExpertise(trialRider.id, [validEntry({ level: 'expert', experienceYears: 10 })], trialEmail)
+            ]);
+            if (![200, 409].includes(rA.statusCode) || ![200, 409].includes(rB.statusCode)) anyInvalidOutcome = true;
+            if (rA.statusCode === 409 || rB.statusCode === 409) {
+                sawGenuineConflict = true;
+                const winnerLevel = rA.statusCode === 200 ? 'beginner' : 'expert';
+                const trialAfter = await collections.riders.findOne({ _id: new ObjectId(trialRider.id) });
+                if (!trialAfter.expertise || trialAfter.expertise[0].level !== winnerLevel) anyInvalidOutcome = true;
+            }
+        }
+        logTest('32d. Every concurrent-update trial produces only controlled outcomes, never corrupted/merged state', !anyInvalidOutcome);
+        logTest('32e. At least one trial exhibited a genuine detected conflict (mechanism is actually exercised)', sawGenuineConflict);
+
+        // ================= Response safety (33) =================
+        const responseKeys = Object.keys(selfUpdateRes.body);
+        logTest(
+            '33. Success response excludes private fields',
+            !responseKeys.includes('email') && !responseKeys.includes('nid') && !responseKeys.includes('address') &&
+            !('parcelId' in (selfUpdateRes.body.expertise?.[0] || {}))
+        );
+        logTest(
+            '33b. Error response excludes raw MongoDB error and stack trace',
+            !JSON.stringify(otherTechRes.body).toLowerCase().includes('stack') && !JSON.stringify(otherTechRes.body).toLowerCase().includes('mongoserveerror')
+        );
+
+        // 35 is the full 886+ suite passing end-to-end across three
+        // consecutive runs (Phase R), not an assertion here.
+    } finally {
+        // The real assignment path used by test 31 creates real notification
+        // documents for its parcel's owner (CUSTOMER_EMAIL) and rider - scoped
+        // and removed here by entityId (this section's own created parcel
+        // ids), never by recipient, so the real shared CUSTOMER_EMAIL account
+        // is left exactly as found, matching the established convention.
+        if (createdParcelIds.length) {
+            await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
+            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
+        }
+        if (createdRiderIds.length) {
+            await collections.riders.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
+        }
+        if (createdUserEmails.length) {
+            await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        }
+
+        const leftoverRiders = await collections.riders.countDocuments({ name: { $regex: '^TEST-EXPERTISE-' } });
+        const leftoverParcels = await collections.parcels.countDocuments({ parcelName: { $regex: '^TEST-EXPERTISE-' } });
+        const leftoverUsers = await collections.users.countDocuments({ email: { $regex: '^test-expertise-' } });
+        logTest('34. No fixture leakage after tests', leftoverRiders === 0 && leftoverParcels === 0 && leftoverUsers === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -8301,6 +8655,7 @@ async function runAllTests() {
     await testUserRoleUpdateSafety();
     await testServiceTaxonomyFoundation();
     await testServiceDefinitions();
+    await testTechnicianExpertise();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
