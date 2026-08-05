@@ -4,6 +4,7 @@ const RiderModel = require('./Rider');
 const PaymentModel = require('./Payment');
 const TrackingModel = require('./Tracking');
 const NotificationModel = require('./Notification');
+const { ServiceDefinitionModel } = require('./ServiceDefinition');
 
 function initializeModels(collections) {
     return {
@@ -12,7 +13,8 @@ function initializeModels(collections) {
         Rider: new RiderModel(collections.riders),
         Payment: new PaymentModel(collections.payments),
         Tracking: new TrackingModel(collections.trackings),
-        Notification: new NotificationModel(collections.notifications)
+        Notification: new NotificationModel(collections.notifications),
+        ServiceDefinition: new ServiceDefinitionModel(collections.serviceDefinitions)
     };
 }
 

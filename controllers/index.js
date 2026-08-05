@@ -5,6 +5,7 @@ const PaymentController = require('./paymentController');
 const TrackingController = require('./trackingController');
 const NotificationController = require('./NotificationController');
 const HealthController = require('./healthController');
+const ServiceDefinitionController = require('./serviceDefinitionController');
 
 function initializeControllers(models, collections) {
     return {
@@ -14,7 +15,8 @@ function initializeControllers(models, collections) {
         payment: new PaymentController(models, collections),
         tracking: new TrackingController(models, collections),
         notification: new NotificationController(models),
-        health: new HealthController()
+        health: new HealthController(),
+        serviceDefinition: new ServiceDefinitionController(models)
     };
 }
 

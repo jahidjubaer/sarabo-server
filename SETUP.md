@@ -126,6 +126,7 @@ The server provides various endpoints for:
 - Rider management (`/riders/*`)
 - Payment processing (`/payments/*`)
 - Tracking (`/trackings/*`)
+- Service definitions and pricing, read-only (`/service-definitions/*`)
 
 Most endpoints require Firebase authentication via the `Authorization` header.
 Exceptions: the root health check, the Stripe webhook (`POST /stripe-webhook`,
@@ -172,6 +173,41 @@ New repair requests receive a tracking code in the format `SRB-<random>`
 weaker `PRCL-YYYYMMDD-XXXXXX` format - existing codes in that older format
 continue to resolve normally, they are simply no longer generated for new
 requests.
+
+### Service definitions and pricing (read-only)
+
+`GET /service-definitions` and `GET /service-definitions/:id` are public and
+unauthenticated, always active-definitions-only. Each service definition
+pairs one product category with one repair category (see
+`utils/productCategory.js` / `utils/repairCategory.js`) and carries a
+server-owned `pricingRule` (currency, a `baseMin`/`baseMax` estimate range,
+an optional `inspectionFee`, and a `version`). Prices are decimal USD, the
+same representation the legacy `parcels.cost` field already uses - not
+integer cents; conversion to Stripe's integer smallest unit only happens at
+the eventual charge boundary, via the existing `toSmallestUnit()` in
+`config/paymentConfig.js`. There is no create/update/delete endpoint yet;
+service definitions are currently populated only by
+`scripts/seed-service-definitions.js`.
+
+**Provisional/demo pricing warning:** every price shipped in
+`data/serviceDefinitionSeed.js` is a placeholder for local development and
+testing only - none of it has been reviewed or approved by the business
+owner, and none of it reflects researched real-world repair pricing.
+
+**Seed safety:** the seed script is idempotent (upserts by the unique
+`productCategorySlug` + `repairCategorySlug` pair, never overwrites an
+existing row whose pricing differs) and defaults to a dry run - it only
+writes when given `--confirm-seed`. It independently refuses to run against
+a production database, both by checking the same production-environment
+signal the rest of the codebase trusts and by rejecting any resolved
+database name that looks like a production one. Never run
+`--confirm-seed` against a shared or production database without the
+business owner's review of the pricing involved.
+
+```bash
+node scripts/seed-service-definitions.js               # dry run (default)
+node scripts/seed-service-definitions.js --confirm-seed # writes new rows only
+```
 
 ## Troubleshooting
 

@@ -6,7 +6,8 @@
   "scripts": {
     "test": "node test-all.js",
     "start": "node index.js",
-    "dev": "node index.js"
+    "dev": "node index.js",
+    "seed:service-definitions": "node scripts/seed-service-definitions.js"
   },
   "keywords": [],
   "author": "",

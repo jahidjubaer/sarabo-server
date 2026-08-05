@@ -32,6 +32,7 @@ const collections = {
     trackings: db.collection("trackings"),
     checkoutSessions: db.collection("checkoutSessions"),
     notifications: db.collection("notifications"),
+    serviceDefinitions: db.collection("serviceDefinitions"),
 };
 
 let connectionPromise = null;
@@ -97,6 +98,30 @@ async function connectDatabase() {
                 await collections.notifications.createIndex(
                     { entityType: 1, entityId: 1, createdAt: -1 },
                     { name: 'notifications_entity_createdAt' }
+                );
+                // Service-definition taxonomy foundation (Phase 6.3 Unit 2).
+                // Enforces uniqueness of the product/repair category pair at
+                // the database level - the same "guard the invariant in the
+                // database, not just in application code" pattern already
+                // used above for payments.sessionId, checkoutSessions.parcelId,
+                // and parcels.trackingId.
+                await collections.serviceDefinitions.createIndex(
+                    { productCategorySlug: 1, repairCategorySlug: 1 },
+                    { unique: true, name: 'serviceDefinitions_product_repair_unique' }
+                );
+                // Default public read path - "active definitions only".
+                await collections.serviceDefinitions.createIndex(
+                    { isActive: 1 },
+                    { name: 'serviceDefinitions_isActive' }
+                );
+                // A standalone productCategorySlug index would be redundant:
+                // the compound unique index above already serves as an
+                // efficient prefix index for productCategorySlug-only
+                // queries. repairCategorySlug alone is NOT a prefix of that
+                // compound index, so it gets its own index here.
+                await collections.serviceDefinitions.createIndex(
+                    { repairCategorySlug: 1 },
+                    { name: 'serviceDefinitions_repairCategorySlug' }
                 );
                 return { db, collections };
             })

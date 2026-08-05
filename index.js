@@ -19,6 +19,7 @@ const trackingRoutes = require('./routes/trackings');
 const publicTrackingRoutes = require('./routes/publicTracking');
 const notificationRoutes = require('./routes/notifications');
 const healthRoutes = require('./routes/healthRoutes');
+const serviceDefinitionRoutes = require('./routes/serviceDefinitions');
 
 const app = express();
 // Vercel's edge network is the sole reverse proxy in front of this function,
@@ -89,6 +90,7 @@ trackingRoutes(app, controllers);
 publicTrackingRoutes(app, controllers);
 notificationRoutes(app, controllers);
 healthRoutes(app, controllers);
+serviceDefinitionRoutes(app, controllers);
 
 // Start server (only for local/traditional hosting - Vercel invokes the
 // exported app directly per request and does not use a listening port)

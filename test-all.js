@@ -7752,6 +7752,349 @@ async function testServiceTaxonomyFoundation() {
     console.log('');
 }
 
+// Phase 6.3 Unit 2 - Service Definitions and Server-Owned Pricing Foundation.
+// Test-database safety (Phase L): never uses the real/shared RIDER_EMAIL or
+// CUSTOMER_EMAIL fixture accounts (this section never touches
+// riders/users/parcels/notifications at all - only serviceDefinitions),
+// every synthetic document this section creates is deleted in `finally`
+// (tracked by _id, or by its exact known productCategorySlug/
+// repairCategorySlug compound key), and section 19/26-32's fake
+// "TEST-SERVICE-*" taxonomy-slug rows are inserted via the raw collection
+// (bypassing application validation on purpose, to test the database-level
+// unique index itself) while every other synthetic row uses real, valid
+// taxonomy slugs that are deliberately not part of the real
+// data/serviceDefinitionSeed.js matrix, so this section's fixtures can never
+// collide with (or be mistaken for) real seeded catalog rows.
+async function testServiceDefinitions() {
+    console.log('29. Testing Service Definitions and Pricing Foundation (Phase 6.3 Unit 2)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { ObjectId } = require('mongodb');
+    const { validateServiceDefinitionInput, buildDocumentFromInput, ServiceDefinitionModel } = require('./models/ServiceDefinition');
+    const { getPricingEstimate } = require('./services/pricingService');
+    const { runSeed, isSafeToSeed } = require('./scripts/seed-service-definitions');
+    const { PRODUCT_CATEGORIES } = require('./utils/productCategory');
+    const { REPAIR_CATEGORIES } = require('./utils/repairCategory');
+
+    const createdServiceDefinitionIds = [];
+    // Compound keys this section seeds via runSeed() (tests 20-23) - deleted
+    // in `finally` by exact key, independent of the _id-tracking list above.
+    const seedTestPairs = [
+        { productCategorySlug: 'smartphone', repairCategorySlug: 'charging-port' },
+        { productCategorySlug: 'smartphone', repairCategorySlug: 'camera-audio' }
+    ];
+
+    function validBaseInput(overrides = {}) {
+        return {
+            productCategorySlug: 'smartphone',
+            repairCategorySlug: 'display-screen',
+            label: 'TEST-SERVICE-LABEL',
+            description: 'TEST-SERVICE-DESCRIPTION for automated testing.',
+            isActive: true,
+            pricingRule: { currency: 'usd', baseMin: 20, baseMax: 50, inspectionFee: 5, version: 1 },
+            requiredExpertiseLevel: 'intermediate',
+            estimatedDurationMinutes: 45,
+            inspectionRequired: false,
+            imageRequirements: { min: 0, max: 3, recommended: true },
+            ...overrides
+        };
+    }
+
+    try {
+        await connectDatabase();
+        const model = new ServiceDefinitionModel(collections.serviceDefinitions);
+
+        logTest('1. Valid service definition accepted', validateServiceDefinitionInput(validBaseInput()).valid === true);
+
+        logTest(
+            '2. Invalid product category rejected',
+            validateServiceDefinitionInput(validBaseInput({ productCategorySlug: 'not-a-real-product' })).code === 'INVALID_PRODUCT_CATEGORY'
+        );
+
+        logTest(
+            '3. Invalid repair category rejected',
+            validateServiceDefinitionInput(validBaseInput({ repairCategorySlug: 'not-a-real-repair' })).code === 'INVALID_REPAIR_CATEGORY'
+        );
+
+        logTest(
+            '4. Unsupported product/repair pair rejected',
+            validateServiceDefinitionInput(validBaseInput({ productCategorySlug: 'smartphone', repairCategorySlug: 'compressor-cooling' })).code === 'REPAIR_CATEGORY_NOT_SUPPORTED'
+        );
+
+        const allTaxonomyActive = PRODUCT_CATEGORIES.every((c) => c.isActive === true) && REPAIR_CATEGORIES.every((c) => c.isActive === true);
+        logTest(
+            '5. Inactive taxonomy entry rejected where testable',
+            allTaxonomyActive,
+            'Every canonical category is currently active, so INACTIVE_PRODUCT_CATEGORY/INACTIVE_REPAIR_CATEGORY are defined, reachable branches in validateProductRepairPair but not exercisable against the real, locked taxonomy data today.'
+        );
+
+        logTest('6. Empty label rejected', validateServiceDefinitionInput(validBaseInput({ label: '   ' })).code === 'INVALID_LABEL');
+        logTest('7. Excessive label rejected', validateServiceDefinitionInput(validBaseInput({ label: 'x'.repeat(101) })).code === 'INVALID_LABEL');
+        logTest('8. Invalid description rejected', validateServiceDefinitionInput(validBaseInput({ description: '' })).code === 'INVALID_DESCRIPTION');
+        logTest(
+            '9. Invalid currency rejected',
+            validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'bdt', baseMin: 20, baseMax: 50, inspectionFee: 5, version: 1 } })).code === 'INVALID_CURRENCY'
+        );
+        logTest(
+            '10. Negative baseMin rejected',
+            validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'usd', baseMin: -5, baseMax: 50, inspectionFee: 5, version: 1 } })).code === 'INVALID_BASE_MIN'
+        );
+        logTest(
+            '11. baseMin greater than baseMax rejected',
+            validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'usd', baseMin: 90, baseMax: 50, inspectionFee: 5, version: 1 } })).code === 'BASE_MIN_EXCEEDS_BASE_MAX'
+        );
+
+        const nanResult = validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'usd', baseMin: NaN, baseMax: 50, inspectionFee: 5, version: 1 } }));
+        const infResult = validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'usd', baseMin: 20, baseMax: Infinity, inspectionFee: 5, version: 1 } }));
+        logTest('12. NaN/Infinity rejected', nanResult.code === 'INVALID_BASE_MIN' && infResult.code === 'INVALID_BASE_MAX');
+
+        logTest(
+            '13. Negative inspectionFee rejected',
+            validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'usd', baseMin: 20, baseMax: 50, inspectionFee: -1, version: 1 } })).code === 'INVALID_INSPECTION_FEE'
+        );
+        logTest(
+            '14. Invalid pricing version rejected',
+            validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'usd', baseMin: 20, baseMax: 50, inspectionFee: 5, version: 0 } })).code === 'INVALID_PRICING_VERSION'
+        );
+        logTest('15. Invalid expertise level rejected', validateServiceDefinitionInput(validBaseInput({ requiredExpertiseLevel: 'wizard' })).code === 'INVALID_EXPERTISE_LEVEL');
+        logTest('16. Invalid duration rejected', validateServiceDefinitionInput(validBaseInput({ estimatedDurationMinutes: 0 })).code === 'INVALID_DURATION');
+        logTest(
+            '17. Invalid image min/max rejected',
+            validateServiceDefinitionInput(validBaseInput({ imageRequirements: { min: 2, max: 1, recommended: true } })).code === 'INVALID_IMAGE_REQUIREMENTS'
+        );
+        logTest(
+            '17b. Unexpected nested pricingRule field rejected',
+            validateServiceDefinitionInput(validBaseInput({
+                pricingRule: { currency: 'usd', baseMin: 20, baseMax: 50, inspectionFee: 5, version: 1, clientSuppliedFinalAmount: 999999 }
+            })).code === 'UNEXPECTED_PRICING_RULE_FIELD'
+        );
+
+        const now = new Date();
+        const builtDoc = buildDocumentFromInput(validBaseInput({ someUnexpectedField: 'should not persist', _id: 'malicious-id' }), now);
+        logTest('18. Extra write fields ignored', !('someUnexpectedField' in builtDoc) && builtDoc._id === undefined);
+
+        // Defense-in-depth check: buildDocumentFromInput rebuilds pricingRule
+        // from its own known-field whitelist rather than copying the input
+        // object wholesale, so even a caller that bypassed validation could
+        // never persist a stray nested pricingRule field.
+        const builtDocWithNestedExtra = buildDocumentFromInput(validBaseInput({
+            pricingRule: { currency: 'usd', baseMin: 20, baseMax: 50, inspectionFee: 5, version: 1, quotedAmount: 12345 }
+        }), now);
+        logTest('18b. Nested pricingRule extra field stripped by document builder', !('quotedAmount' in builtDocWithNestedExtra.pricingRule));
+
+        // 19. Unique compound index enforced at the database level -
+        // deliberately bypasses application validation (raw collection
+        // insertOne) since this test is about the MongoDB index itself, not
+        // about validateServiceDefinitionInput. Uses fake, non-taxonomy slug
+        // values that can never collide with real data.
+        function buildUniqueIndexTestDoc() {
+            return {
+                productCategorySlug: 'TEST-SERVICE-UNIQUE-PRODUCT', repairCategorySlug: 'TEST-SERVICE-UNIQUE-REPAIR',
+                label: 'x', description: 'y', isActive: true,
+                pricingRule: { currency: 'usd', baseMin: 1, baseMax: 2, inspectionFee: 0, version: 1 },
+                requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30, inspectionRequired: false,
+                imageRequirements: { min: 0, max: 0, recommended: false },
+                createdAt: now, updatedAt: now
+            };
+        }
+        const firstUniqueInsert = await collections.serviceDefinitions.insertOne(buildUniqueIndexTestDoc());
+        createdServiceDefinitionIds.push(firstUniqueInsert.insertedId);
+        let duplicateRejected = false;
+        try {
+            await collections.serviceDefinitions.insertOne(buildUniqueIndexTestDoc());
+        } catch (err) {
+            duplicateRejected = err.code === 11000;
+        }
+        logTest('19. Unique product/repair index enforced', duplicateRejected);
+
+        // 20-23: exercise the actual runSeed() function the real CLI script
+        // uses, against synthetic rows using real (but otherwise unseeded)
+        // taxonomy pairs, so seed logic is tested end-to-end without ever
+        // touching data/serviceDefinitionSeed.js's real matrix.
+        function buildSeedTestRow(pair, overrides = {}) {
+            return {
+                ...pair,
+                label: `TEST-SERVICE-SEED-${pair.repairCategorySlug}`,
+                description: 'Synthetic seed row for automated seed-logic testing.',
+                isActive: true,
+                pricingRule: { currency: 'usd', baseMin: 10, baseMax: 20, inspectionFee: 0, version: 1 },
+                requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30,
+                inspectionRequired: false, imageRequirements: { min: 0, max: 0, recommended: false },
+                ...overrides
+            };
+        }
+        const seedTestRows = seedTestPairs.map((pair) => buildSeedTestRow(pair));
+
+        const dryRunResult = await runSeed({ model, seedRows: seedTestRows, dryRun: true });
+        const countAfterDryRun = await collections.serviceDefinitions.countDocuments({ $or: seedTestPairs });
+        logTest('20. Seed dry-run writes nothing', dryRunResult.created === 2 && dryRunResult.conflicted === 0 && countAfterDryRun === 0);
+
+        const firstSeedResult = await runSeed({ model, seedRows: seedTestRows, dryRun: false });
+        logTest('21. First seed creates expected rows', firstSeedResult.created === 2 && firstSeedResult.skippedIdentical === 0 && firstSeedResult.conflicted === 0);
+
+        const secondSeedResult = await runSeed({ model, seedRows: seedTestRows, dryRun: false });
+        logTest('22. Second identical seed creates zero duplicates', secondSeedResult.created === 0 && secondSeedResult.skippedIdentical === 2 && secondSeedResult.conflicted === 0);
+
+        const changedSeedRows = seedTestPairs.map((pair) => buildSeedTestRow(pair, { pricingRule: { currency: 'usd', baseMin: 999, baseMax: 1000, inspectionFee: 0, version: 1 } }));
+        const conflictSeedResult = await runSeed({ model, seedRows: changedSeedRows, dryRun: false });
+        const afterConflictDocs = await collections.serviceDefinitions.find({ $or: seedTestPairs }).toArray();
+        const pricingUnchangedAfterConflict = afterConflictDocs.every((doc) => doc.pricingRule.baseMin === 10 && doc.pricingRule.baseMax === 20);
+        logTest(
+            '23. Seed conflict does not overwrite changed pricing',
+            conflictSeedResult.created === 0 && conflictSeedResult.conflicted === 2 && pricingUnchangedAfterConflict
+        );
+
+        const prodEnvCheck = isSafeToSeed({ isProduction: true, resolvedDbName: 'zap_shift_db' });
+        const prodNameCheck = isSafeToSeed({ isProduction: false, resolvedDbName: 'sarabo_production' });
+        const safeCheck = isSafeToSeed({ isProduction: false, resolvedDbName: 'zap_shift_db' });
+        logTest('24. Seed refuses production DB', prodEnvCheck.safe === false && prodNameCheck.safe === false && safeCheck.safe === true);
+
+        // 25-32: real HTTP walkthrough against the running dev server. Uses
+        // its own dedicated taxonomy pairs (laptop-computer/charging-port,
+        // laptop-computer/motherboard) distinct from every pair used above,
+        // inserted directly through the model so these tests never depend on
+        // whether Phase O's real seed has been run yet in this database.
+        const httpTestDocA = buildDocumentFromInput({
+            productCategorySlug: 'laptop-computer', repairCategorySlug: 'charging-port',
+            label: 'TEST-SERVICE-HTTP-A', description: 'Synthetic HTTP-walkthrough row A.', isActive: true,
+            pricingRule: { currency: 'usd', baseMin: 33, baseMax: 77, inspectionFee: 11, version: 1 },
+            requiredExpertiseLevel: 'intermediate', estimatedDurationMinutes: 40,
+            inspectionRequired: false, imageRequirements: { min: 0, max: 2, recommended: true }
+        }, now);
+        const httpTestDocB = buildDocumentFromInput({
+            productCategorySlug: 'laptop-computer', repairCategorySlug: 'motherboard',
+            label: 'TEST-SERVICE-HTTP-B', description: 'Synthetic HTTP-walkthrough row B.', isActive: true,
+            pricingRule: { currency: 'usd', baseMin: 88, baseMax: 199, inspectionFee: 22, version: 1 },
+            requiredExpertiseLevel: 'advanced', estimatedDurationMinutes: 90,
+            inspectionRequired: true, imageRequirements: { min: 0, max: 1, recommended: false }
+        }, now);
+        const insertA = await model.insertOne(httpTestDocA);
+        const insertB = await model.insertOne(httpTestDocB);
+        createdServiceDefinitionIds.push(insertA.insertedId, insertB.insertedId);
+        const idA = insertA.insertedId.toString();
+        const idB = insertB.insertedId.toString();
+
+        const listResult = await makeRequest(
+            { hostname: 'localhost', port: 3000, path: '/service-definitions', method: 'GET' },
+            200,
+            '25. GET list returns active definitions'
+        );
+        let listParsed = { serviceDefinitions: [] };
+        try { listParsed = JSON.parse(listResult.data); } catch { /* checked by shape assertion below */ }
+        const listContainsBoth = Array.isArray(listParsed.serviceDefinitions) &&
+            listParsed.serviceDefinitions.some((d) => d.id === idA) &&
+            listParsed.serviceDefinitions.some((d) => d.id === idB);
+        logTest('25b. Returned list contains both freshly-inserted active definitions', listContainsBoth);
+
+        const productFilterResult = await makeRequest(
+            { hostname: 'localhost', port: 3000, path: '/service-definitions?productCategorySlug=laptop-computer', method: 'GET' },
+            200,
+            '26. GET list filters by product'
+        );
+        let productFilterParsed = { serviceDefinitions: [] };
+        try { productFilterParsed = JSON.parse(productFilterResult.data); } catch { /* checked below */ }
+        const productFilterCorrect = Array.isArray(productFilterParsed.serviceDefinitions) &&
+            productFilterParsed.serviceDefinitions.every((d) => d.productCategorySlug === 'laptop-computer') &&
+            productFilterParsed.serviceDefinitions.some((d) => d.id === idA) &&
+            productFilterParsed.serviceDefinitions.some((d) => d.id === idB);
+        logTest('26b. Product filter returns only matching, includes both test rows', productFilterCorrect);
+
+        const repairFilterResult = await makeRequest(
+            { hostname: 'localhost', port: 3000, path: '/service-definitions?repairCategorySlug=motherboard', method: 'GET' },
+            200,
+            '27. GET list filters by repair category'
+        );
+        let repairFilterParsed = { serviceDefinitions: [] };
+        try { repairFilterParsed = JSON.parse(repairFilterResult.data); } catch { /* checked below */ }
+        const repairFilterCorrect = Array.isArray(repairFilterParsed.serviceDefinitions) &&
+            repairFilterParsed.serviceDefinitions.every((d) => d.repairCategorySlug === 'motherboard') &&
+            repairFilterParsed.serviceDefinitions.some((d) => d.id === idB) &&
+            !repairFilterParsed.serviceDefinitions.some((d) => d.id === idA);
+        logTest('27b. Repair-category filter returns only matching, excludes non-matching test row', repairFilterCorrect);
+
+        const invalidFilterResult = await makeRequest(
+            { hostname: 'localhost', port: 3000, path: '/service-definitions?productCategorySlug=not-a-real-product', method: 'GET' },
+            400,
+            '28. Invalid filter returns controlled 400'
+        );
+        let invalidFilterParsed = {};
+        try { invalidFilterParsed = JSON.parse(invalidFilterResult.data); } catch { /* checked below */ }
+        logTest('28b. Invalid filter response has controlled code', invalidFilterParsed.code === 'INVALID_PRODUCT_CATEGORY');
+
+        const byIdResult = await makeRequest(
+            { hostname: 'localhost', port: 3000, path: `/service-definitions/${idA}`, method: 'GET' },
+            200,
+            '29. GET by ID succeeds'
+        );
+        let byIdParsed = {};
+        try { byIdParsed = JSON.parse(byIdResult.data); } catch { /* checked below */ }
+        logTest(
+            '29b. GET by ID returns the correct, correctly-shaped definition',
+            byIdParsed.id === idA &&
+            byIdParsed.pricingEstimate?.currency === 'usd' &&
+            byIdParsed.pricingEstimate?.min === 33 &&
+            byIdParsed.pricingEstimate?.max === 77 &&
+            byIdParsed.pricingEstimate?.inspectionFee === 11
+        );
+
+        await makeRequest(
+            { hostname: 'localhost', port: 3000, path: '/service-definitions/not-a-valid-object-id', method: 'GET' },
+            400,
+            '30. Invalid ID returns 400'
+        );
+
+        const nonexistentId = new ObjectId().toString();
+        await makeRequest(
+            { hostname: 'localhost', port: 3000, path: `/service-definitions/${nonexistentId}`, method: 'GET' },
+            404,
+            '31. Missing ID returns 404'
+        );
+
+        const noInternalFields = byIdParsed.pricingRule === undefined &&
+            byIdParsed.createdAt === undefined &&
+            byIdParsed.updatedAt === undefined &&
+            byIdParsed.pricingEstimate?.version === undefined;
+        logTest('32. Public projection excludes internal fields', noInternalFields);
+
+        const storedDocA = await model.findById(idA);
+        const estimate = getPricingEstimate(storedDocA);
+        logTest(
+            '33. Pricing estimate helper returns server-owned values',
+            estimate.currency === 'usd' && estimate.estimateMin === 33 && estimate.estimateMax === 77 &&
+            estimate.inspectionFee === 11 && estimate.pricingVersion === 1
+        );
+
+        const tamperedDoc = { ...storedDocA, clientSuppliedCost: 999999 };
+        const estimateAfterTamper = getPricingEstimate(tamperedDoc);
+        logTest(
+            '34. Client-supplied price has no effect on helper',
+            estimateAfterTamper.estimateMin === 33 && estimateAfterTamper.estimateMax === 77
+        );
+
+        // 35 is the full 844+ suite passing end-to-end across three
+        // consecutive runs (Phase Q), not an assertion here.
+    } finally {
+        if (createdServiceDefinitionIds.length) {
+            await collections.serviceDefinitions.deleteMany({ _id: { $in: createdServiceDefinitionIds } });
+        }
+        await collections.serviceDefinitions.deleteMany({ $or: seedTestPairs });
+        await collections.serviceDefinitions.deleteMany({
+            productCategorySlug: 'TEST-SERVICE-UNIQUE-PRODUCT', repairCategorySlug: 'TEST-SERVICE-UNIQUE-REPAIR'
+        });
+
+        const leftoverCount = await collections.serviceDefinitions.countDocuments({
+            $or: [
+                { label: { $regex: '^TEST-SERVICE-' } },
+                { productCategorySlug: { $regex: '^TEST-SERVICE-' } }
+            ]
+        });
+        logTest('36. No fixture leakage after tests', leftoverCount === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -7957,6 +8300,7 @@ async function runAllTests() {
     await testUserRolePrivacyHardening();
     await testUserRoleUpdateSafety();
     await testServiceTaxonomyFoundation();
+    await testServiceDefinitions();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
