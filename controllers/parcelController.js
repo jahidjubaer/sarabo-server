@@ -10,6 +10,13 @@ const { createCheckoutSessionManager } = require('../services/checkoutSessionMan
 const { getCancellationEligibility } = require('../services/cancellationPolicy');
 const { canAssignRequest } = require('../services/assignmentEligibility');
 const { escapeRegex, sanitizeSearchText } = require('../utils/searchSanitize');
+const { CURRENT_REPAIR_REQUEST_SCHEMA_VERSION, validateRepairRequestSchemaVersion } = require('../utils/repairRequestSchema');
+const {
+    STAGED_MIN_DAMAGE_IMAGES, validateProductInput, buildProductSnapshot, validateServiceDefinitionMatch,
+    validateDamageDescription, validateDamageImages, buildDamageSnapshot, validateServiceLocation,
+    buildServiceLocationSnapshot, validateClientPricingAbsence
+} = require('../utils/repairRequestV2');
+const { getPricingEstimate } = require('../services/pricingService');
 
 const ADMIN_LIST_DEFAULT_LIMIT = 10;
 const ADMIN_LIST_MAX_LIMIT = 50;
@@ -27,6 +34,7 @@ class ParcelController {
         this.Parcel = models.Parcel;
         this.Rider = models.Rider;
         this.User = models.User;
+        this.ServiceDefinition = models.ServiceDefinition;
         this.collections = collections;
         // Guards against duplicate concurrent Stripe Checkout Sessions and
         // is reused here to release/expire an active session on cancellation
@@ -189,7 +197,21 @@ class ParcelController {
         }
     }
 
+    // Dispatches on schemaVersion (Phase 6.3 Unit 4) - absent or 1 is the
+    // existing legacy path below, completely unchanged; 2 is the new v2
+    // path (createRepairRequestV2); anything else is a controlled 400. The
+    // dispatch check is the only thing added to this method - every line of
+    // the legacy path itself is untouched, so legacy creation behavior stays
+    // byte-for-byte identical to before this unit.
     async createParcel(req, res) {
+        const schemaCheck = validateRepairRequestSchemaVersion(req.body && req.body.schemaVersion);
+        if (!schemaCheck.valid) {
+            return res.status(400).send({ message: schemaCheck.message, code: schemaCheck.code });
+        }
+        if (schemaCheck.version === CURRENT_REPAIR_REQUEST_SCHEMA_VERSION) {
+            return this.createRepairRequestV2(req, res);
+        }
+
         try {
             const parcel = req.body;
             parcel.createdAt = new Date();
@@ -216,6 +238,121 @@ class ParcelController {
             }
 
             logTracking(this.collections.trackings, parcel.trackingId, 'parcel_created');
+
+            res.send(result);
+        } catch (error) {
+            res.status(500).send({ message: 'Error creating repair request', error: error.message });
+        }
+    }
+
+    // Canonical v2 repair-request creation (Phase 6.3 Unit 4). Ownership
+    // (senderEmail) always comes from the verified token, never the request
+    // body - a client cannot create a request for another email. Product,
+    // service, damage, and location are all strictly validated; pricing is
+    // entirely server-derived from the persisted service definition via
+    // services/pricingService.js's getPricingEstimate() - a client-supplied
+    // pricing-authority field is rejected outright (validateClientPricingAbsence),
+    // never silently overwritten. No transaction: this is a single read (the
+    // service definition) followed by a single insert of an immutable
+    // pricing snapshot - the persisted request remains valid even if the
+    // catalog changes afterward (see the unit report's Phase S/creation-
+    // atomicity discussion).
+    async createRepairRequestV2(req, res) {
+        try {
+            const body = req.body || {};
+
+            const pricingGuard = validateClientPricingAbsence(body);
+            if (!pricingGuard.valid) {
+                return res.status(400).send({ message: pricingGuard.message, code: pricingGuard.code });
+            }
+
+            const productValidation = validateProductInput(body.product);
+            if (!productValidation.valid) {
+                return res.status(400).send({ message: productValidation.message, code: productValidation.code });
+            }
+
+            const serviceDefinitionId = (body.service && body.service.definitionId) || body.serviceDefinitionId;
+            if (!ObjectId.isValid(serviceDefinitionId)) {
+                return res.status(400).send({ message: 'invalid service definition id', code: 'INVALID_SERVICE_DEFINITION_ID' });
+            }
+
+            const definition = await this.ServiceDefinition.findById(serviceDefinitionId);
+            const matchResult = validateServiceDefinitionMatch(definition, body.product && body.product.categorySlug);
+            if (!matchResult.valid) {
+                return res.status(400).send({ message: matchResult.message, code: matchResult.code });
+            }
+
+            const damageDescriptionInput = body.damage && body.damage.description;
+            const descriptionValidation = validateDamageDescription(damageDescriptionInput);
+            if (!descriptionValidation.valid) {
+                return res.status(400).send({ message: descriptionValidation.message, code: descriptionValidation.code });
+            }
+
+            // Staged compatibility (Phase L): Firebase Storage upload is not
+            // implemented in this unit, so 0 images is temporarily permitted
+            // - see STAGED_MIN_DAMAGE_IMAGES in utils/repairRequestV2.js.
+            // When supplied, images are still fully validated against the
+            // canonical metadata shape/bounds; only the minimum count is
+            // relaxed.
+            const damageImagesInput = (body.damage && body.damage.images) || [];
+            const imagesValidation = validateDamageImages(damageImagesInput, { minImages: STAGED_MIN_DAMAGE_IMAGES });
+            if (!imagesValidation.valid) {
+                return res.status(400).send({ message: imagesValidation.message, code: imagesValidation.code });
+            }
+
+            const locationValidation = validateServiceLocation(body.serviceLocation);
+            if (!locationValidation.valid) {
+                return res.status(400).send({ message: locationValidation.message, code: locationValidation.code });
+            }
+
+            // Server-owned pricing snapshot - never the client's. No current
+            // service definition has an exact fixed price (every seeded row
+            // is a baseMin/baseMax range), so quotedAmount/finalAmount are
+            // always null at creation; quoteStatus reflects whether an
+            // in-person inspection or a remote quote is the next step.
+            const estimate = getPricingEstimate(definition);
+            const quoteStatus = definition.inspectionRequired === true ? 'pending_inspection' : 'awaiting_quote';
+
+            const now = new Date();
+            const document = {
+                schemaVersion: CURRENT_REPAIR_REQUEST_SCHEMA_VERSION,
+                senderEmail: normalize(req.decoded_email),
+                product: buildProductSnapshot(body.product),
+                // repairCategorySlug always comes from the definition itself,
+                // never from any client-supplied service.repairCategorySlug.
+                service: { definitionId: definition._id.toString(), repairCategorySlug: definition.repairCategorySlug },
+                damage: buildDamageSnapshot({ description: damageDescriptionInput, images: damageImagesInput }),
+                serviceLocation: buildServiceLocationSnapshot(body.serviceLocation),
+                pricing: {
+                    currency: estimate.currency,
+                    estimateMin: estimate.estimateMin,
+                    estimateMax: estimate.estimateMax,
+                    inspectionFee: estimate.inspectionFee,
+                    calculationVersion: estimate.pricingVersion,
+                    quotedAmount: null,
+                    quoteStatus,
+                    customerApprovedAt: null,
+                    finalAmount: null
+                },
+                deliveryStatus: 'pending-pickup',
+                createdAt: now,
+                updatedAt: now
+            };
+
+            const MAX_TRACKING_ID_ATTEMPTS = 5;
+            let result;
+            for (let attempt = 1; attempt <= MAX_TRACKING_ID_ATTEMPTS; attempt++) {
+                document.trackingId = generateSecureTrackingId();
+                try {
+                    result = await this.Parcel.create(document);
+                    break;
+                } catch (error) {
+                    if (error.code === 11000 && attempt < MAX_TRACKING_ID_ATTEMPTS) continue;
+                    throw error;
+                }
+            }
+
+            logTracking(this.collections.trackings, document.trackingId, 'parcel_created');
 
             res.send(result);
         } catch (error) {

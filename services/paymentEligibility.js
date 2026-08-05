@@ -1,5 +1,6 @@
 const { VALID_STATUSES } = require('../utils/parcelStatus');
 const { isValidStoredCost } = require('../config/paymentConfig');
+const { isV2RepairRequest } = require('../utils/repairRequestSchema');
 
 // Every status the current repair lifecycle can ever produce, including the
 // implicit default before a technician is assigned (a parcel with no
@@ -22,6 +23,20 @@ const ELIGIBLE_STATUSES = ['pending-pickup', ...VALID_STATUSES];
 // completion, which must remain able to finalize a session that was validly
 // created earlier even if the repair lifecycle has since moved on.
 function getPaymentEligibility(parcel) {
+    // Repair Request v2 foundation (Phase 6.3 Unit 4): a v2 request has no
+    // authoritative legacy `cost` field and no quote/final-amount workflow
+    // exists yet (that is a future unit) - checked first, before the
+    // paymentStatus/status/cost checks below, so a v2 request is always
+    // rejected with this specific, honest reason rather than incidentally
+    // falling through to INVALID_PAYMENT_AMOUNT (which would read as if the
+    // request's data were corrupted, when it is actually just not quoted
+    // yet). No checkout session or Stripe call is ever reached for a v2
+    // request as a result - see controllers/paymentController.js, which
+    // checks this before claiming a checkout-session slot or calling Stripe.
+    if (isV2RepairRequest(parcel)) {
+        return { eligible: false, code: 'PAYMENT_NOT_AVAILABLE', reason: 'payment is not yet available for this repair request - a quote is required first' };
+    }
+
     if (parcel.paymentStatus === 'paid') {
         return { eligible: false, code: 'ALREADY_PAID', reason: 'this request has already been paid for' };
     }
