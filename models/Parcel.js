@@ -1,4 +1,5 @@
 const { ObjectId } = require('mongodb');
+const { MAX_DAMAGE_IMAGES } = require('../utils/repairRequestV2');
 
 class ParcelModel {
     constructor(collection) {
@@ -129,6 +130,49 @@ class ParcelModel {
         ];
         const rows = await this.collection.aggregate(pipeline).toArray();
         return new Map(rows.map((row) => [row._id, row.count]));
+    }
+
+    // ---- Damage evidence (Phase 6.4 Unit 1) ----
+
+    // Single-document guarded push - the filter condition itself is the
+    // race-resolver for the 3-image cap (mirrors the guarded-update pattern
+    // established in Phase 6.3: the condition, not a prior read, is what
+    // MongoDB serializes). A concurrent finalize that would push a 4th image
+    // simply fails to match once a sibling transaction's push has already
+    // landed. Also guards against the exact same storageKey being attached
+    // twice (idempotency/replay safety) - never a broad parcel replacement,
+    // never touches pricing/service/assignment fields.
+    async attachDamageImage({ requestId, storageKey, image, session }) {
+        const filter = {
+            _id: new ObjectId(requestId),
+            schemaVersion: 2,
+            'damage.images.storageKey': { $ne: storageKey },
+            $expr: { $lt: [{ $size: { $ifNull: ['$damage.images', []] } }, MAX_DAMAGE_IMAGES] }
+        };
+        return await this.collection.updateOne(
+            filter,
+            { $push: { 'damage.images': image } },
+            { session }
+        );
+    }
+
+    async removeDamageImage({ requestId, storageKey, session }) {
+        const filter = { _id: new ObjectId(requestId), schemaVersion: 2 };
+        return await this.collection.updateOne(
+            filter,
+            { $pull: { 'damage.images': { storageKey } } },
+            { session }
+        );
+    }
+
+    findDamageImage(parcel, storageKey) {
+        if (!parcel || !parcel.damage || !Array.isArray(parcel.damage.images)) return null;
+        return parcel.damage.images.find((image) => image.storageKey === storageKey) || null;
+    }
+
+    countDamageImages(parcel) {
+        if (!parcel || !parcel.damage || !Array.isArray(parcel.damage.images)) return 0;
+        return parcel.damage.images.length;
     }
 
     async getDeliveryStatusStats() {

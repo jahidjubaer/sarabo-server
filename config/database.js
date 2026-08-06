@@ -33,6 +33,7 @@ const collections = {
     checkoutSessions: db.collection("checkoutSessions"),
     notifications: db.collection("notifications"),
     serviceDefinitions: db.collection("serviceDefinitions"),
+    damageUploadSessions: db.collection("damageUploadSessions"),
 };
 
 let connectionPromise = null;
@@ -151,6 +152,35 @@ async function connectDatabase() {
                 await collections.parcels.createIndex(
                     { riderId: 1, deliveryStatus: 1 },
                     { name: 'parcels_riderId_deliveryStatus' }
+                );
+                // Damage-upload session foundation (Phase 6.4 Unit 1).
+                // Enforces at the database level that a storage key can back
+                // at most one upload session, independent of any
+                // application-level guard - the same "guard the invariant in
+                // the database, not just in application code" pattern used
+                // above. Deliberately no TTL index here: an expired session
+                // document does not imply its Firebase Storage object is
+                // safe to garbage-collect on its own (see
+                // scripts/audit-damage-uploads.js) - expiry is enforced at
+                // read/finalize time via the plain expiresAt index below,
+                // and any eventual destructive cleanup is a separate,
+                // explicitly-run process, never an automatic TTL delete.
+                await collections.damageUploadSessions.createIndex(
+                    { storageKey: 1 },
+                    { unique: true, name: 'damageUploadSessions_storageKey_unique' }
+                );
+                // Primary lookup path - "sessions for this request in this
+                // status" (e.g. counting pending sessions, or scoping a
+                // finalize/removal guard).
+                await collections.damageUploadSessions.createIndex(
+                    { requestId: 1, status: 1 },
+                    { name: 'damageUploadSessions_requestId_status' }
+                );
+                // Non-TTL expiry index for the audit/cleanup script's
+                // "expired, still non-finalized" scan.
+                await collections.damageUploadSessions.createIndex(
+                    { expiresAt: 1 },
+                    { name: 'damageUploadSessions_expiresAt' }
                 );
                 return { db, collections };
             })

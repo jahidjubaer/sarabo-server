@@ -167,8 +167,19 @@ function validateDamageImageEntry(image) {
     if (!isPositiveInteger(image.size, MAX_IMAGE_SIZE_BYTES)) {
         return { valid: false, code: 'INVALID_DAMAGE_IMAGE', message: `image size must be a positive integer of at most ${MAX_IMAGE_SIZE_BYTES} bytes` };
     }
-    if (!isPositiveInteger(image.width, MAX_IMAGE_DIMENSION_PX) || !isPositiveInteger(image.height, MAX_IMAGE_DIMENSION_PX)) {
-        return { valid: false, code: 'INVALID_DAMAGE_IMAGE', message: 'image width/height must be positive, bounded integers' };
+    // Nullable as of Phase 6.4 Unit 1: neither the upload-session nor the
+    // finalize request contract provides a channel for real dimension input
+    // (no client-side image parsing exists yet, and installing a
+    // server-side image-parsing library was explicitly out of scope for
+    // that unit) - so width/height are display-only when present, and
+    // absent is equally valid. Never treated as a security authority either
+    // way. Real dimension verification is deferred to a future
+    // image-processing unit.
+    if (image.width !== undefined && image.width !== null && !isPositiveInteger(image.width, MAX_IMAGE_DIMENSION_PX)) {
+        return { valid: false, code: 'INVALID_DAMAGE_IMAGE', message: 'image width must be a positive, bounded integer when provided' };
+    }
+    if (image.height !== undefined && image.height !== null && !isPositiveInteger(image.height, MAX_IMAGE_DIMENSION_PX)) {
+        return { valid: false, code: 'INVALID_DAMAGE_IMAGE', message: 'image height must be a positive, bounded integer when provided' };
     }
     const uploadedAt = image.uploadedAt instanceof Date ? image.uploadedAt : new Date(image.uploadedAt);
     if (Number.isNaN(uploadedAt.getTime())) {
@@ -220,8 +231,8 @@ function buildDamageSnapshot(damage) {
             storageKey: image.storageKey.trim(),
             mimeType: image.mimeType,
             size: image.size,
-            width: image.width,
-            height: image.height,
+            width: image.width === undefined ? null : image.width,
+            height: image.height === undefined ? null : image.height,
             uploadedAt: image.uploadedAt instanceof Date ? image.uploadedAt : new Date(image.uploadedAt),
             uploadedByRole: image.uploadedByRole
         }))
@@ -290,6 +301,7 @@ module.exports = {
     buildProductSnapshot,
     validateServiceDefinitionMatch,
     validateDamageDescription,
+    validateDamageImageEntry,
     validateDamageImages,
     buildDamageSnapshot,
     validateServiceLocation,

@@ -9811,6 +9811,594 @@ async function testAssignmentExpertiseRevalidation() {
     console.log('');
 }
 
+// Phase 6.4 Unit 1 - Damage Upload Foundation. Exercises the real
+// controllers/damageUploadController.js directly (not a re-implementation),
+// but constructed with an injected fake Firebase Storage bucket adapter
+// (see createFakeDamageBucket below) rather than the real
+// services/damageStorageService.js singleton - matching this unit's own
+// preferred test strategy (Phase W): pure/injected-adapter tests only, no
+// external Firebase Storage contact anywhere in the ordinary suite. Parcel
+// creation goes through the real, shared controllers.parcel from
+// initializeControllers() exactly like every other section; only the
+// damage-upload controller instance in this section uses the fake adapter.
+async function testDamageUploadFoundation() {
+    console.log('34. Testing Damage Upload Foundation (Phase 6.4 Unit 1)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+    const { DamageStorageService } = require('./services/damageStorageService');
+    const DamageUploadController = require('./controllers/damageUploadController');
+    const { validateDamageImageEntry, validateDamageImages, STAGED_MIN_DAMAGE_IMAGES } = require('./utils/repairRequestV2');
+
+    const runId = Date.now();
+    const createdParcelIds = [];
+    const createdServiceDefinitionIds = [];
+    const createdUserEmails = [];
+    const createdSessionIds = [];
+    let customerEmail = null;
+    let otherCustomerEmail = null;
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    // Minimal fake GCS Bucket surface - only the three methods
+    // services/damageStorageService.js actually calls. `_objects` is the
+    // in-memory stand-in for "what has actually been uploaded to Firebase
+    // Storage" - simulateUpload() below writes to it directly (standing in
+    // for the client's real PUT to the signed URL, which this unit's tests
+    // never perform since there is no client integration yet).
+    function createFakeDamageBucket(name = 'fake-test-bucket') {
+        const objects = new Map();
+        return {
+            name,
+            _objects: objects,
+            file(storageKey) {
+                return {
+                    async getSignedUrl(opts) {
+                        return [`https://fake-storage.test/${name}/${storageKey}?action=${opts.action}`];
+                    },
+                    async getMetadata() {
+                        const obj = objects.get(storageKey);
+                        if (!obj) {
+                            const err = new Error('Not Found');
+                            err.code = 404;
+                            throw err;
+                        }
+                        return [{ contentType: obj.mimeType, size: String(obj.size), name: storageKey }];
+                    },
+                    async delete() {
+                        if (!objects.has(storageKey)) {
+                            const err = new Error('Not Found');
+                            err.code = 404;
+                            throw err;
+                        }
+                        objects.delete(storageKey);
+                    }
+                };
+            }
+        };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const parcelController = controllers.parcel;
+
+        const fakeBucket = createFakeDamageBucket();
+        const fakeStorage = new DamageStorageService({ bucket: fakeBucket });
+        const damageUploadController = new DamageUploadController(models, collections, fakeStorage);
+
+        async function createTestUser(email, role) {
+            createdUserEmails.push(email);
+            await collections.users.insertOne({ email, role, createdAt: new Date() });
+        }
+
+        const now = new Date();
+        const serviceDefResult = await collections.serviceDefinitions.insertOne({
+            productCategorySlug: 'smartphone', repairCategorySlug: 'motherboard',
+            label: `TEST-DAMAGE-UPLOAD-SERVICE-${runId}`, description: 'Synthetic service definition for damage-upload testing.',
+            isActive: true,
+            pricingRule: { currency: 'usd', baseMin: 25, baseMax: 75, inspectionFee: 10, version: 1 },
+            requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30,
+            inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true },
+            createdAt: now, updatedAt: now
+        });
+        createdServiceDefinitionIds.push(serviceDefResult.insertedId);
+        const serviceDefId = serviceDefResult.insertedId.toString();
+
+        customerEmail = `damage-upload-customer-${runId}@test.local`;
+        otherCustomerEmail = `damage-upload-other-${runId}@test.local`;
+        await createTestUser(customerEmail, 'user');
+        await createTestUser(otherCustomerEmail, 'user');
+
+        function validV2Body(overrides = {}) {
+            return {
+                schemaVersion: 2,
+                product: { categorySlug: 'smartphone', brand: 'TestBrand', model: 'TestModel' },
+                service: { definitionId: serviceDefId },
+                damage: { description: 'The screen is cracked after being dropped.' },
+                serviceLocation: { region: 'Dhaka', district: 'Mirpur', address: '123 Test Street' },
+                ...overrides
+            };
+        }
+
+        function callCreateParcel(body, decoded_email) {
+            const req = { body, decoded_email };
+            const res = fakeRes();
+            return parcelController.createParcel(req, res).then(() => res);
+        }
+
+        async function createV2Parcel(ownerEmail = customerEmail, overrides = {}) {
+            const res = await callCreateParcel(validV2Body(overrides), ownerEmail);
+            const id = res.body.insertedId.toString();
+            createdParcelIds.push(id);
+            return id;
+        }
+
+        async function createLegacyParcel() {
+            const res = await callCreateParcel({ parcelName: `TEST-DAMAGE-UPLOAD-LEGACY-${runId}`, cost: 40 }, customerEmail);
+            const id = res.body.insertedId.toString();
+            createdParcelIds.push(id);
+            return id;
+        }
+
+        function callCreateSession(parcelId, body, decoded_email) {
+            const req = { params: { id: parcelId }, body, decoded_email };
+            const res = fakeRes();
+            return damageUploadController.createUploadSession(req, res).then(() => res);
+        }
+
+        function callFinalize(parcelId, body, decoded_email) {
+            const req = { params: { id: parcelId }, body, decoded_email };
+            const res = fakeRes();
+            return damageUploadController.finalizeUpload(req, res).then(() => res);
+        }
+
+        function callRemove(parcelId, imageId, decoded_email) {
+            const req = { params: { id: parcelId, imageId }, decoded_email };
+            const res = fakeRes();
+            return damageUploadController.removeImage(req, res).then(() => res);
+        }
+
+        function validUploadBody(overrides = {}) {
+            return { fileName: 'damage.jpg', mimeType: 'image/jpeg', size: 1024 * 500, ...overrides };
+        }
+
+        function simulateUpload(storageKey, { mimeType = 'image/jpeg', size = 1024 * 500 } = {}) {
+            fakeBucket._objects.set(storageKey, { mimeType, size });
+        }
+
+        // Full owner-side happy-path helper: create session, simulate the
+        // client's upload (unless skipUpload), finalize. `actualMimeType`/
+        // `actualSize` let a test simulate the *stored* object differing
+        // from what was declared at session-creation time.
+        async function uploadAndFinalize(parcelId, ownerEmail = customerEmail, { sessionBody, actualMimeType, actualSize, skipUpload = false } = {}) {
+            const sessionRes = await callCreateSession(parcelId, validUploadBody(sessionBody), ownerEmail);
+            if (sessionRes.statusCode !== 201) return { sessionRes, finalizeRes: null, sessionId: null };
+            const sessionId = sessionRes.body.uploadSessionId;
+            createdSessionIds.push(sessionId);
+            const sessionDoc = await collections.damageUploadSessions.findOne({ _id: sessionId });
+            if (!skipUpload) {
+                simulateUpload(sessionDoc.storageKey, {
+                    mimeType: actualMimeType || sessionDoc.mimeType,
+                    size: actualSize !== undefined ? actualSize : sessionDoc.declaredSize
+                });
+            }
+            const finalizeRes = await callFinalize(parcelId, { uploadSessionId: sessionId }, ownerEmail);
+            return { sessionRes, finalizeRes, sessionId, sessionDoc };
+        }
+
+        async function lockRequest(parcelId) {
+            await collections.parcels.updateOne(
+                { _id: new ObjectId(parcelId) },
+                { $set: { deliveryStatus: 'driver_assigned', riderId: 'TEST-DAMAGE-UPLOAD-FAKE-RIDER', riderName: 'TEST-DAMAGE-UPLOAD-FAKE-RIDER', riderEmail: `damage-upload-fakerider-${runId}@test.local` } }
+            );
+        }
+
+        // ---- Storage-service safety when unconfigured (1-2) ----
+        const savedBucketEnv = process.env.FIREBASE_STORAGE_BUCKET;
+        delete process.env.FIREBASE_STORAGE_BUCKET;
+        let unconfiguredError = null;
+        try {
+            const unconfiguredService = new DamageStorageService();
+            await unconfiguredService.verifyObject({ storageKey: 'repair-requests/x/damage/y.jpg' });
+        } catch (error) {
+            unconfiguredError = error;
+        } finally {
+            if (savedBucketEnv === undefined) delete process.env.FIREBASE_STORAGE_BUCKET;
+            else process.env.FIREBASE_STORAGE_BUCKET = savedBucketEnv;
+        }
+        logTest('1. Storage service fails safely (STORAGE_UNAVAILABLE) when no bucket is configured', !!unconfiguredError && unconfiguredError.code === 'STORAGE_UNAVAILABLE');
+        logTest(
+            '2. Unconfigured-storage failure exposes no credential/path detail (fixed, safe message only)',
+            !!unconfiguredError && unconfiguredError.message === 'damage image storage is not configured'
+        );
+
+        // ---- Basic happy path / response shape (3-5) ----
+        const happyParcelId = await createV2Parcel();
+        const sessionRes4 = await callCreateSession(happyParcelId, validUploadBody(), customerEmail);
+        logTest(
+            '3. Owner can create an upload session for an eligible v2 request',
+            sessionRes4.statusCode === 201 && typeof sessionRes4.body.uploadSessionId === 'string' &&
+            typeof sessionRes4.body.uploadUrl === 'string' && typeof sessionRes4.body.expiresAt === 'string' &&
+            Array.isArray(sessionRes4.body.constraints.allowedMimeTypes) && sessionRes4.body.constraints.maxSizeBytes === 8 * 1024 * 1024
+        );
+        logTest('4. Session response excludes private/internal data (no storageKey, no ownerEmail)', sessionRes4.body.storageKey === undefined && sessionRes4.body.ownerEmail === undefined);
+        createdSessionIds.push(sessionRes4.body.uploadSessionId);
+        const happySessionDoc = await collections.damageUploadSessions.findOne({ _id: sessionRes4.body.uploadSessionId });
+        simulateUpload(happySessionDoc.storageKey);
+        const happyFinalizeRes = await callFinalize(happyParcelId, { uploadSessionId: sessionRes4.body.uploadSessionId }, customerEmail);
+        logTest(
+            '5. Full owner upload+finalize flow succeeds with expected response shape',
+            happyFinalizeRes.statusCode === 200 &&
+            typeof happyFinalizeRes.body.image.imageId === 'string' && happyFinalizeRes.body.image.mimeType === 'image/jpeg' &&
+            happyFinalizeRes.body.image.size === 1024 * 500 && happyFinalizeRes.body.image.width === null && happyFinalizeRes.body.image.height === null &&
+            typeof happyFinalizeRes.body.image.uploadedAt === 'string' &&
+            happyFinalizeRes.body.image.url === undefined && happyFinalizeRes.body.image.storageKey === undefined
+        );
+
+        // ---- Ownership / existence-oracle policy (6-9) ----
+        const ownedByCustomerId = await createV2Parcel();
+        const nonOwnerSessionRes = await callCreateSession(ownedByCustomerId, validUploadBody(), otherCustomerEmail);
+        logTest('6. Non-owner cannot create a session for someone else\'s request (404, not 403 - no existence leak)', nonOwnerSessionRes.statusCode === 404 && nonOwnerSessionRes.body.code === 'REQUEST_NOT_FOUND');
+        const invalidIdRes = await callCreateSession('not-a-valid-id', validUploadBody(), customerEmail);
+        logTest('7. Malformed request id rejected with INVALID_REQUEST_ID', invalidIdRes.statusCode === 400 && invalidIdRes.body.code === 'INVALID_REQUEST_ID');
+        const missingIdRes = await callCreateSession(new ObjectId().toString(), validUploadBody(), customerEmail);
+        logTest('8. Nonexistent request id rejected the same way as non-owned (404 REQUEST_NOT_FOUND)', missingIdRes.statusCode === 404 && missingIdRes.body.code === 'REQUEST_NOT_FOUND');
+        const nonOwnerFinalizeRes = await callFinalize(ownedByCustomerId, { uploadSessionId: 'irrelevant' }, otherCustomerEmail);
+        logTest('9. Non-owner finalize attempt rejected 404 before any session lookup', nonOwnerFinalizeRes.statusCode === 404 && nonOwnerFinalizeRes.body.code === 'REQUEST_NOT_FOUND');
+
+        // ---- Legacy rejection (10-12) ----
+        const legacyParcelId = await createLegacyParcel();
+        const legacySessionRes = await callCreateSession(legacyParcelId, validUploadBody(), customerEmail);
+        logTest('10. Legacy request rejected on session creation with LEGACY_REQUEST_NOT_SUPPORTED', legacySessionRes.statusCode === 409 && legacySessionRes.body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
+        const legacyFinalizeRes = await callFinalize(legacyParcelId, { uploadSessionId: 'irrelevant' }, customerEmail);
+        logTest('11. Legacy request rejected on finalize with LEGACY_REQUEST_NOT_SUPPORTED', legacyFinalizeRes.statusCode === 409 && legacyFinalizeRes.body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
+        const legacyRemoveRes = await callRemove(legacyParcelId, 'irrelevant', customerEmail);
+        logTest('12. Legacy request rejected on removal with LEGACY_REQUEST_NOT_SUPPORTED', legacyRemoveRes.statusCode === 409 && legacyRemoveRes.body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
+
+        // ---- Editable-state lock, re-checked fresh at every endpoint (13-15) ----
+        const lockedAtCreationId = await createV2Parcel();
+        await lockRequest(lockedAtCreationId);
+        const lockedSessionRes = await callCreateSession(lockedAtCreationId, validUploadBody(), customerEmail);
+        logTest('13. Session creation blocked once a technician is assigned (DAMAGE_IMAGES_LOCKED)', lockedSessionRes.statusCode === 409 && lockedSessionRes.body.code === 'DAMAGE_IMAGES_LOCKED');
+
+        const raceLockParcelId = await createV2Parcel();
+        const raceLockSessionRes = await callCreateSession(raceLockParcelId, validUploadBody(), customerEmail);
+        const raceLockSessionId = raceLockSessionRes.body.uploadSessionId;
+        createdSessionIds.push(raceLockSessionId);
+        const raceLockSessionDoc = await collections.damageUploadSessions.findOne({ _id: raceLockSessionId });
+        simulateUpload(raceLockSessionDoc.storageKey);
+        // Locked *after* the session was created (e.g. assignment happened
+        // while the client was mid-upload) - proves finalize re-reads
+        // editable state fresh rather than trusting the state at session
+        // creation time.
+        await lockRequest(raceLockParcelId);
+        const raceLockFinalizeRes = await callFinalize(raceLockParcelId, { uploadSessionId: raceLockSessionId }, customerEmail);
+        logTest('14. Finalize re-checks editable state fresh - locked between session creation and finalize is blocked', raceLockFinalizeRes.statusCode === 409 && raceLockFinalizeRes.body.code === 'DAMAGE_IMAGES_LOCKED');
+
+        const lockedRemovalParcelId = await createV2Parcel();
+        const lockedRemovalResult = await uploadAndFinalize(lockedRemovalParcelId);
+        await lockRequest(lockedRemovalParcelId);
+        const lockedRemovalRes = await callRemove(lockedRemovalParcelId, lockedRemovalResult.sessionId, customerEmail);
+        logTest('15. Removal blocked once a technician is assigned (DAMAGE_IMAGES_LOCKED)', lockedRemovalRes.statusCode === 409 && lockedRemovalRes.body.code === 'DAMAGE_IMAGES_LOCKED');
+
+        // ---- Input validation (16-20) ----
+        const validationParcelId = await createV2Parcel();
+        const badFileNameRes = await callCreateSession(validationParcelId, validUploadBody({ fileName: '../../etc/passwd' }), customerEmail);
+        logTest('16. Path-traversal filename rejected with INVALID_FILE_NAME', badFileNameRes.statusCode === 400 && badFileNameRes.body.code === 'INVALID_FILE_NAME');
+        const badMimeRes = await callCreateSession(validationParcelId, validUploadBody({ mimeType: 'image/gif' }), customerEmail);
+        logTest('17. Disallowed MIME type rejected with INVALID_DAMAGE_IMAGE_MIME', badMimeRes.statusCode === 400 && badMimeRes.body.code === 'INVALID_DAMAGE_IMAGE_MIME');
+        const oversizeRes = await callCreateSession(validationParcelId, validUploadBody({ size: 9 * 1024 * 1024 }), customerEmail);
+        logTest('18. Oversized declared size rejected with INVALID_DAMAGE_IMAGE_SIZE', oversizeRes.statusCode === 400 && oversizeRes.body.code === 'INVALID_DAMAGE_IMAGE_SIZE');
+        const zeroSizeRes = await callCreateSession(validationParcelId, validUploadBody({ size: 0 }), customerEmail);
+        logTest('19. Zero/negative declared size rejected with INVALID_DAMAGE_IMAGE_SIZE', zeroSizeRes.statusCode === 400 && zeroSizeRes.body.code === 'INVALID_DAMAGE_IMAGE_SIZE');
+        const extraFieldRes = await callCreateSession(validationParcelId, validUploadBody({ ownerEmail: 'attacker@test.local' }), customerEmail);
+        logTest('20. Unexpected extra field on session-creation body rejected with INVALID_UPLOAD_REQUEST', extraFieldRes.statusCode === 400 && extraFieldRes.body.code === 'INVALID_UPLOAD_REQUEST');
+
+        // ---- Server-owned key properties (21-22) ----
+        const keyCheckSessionRes = await callCreateSession(validationParcelId, validUploadBody(), customerEmail);
+        createdSessionIds.push(keyCheckSessionRes.body.uploadSessionId);
+        const keyCheckSessionDoc = await collections.damageUploadSessions.findOne({ _id: keyCheckSessionRes.body.uploadSessionId });
+        logTest(
+            '21. Server-generated storageKey contains no email and no original filename',
+            !keyCheckSessionDoc.storageKey.includes('@') && !keyCheckSessionDoc.storageKey.includes('damage.jpg') && keyCheckSessionDoc.storageKey.startsWith('repair-requests/')
+        );
+        const keyCheckSessionRes2 = await callCreateSession(validationParcelId, validUploadBody(), customerEmail);
+        createdSessionIds.push(keyCheckSessionRes2.body.uploadSessionId);
+        const keyCheckSessionDoc2 = await collections.damageUploadSessions.findOne({ _id: keyCheckSessionRes2.body.uploadSessionId });
+        logTest('22. Storage keys are unique across sessions for the same request', keyCheckSessionDoc.storageKey !== keyCheckSessionDoc2.storageKey);
+
+        // ---- Session/request/owner ties and lifecycle (23-26) ----
+        const crossReqParcelA = await createV2Parcel();
+        const crossReqParcelB = await createV2Parcel();
+        const crossReqSessionRes = await callCreateSession(crossReqParcelA, validUploadBody(), customerEmail);
+        createdSessionIds.push(crossReqSessionRes.body.uploadSessionId);
+        const crossReqSessionDoc = await collections.damageUploadSessions.findOne({ _id: crossReqSessionRes.body.uploadSessionId });
+        simulateUpload(crossReqSessionDoc.storageKey);
+        const crossReqFinalizeRes = await callFinalize(crossReqParcelB, { uploadSessionId: crossReqSessionRes.body.uploadSessionId }, customerEmail);
+        logTest('23. A session created for one request cannot be finalized against a different request (UPLOAD_SESSION_NOT_FOUND)', crossReqFinalizeRes.statusCode === 404 && crossReqFinalizeRes.body.code === 'UPLOAD_SESSION_NOT_FOUND');
+
+        const expiredParcelId = await createV2Parcel();
+        const expiredSessionRes = await callCreateSession(expiredParcelId, validUploadBody(), customerEmail);
+        createdSessionIds.push(expiredSessionRes.body.uploadSessionId);
+        const expiredSessionDoc = await collections.damageUploadSessions.findOne({ _id: expiredSessionRes.body.uploadSessionId });
+        simulateUpload(expiredSessionDoc.storageKey);
+        await collections.damageUploadSessions.updateOne({ _id: expiredSessionRes.body.uploadSessionId }, { $set: { expiresAt: new Date(Date.now() - 60000) } });
+        const expiredFinalizeRes = await callFinalize(expiredParcelId, { uploadSessionId: expiredSessionRes.body.uploadSessionId }, customerEmail);
+        logTest('24. Expired session cannot finalize (UPLOAD_SESSION_EXPIRED)', expiredFinalizeRes.statusCode === 409 && expiredFinalizeRes.body.code === 'UPLOAD_SESSION_EXPIRED');
+
+        const cancelledParcelId = await createV2Parcel();
+        const cancelledSessionRes = await callCreateSession(cancelledParcelId, validUploadBody(), customerEmail);
+        createdSessionIds.push(cancelledSessionRes.body.uploadSessionId);
+        const cancelledSessionDoc = await collections.damageUploadSessions.findOne({ _id: cancelledSessionRes.body.uploadSessionId });
+        simulateUpload(cancelledSessionDoc.storageKey);
+        await collections.damageUploadSessions.updateOne({ _id: cancelledSessionRes.body.uploadSessionId }, { $set: { status: 'cancelled' } });
+        const cancelledFinalizeRes = await callFinalize(cancelledParcelId, { uploadSessionId: cancelledSessionRes.body.uploadSessionId }, customerEmail);
+        logTest('25. Cancelled session cannot finalize (UPLOAD_SESSION_CONFLICT)', cancelledFinalizeRes.statusCode === 409 && cancelledFinalizeRes.body.code === 'UPLOAD_SESSION_CONFLICT');
+
+        const nonexistentSessionParcelId = await createV2Parcel();
+        const nonexistentFinalizeRes = await callFinalize(nonexistentSessionParcelId, { uploadSessionId: 'this-session-id-does-not-exist' }, customerEmail);
+        logTest('26. Nonexistent uploadSessionId rejected with UPLOAD_SESSION_NOT_FOUND', nonexistentFinalizeRes.statusCode === 404 && nonexistentFinalizeRes.body.code === 'UPLOAD_SESSION_NOT_FOUND');
+
+        // ---- Finalization - actual object verification (27-30) ----
+        const missingObjParcelId = await createV2Parcel();
+        const missingObjResult = await uploadAndFinalize(missingObjParcelId, customerEmail, { skipUpload: true });
+        logTest('27. Missing storage object rejected with STORAGE_OBJECT_NOT_FOUND', missingObjResult.finalizeRes.statusCode === 404 && missingObjResult.finalizeRes.body.code === 'STORAGE_OBJECT_NOT_FOUND');
+        const missingObjParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(missingObjParcelId) });
+        logTest('27b. Failed verification leaves the parcel with zero attached images', (missingObjParcelAfter.damage.images || []).length === 0);
+
+        const badActualMimeParcelId = await createV2Parcel();
+        const badActualMimeResult = await uploadAndFinalize(badActualMimeParcelId, customerEmail, { actualMimeType: 'image/gif' });
+        logTest('28. Actual stored object with a disallowed MIME type is rejected even though declared MIME was valid', badActualMimeResult.finalizeRes.statusCode === 409 && badActualMimeResult.finalizeRes.body.code === 'INVALID_DAMAGE_IMAGE_MIME');
+
+        const badActualSizeParcelId = await createV2Parcel();
+        const badActualSizeResult = await uploadAndFinalize(badActualSizeParcelId, customerEmail, { actualSize: 9 * 1024 * 1024 });
+        logTest('29. Actual stored object exceeding the size cap is rejected even though declared size was valid', badActualSizeResult.finalizeRes.statusCode === 409 && badActualSizeResult.finalizeRes.body.code === 'INVALID_DAMAGE_IMAGE_SIZE');
+
+        const zeroActualSizeParcelId = await createV2Parcel();
+        const zeroActualSizeResult = await uploadAndFinalize(zeroActualSizeParcelId, customerEmail, { actualSize: 0 });
+        logTest('30. Actual stored object with zero size is rejected', zeroActualSizeResult.finalizeRes.statusCode === 409 && zeroActualSizeResult.finalizeRes.body.code === 'INVALID_DAMAGE_IMAGE_SIZE');
+
+        // ---- Canonical metadata / server authority (31-36) ----
+        const authorityParcelId = await createV2Parcel();
+        const authorityResult = await uploadAndFinalize(authorityParcelId);
+        const authorityParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(authorityParcelId) });
+        const authorityImage = authorityParcelAfter.damage.images[0];
+        const uploadedAtMs = new Date(authorityImage.uploadedAt).getTime();
+        logTest('31. uploadedAt is server-owned and close to the actual finalize time', Math.abs(Date.now() - uploadedAtMs) < 60000);
+        logTest('32. uploadedByRole is persisted as exactly "user"', authorityImage.uploadedByRole === 'user');
+        logTest('33. width/height are nullable and null when no dimension channel exists in this unit', authorityImage.width === null && authorityImage.height === null);
+        logTest('34. Persisted storageKey matches the server-generated session storageKey, never client input', authorityImage.storageKey === authorityResult.sessionDoc.storageKey);
+        logTest(
+            '35. Persisted url is the canonical (non-public) GCS identifier, not the fake signed upload URL',
+            authorityImage.url === `https://storage.googleapis.com/fake-test-bucket/${authorityResult.sessionDoc.storageKey}` && !authorityImage.url.includes('action=write')
+        );
+        logTest(
+            '36. Finalize response is privacy-safe (no owner email, no storageKey, no url)',
+            JSON.stringify(authorityResult.finalizeRes.body.image).includes(customerEmail) === false &&
+            authorityResult.finalizeRes.body.image.storageKey === undefined && authorityResult.finalizeRes.body.image.url === undefined
+        );
+
+        // ---- Image limit and concurrency (37-42) ----
+        const limitParcelId = await createV2Parcel();
+        const limit1 = await uploadAndFinalize(limitParcelId);
+        logTest('37. Zero-to-one finalization succeeds', limit1.finalizeRes.statusCode === 200);
+        const limit2 = await uploadAndFinalize(limitParcelId);
+        const limit3 = await uploadAndFinalize(limitParcelId);
+        logTest('38. Two-to-three finalization succeeds (filling to the 3-image cap)', limit2.finalizeRes.statusCode === 200 && limit3.finalizeRes.statusCode === 200);
+        // The image-count guard fires as early as session creation (Phase
+        // D validates "current image count below 3" before a session is
+        // even issued) - with the request already holding 3 images, the
+        // 4th attempt never reaches finalize at all.
+        const limit4 = await uploadAndFinalize(limitParcelId);
+        logTest('39. A 4th upload session is refused once the request already holds 3 images (DAMAGE_IMAGE_LIMIT_REACHED)', limit4.sessionRes.statusCode === 409 && limit4.sessionRes.body.code === 'DAMAGE_IMAGE_LIMIT_REACHED' && limit4.finalizeRes === null);
+        const limitParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(limitParcelId) });
+        logTest('39b. Request never stores more than 3 images', limitParcelAfter.damage.images.length === 3);
+
+        const raceParcelId = await createV2Parcel();
+        await uploadAndFinalize(raceParcelId);
+        await uploadAndFinalize(raceParcelId);
+        const raceSessionA = await callCreateSession(raceParcelId, validUploadBody(), customerEmail);
+        const raceSessionB = await callCreateSession(raceParcelId, validUploadBody(), customerEmail);
+        createdSessionIds.push(raceSessionA.body.uploadSessionId, raceSessionB.body.uploadSessionId);
+        const raceDocA = await collections.damageUploadSessions.findOne({ _id: raceSessionA.body.uploadSessionId });
+        const raceDocB = await collections.damageUploadSessions.findOne({ _id: raceSessionB.body.uploadSessionId });
+        simulateUpload(raceDocA.storageKey);
+        simulateUpload(raceDocB.storageKey);
+        const [raceOutcomeA, raceOutcomeB] = await Promise.all([
+            callFinalize(raceParcelId, { uploadSessionId: raceSessionA.body.uploadSessionId }, customerEmail),
+            callFinalize(raceParcelId, { uploadSessionId: raceSessionB.body.uploadSessionId }, customerEmail)
+        ]);
+        const raceSuccesses = [raceOutcomeA, raceOutcomeB].filter((r) => r.statusCode === 200).length;
+        const raceRejections = [raceOutcomeA, raceOutcomeB].filter((r) => r.statusCode === 409 && r.body.code === 'DAMAGE_IMAGE_LIMIT_REACHED').length;
+        logTest('40. Two concurrent finalizations at count 2 produce exactly one success and one controlled rejection', raceSuccesses === 1 && raceRejections === 1);
+        const raceParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(raceParcelId) });
+        logTest('41. Final image count never exceeds 3 after the race', raceParcelAfter.damage.images.length === 3);
+        const raceStorageKeys = raceParcelAfter.damage.images.map((img) => img.storageKey);
+        logTest('42. No duplicate metadata entries after the race (all storageKeys unique)', new Set(raceStorageKeys).size === raceStorageKeys.length);
+
+        // ---- Duplicate / replay protection (43-46) ----
+        const idempotentParcelId = await createV2Parcel();
+        const idempotentResult = await uploadAndFinalize(idempotentParcelId);
+        const idempotentReplayRes = await callFinalize(idempotentParcelId, { uploadSessionId: idempotentResult.sessionId }, customerEmail);
+        logTest(
+            '43. Duplicate finalization of the same session is idempotent (200, same image, no duplicate entry)',
+            idempotentReplayRes.statusCode === 200 && idempotentReplayRes.body.image.imageId === idempotentResult.finalizeRes.body.image.imageId
+        );
+        const idempotentParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(idempotentParcelId) });
+        logTest('43b. Idempotent replay never creates a second damage.images entry', idempotentParcelAfter.damage.images.length === 1);
+
+        // Attempts to construct a second session pointed at an
+        // already-attached storageKey - in normal operation this can never
+        // happen (storage keys are server-generated, crypto-random, unique
+        // per session), so the only way to even attempt it is a raw insert.
+        // The damageUploadSessions_storageKey_unique index (config/database.js,
+        // Phase 6.4 Unit 1) rejects it at the database level before the
+        // application-level DAMAGE_IMAGE_ALREADY_ATTACHED guard in
+        // controllers/damageUploadController.js would ever even run -
+        // defense-in-depth beyond the application check.
+        const duplicateKeyParcelId = await createV2Parcel();
+        const duplicateKeyBase = await uploadAndFinalize(duplicateKeyParcelId);
+        const duplicateKeySessionId = require('crypto').randomUUID();
+        let duplicateKeyInsertError = null;
+        try {
+            await collections.damageUploadSessions.insertOne({
+                _id: duplicateKeySessionId, requestId: duplicateKeyParcelId, ownerEmail: customerEmail,
+                storageKey: duplicateKeyBase.sessionDoc.storageKey, mimeType: 'image/jpeg', declaredSize: 1024 * 500,
+                status: 'pending', expiresAt: new Date(Date.now() + 20 * 60 * 1000), createdAt: new Date(), finalizedAt: null, cancelledAt: null
+            });
+        } catch (error) {
+            duplicateKeyInsertError = error;
+        }
+        logTest('44. Database-level uniqueness prevents two sessions from ever sharing a storageKey (defense-in-depth beyond the application guard)', !!duplicateKeyInsertError && duplicateKeyInsertError.code === 11000);
+
+        const postRemovalParcelId = await createV2Parcel();
+        const postRemovalResult = await uploadAndFinalize(postRemovalParcelId);
+        await callRemove(postRemovalParcelId, postRemovalResult.sessionId, customerEmail);
+        const postRemovalReplayRes = await callFinalize(postRemovalParcelId, { uploadSessionId: postRemovalResult.sessionId }, customerEmail);
+        logTest('45. Re-finalizing a session whose image was since removed fails safely (never silently re-attaches)', postRemovalReplayRes.statusCode === 409 && postRemovalReplayRes.body.code === 'UPLOAD_SESSION_ALREADY_FINALIZED');
+
+        const statusCheckSessionDoc = await collections.damageUploadSessions.findOne({ _id: idempotentResult.sessionId });
+        logTest('46. Finalized session document has status "finalized" and a finalizedAt timestamp', statusCheckSessionDoc.status === 'finalized' && statusCheckSessionDoc.finalizedAt instanceof Date);
+
+        // ---- Removal (47-53) ----
+        const removalParcelId = await createV2Parcel();
+        const removalResult = await uploadAndFinalize(removalParcelId);
+        const removalRes = await callRemove(removalParcelId, removalResult.sessionId, customerEmail);
+        logTest('47. Owner removes an editable, finalized image successfully', removalRes.statusCode === 200 && removalRes.body.removedImageId === removalResult.sessionId);
+        const removalParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(removalParcelId) });
+        logTest('47b. Removed image is gone from parcel.damage.images and the fake storage object is deleted', removalParcelAfter.damage.images.length === 0 && !fakeBucket._objects.has(removalResult.sessionDoc.storageKey));
+
+        const nonOwnerRemovalParcelId = await createV2Parcel();
+        const nonOwnerRemovalResult = await uploadAndFinalize(nonOwnerRemovalParcelId);
+        const nonOwnerRemovalRes = await callRemove(nonOwnerRemovalParcelId, nonOwnerRemovalResult.sessionId, otherCustomerEmail);
+        // The parcel-level ownership guard in _loadOwnedV2Parcel fires
+        // before the image-specific lookup, so a non-owner receives the
+        // same REQUEST_NOT_FOUND every other non-owner endpoint call
+        // produces (test 6) - never a code that would even confirm the
+        // request has damage images at all.
+        logTest('48. Non-owner removal rejected with REQUEST_NOT_FOUND before any image-specific check (no existence leak)', nonOwnerRemovalRes.statusCode === 404 && nonOwnerRemovalRes.body.code === 'REQUEST_NOT_FOUND');
+
+        // Test 15 above already covers the locked/assigned removal case.
+        logTest('49. Removal blocked once a technician is assigned (see test 15, DAMAGE_IMAGES_LOCKED)', lockedRemovalRes.statusCode === 409 && lockedRemovalRes.body.code === 'DAMAGE_IMAGES_LOCKED');
+
+        const missingImageRemovalParcelId = await createV2Parcel();
+        const missingImageRemovalRes = await callRemove(missingImageRemovalParcelId, 'this-image-id-does-not-exist', customerEmail);
+        logTest('50. Missing/nonexistent imageId returns controlled DAMAGE_IMAGE_NOT_FOUND', missingImageRemovalRes.statusCode === 404 && missingImageRemovalRes.body.code === 'DAMAGE_IMAGE_NOT_FOUND');
+
+        const repeatedRemovalRes = await callRemove(removalParcelId, removalResult.sessionId, customerEmail);
+        logTest('51. Repeated removal of an already-removed image is a safe idempotent success', repeatedRemovalRes.statusCode === 200 && repeatedRemovalRes.body.removedImageId === removalResult.sessionId);
+
+        const multiImageParcelId = await createV2Parcel();
+        const multiImage1 = await uploadAndFinalize(multiImageParcelId);
+        const multiImage2 = await uploadAndFinalize(multiImageParcelId);
+        await callRemove(multiImageParcelId, multiImage1.sessionId, customerEmail);
+        const multiImageParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(multiImageParcelId) });
+        logTest(
+            '52. Removing one image leaves the other image on the same request untouched',
+            multiImageParcelAfter.damage.images.length === 1 && multiImageParcelAfter.damage.images[0].storageKey === multiImage2.sessionDoc.storageKey
+        );
+
+        const orphanRemovalParcelId = await createV2Parcel();
+        const orphanRemovalResult = await uploadAndFinalize(orphanRemovalParcelId);
+        // Object already gone from storage out-of-band (e.g. a prior manual
+        // cleanup) before the removal call - deleteObject's "already
+        // missing" path must not surface as a failure or a misleading
+        // response.
+        fakeBucket._objects.delete(orphanRemovalResult.sessionDoc.storageKey);
+        const orphanRemovalRes = await callRemove(orphanRemovalParcelId, orphanRemovalResult.sessionId, customerEmail);
+        logTest('53. Removal still reports success safely when the storage object was already missing', orphanRemovalRes.statusCode === 200);
+
+        // ---- Atomicity (54-57) ----
+        const atomicMissingParcelId = await createV2Parcel();
+        const atomicMissingResult = await uploadAndFinalize(atomicMissingParcelId, customerEmail, { skipUpload: true });
+        const atomicMissingSessionAfter = await collections.damageUploadSessions.findOne({ _id: atomicMissingResult.sessionId });
+        logTest('54. Object-verification failure (missing) leaves the session status unchanged (still pending)', atomicMissingSessionAfter.status === 'pending');
+
+        const atomicMimeParcelId = await createV2Parcel();
+        const atomicMimeResult = await uploadAndFinalize(atomicMimeParcelId, customerEmail, { actualMimeType: 'image/gif' });
+        const atomicMimeParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(atomicMimeParcelId) });
+        const atomicMimeSessionAfter = await collections.damageUploadSessions.findOne({ _id: atomicMimeResult.sessionId });
+        logTest('55. Object-verification failure (disallowed MIME) leaves the parcel and session unchanged', atomicMimeParcelAfter.damage.images.length === 0 && atomicMimeSessionAfter.status === 'pending');
+
+        const losingSessionId = raceOutcomeA.statusCode === 409 ? raceSessionA.body.uploadSessionId : raceSessionB.body.uploadSessionId;
+        const losingSessionDoc = await collections.damageUploadSessions.findOne({ _id: losingSessionId });
+        logTest('56. A losing (limit-reached) concurrent finalize never marks its own session finalized', losingSessionDoc.status !== 'finalized');
+
+        const pricingSnapshotParcelId = await createV2Parcel();
+        const pricingParcelBefore = await collections.parcels.findOne({ _id: new ObjectId(pricingSnapshotParcelId) });
+        await uploadAndFinalize(pricingSnapshotParcelId);
+        const pricingParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(pricingSnapshotParcelId) });
+        logTest(
+            '57. No pricing/service/assignment fields are ever touched by a damage-upload operation',
+            pricingParcelBefore.cost === pricingParcelAfter.cost && pricingParcelBefore.deliveryStatus === pricingParcelAfter.deliveryStatus &&
+            pricingParcelBefore.riderId === pricingParcelAfter.riderId &&
+            JSON.stringify(pricingParcelBefore.service) === JSON.stringify(pricingParcelAfter.service)
+        );
+
+        // ---- Regression / isolation (58-62) ----
+        const zeroImageParcelId = await createV2Parcel(customerEmail, { damage: { description: 'Minor cosmetic scratch on the back panel.', images: [] } });
+        logTest('58. V2 request creation still permits zero images (STAGED_MIN_DAMAGE_IMAGES unchanged)', !!zeroImageParcelId && STAGED_MIN_DAMAGE_IMAGES === 0);
+
+        const legacyStyleEntry = {
+            url: 'https://storage.googleapis.com/example-bucket/repair-requests/x/damage/y.jpg',
+            storageKey: 'repair-requests/x/damage/y.jpg', mimeType: 'image/jpeg', size: 1024,
+            width: 800, height: 600, uploadedAt: new Date(), uploadedByRole: 'user'
+        };
+        logTest('59. Damage-image validator still accepts a fully-specified entry with explicit width/height (regression)', validateDamageImageEntry(legacyStyleEntry).valid === true);
+        const nullDimensionEntry = { ...legacyStyleEntry, width: undefined, height: undefined };
+        delete nullDimensionEntry.width;
+        delete nullDimensionEntry.height;
+        logTest('60. Damage-image validator now also accepts an entry with width/height entirely omitted', validateDamageImageEntry(nullDimensionEntry).valid === true);
+        logTest('60b. validateDamageImages accepts a single omitted-dimension entry within the array policy', validateDamageImages([nullDimensionEntry], { minImages: STAGED_MIN_DAMAGE_IMAGES }).valid === true);
+
+        const canonicalDefCount = await collections.serviceDefinitions.countDocuments({ label: { $not: { $regex: '^TEST-' } } });
+        logTest('61. Canonical (non-TEST) service-definition count remains 16', canonicalDefCount === 16);
+
+        // ---- Route wiring (structural, since these tests use direct controller invocation) (62-63) ----
+        const routesSource = require('fs').readFileSync(require('path').join(__dirname, 'routes', 'damageUploads.js'), 'utf8');
+        // Comments explaining the deliberate absence of verifyAdmin/verifyRider
+        // legitimately mention those identifiers in prose - strip //-style
+        // comments first so test 63 checks actual usage, not word mentions.
+        const routesSourceCode = routesSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
+        logTest('62. Damage-upload routes are wired with verifyFBToken and ensureDatabaseReady', /verifyFBToken/.test(routesSourceCode) && /ensureDatabaseReady/.test(routesSourceCode));
+        logTest('63. No admin-only bypass exists on damage-upload routes (ownership is the sole authorization boundary, by design)', !/verifyAdmin/.test(routesSourceCode) && !/verifyRider/.test(routesSourceCode));
+
+    } finally {
+        if (createdSessionIds.length) {
+            await collections.damageUploadSessions.deleteMany({ _id: { $in: createdSessionIds } });
+        }
+        if (createdParcelIds.length) {
+            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
+        }
+        if (createdServiceDefinitionIds.length) {
+            await collections.serviceDefinitions.deleteMany({ _id: { $in: createdServiceDefinitionIds } });
+        }
+        if (createdUserEmails.length) {
+            await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        }
+
+        const leftoverParcels = customerEmail ? await collections.parcels.countDocuments({ senderEmail: { $in: [customerEmail, otherCustomerEmail] } }) : 0;
+        const leftoverDefs = await collections.serviceDefinitions.countDocuments({ label: { $regex: '^TEST-DAMAGE-UPLOAD-' } });
+        const leftoverUsers = await collections.users.countDocuments({ email: { $regex: '^damage-upload-' } });
+        const leftoverSessions = customerEmail ? await collections.damageUploadSessions.countDocuments({ ownerEmail: { $in: [customerEmail, otherCustomerEmail] } }) : 0;
+        logTest('64. No fixture leakage after tests (parcels, service definitions, users, upload sessions)', leftoverParcels === 0 && leftoverDefs === 0 && leftoverUsers === 0 && leftoverSessions === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -10021,6 +10609,7 @@ async function runAllTests() {
     await testRepairRequestV2();
     await testEligibleTechnicianAPI();
     await testAssignmentExpertiseRevalidation();
+    await testDamageUploadFoundation();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

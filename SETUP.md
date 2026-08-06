@@ -41,6 +41,13 @@ MONGO_URI=your_mongodb_connection_string
 # This should be a base64 encoded JSON service account key
 FB_SERVICE_KEY=your_base64_encoded_firebase_service_account_key
 
+# Firebase Storage bucket (optional - only required for the damage-evidence
+# upload feature, Phase 6.4). Just the bucket name, e.g.
+# your-project-id.appspot.com - not a URL. Without this set, damage-upload
+# endpoints fail safely with a controlled 503 STORAGE_UNAVAILABLE response;
+# every other endpoint is unaffected.
+FIREBASE_STORAGE_BUCKET=your_project_id.appspot.com
+
 # Stripe Payment
 STRIPE_SECRET=your_stripe_secret_key
 
@@ -75,6 +82,7 @@ SITE_DOMAIN=http://localhost:5173
 | Name | Purpose |
 |---|---|
 | `FB_SERVICE_KEY` | Base64-encoded Firebase Admin service account key, used to verify Firebase ID tokens. |
+| `FIREBASE_STORAGE_BUCKET` | Optional. Firebase Storage bucket name (not a URL) backing the damage-evidence upload endpoints (`/parcels/:id/damage-images/*`). Every other endpoint works without it; damage-upload endpoints return a controlled `STORAGE_UNAVAILABLE` (503) if unset. |
 | `MONGO_URI` | MongoDB connection string. |
 | `STRIPE_SECRET` | Stripe secret key, used to create checkout sessions. |
 | `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret, used to verify `POST /stripe-webhook` requests. The local Stripe CLI and a deployed Stripe Dashboard webhook endpoint each have their own distinct secret - use whichever one matches the endpoint actually receiving events in this environment, and never mix test-mode and live-mode secrets. |
@@ -127,11 +135,43 @@ The server provides various endpoints for:
 - Payment processing (`/payments/*`)
 - Tracking (`/trackings/*`)
 - Service definitions and pricing, read-only (`/service-definitions/*`)
+- Damage-evidence upload for v2 repair requests (`/parcels/:id/damage-images/*`)
 
 Most endpoints require Firebase authentication via the `Authorization` header.
 Exceptions: the root health check, the Stripe webhook (`POST /stripe-webhook`,
 authenticated by its Stripe signature instead), and the public repair-tracking
 endpoint below.
+
+## Damage-Evidence Upload (Phase 6.4)
+
+Damage-evidence images for v2 repair requests use a server-authorized
+direct-to-Firebase-Storage upload, not a multipart upload through this
+server (Express has no upload middleware installed, and Vercel's
+serverless request-body limits make routing multi-megabyte image bytes
+through the API impractical). The flow is:
+
+1. `POST /parcels/:id/damage-images/upload-session` - the owner requests a
+   session; the server validates ownership/state/MIME/size and returns a
+   short-lived Firebase Storage v4 signed upload URL. No image bytes touch
+   this server.
+2. The client `PUT`s the file bytes directly to that signed URL (not yet
+   implemented on the client side - out of scope for this unit).
+3. `POST /parcels/:id/damage-images/finalize` - the server re-verifies the
+   *actual* stored object (content type, size) directly against Firebase
+   Storage, never trusting client-declared metadata, then atomically
+   attaches the image to the request (MongoDB transaction, max 3 images,
+   race-safe).
+
+No Firebase Storage Security Rules deployment is required for this flow:
+signed URLs are pre-authorized by the Admin SDK and bypass Storage Rules
+entirely (rules only govern direct Firebase Client SDK access, which this
+feature does not use). Objects are never made publicly readable; the
+persisted `damage.images[].url` is a stable, non-public identifier, and
+actual byte access requires a fresh short-lived signed read URL (not yet
+exposed by any endpoint in this unit).
+
+`scripts/audit-damage-uploads.js` provides a read-only report of
+expired/abandoned upload sessions - it never deletes anything.
 
 ### Stripe webhook configuration
 
