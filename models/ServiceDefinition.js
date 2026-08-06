@@ -218,9 +218,13 @@ class ServiceDefinitionModel {
         return await this.collection.find(query, { projection: SAFE_PROJECTION }).toArray();
     }
 
-    async findById(id) {
+    async findById(id, options = {}) {
         if (!ObjectId.isValid(id)) return null;
-        return await this.collection.findOne({ _id: new ObjectId(id) }, { projection: SAFE_PROJECTION });
+        const findOptions = { projection: SAFE_PROJECTION };
+        if (options.session) {
+            findOptions.session = options.session;
+        }
+        return await this.collection.findOne({ _id: new ObjectId(id) }, findOptions);
     }
 }
 

@@ -10,7 +10,7 @@ const { createCheckoutSessionManager } = require('../services/checkoutSessionMan
 const { getCancellationEligibility } = require('../services/cancellationPolicy');
 const { canAssignRequest } = require('../services/assignmentEligibility');
 const { escapeRegex, sanitizeSearchText } = require('../utils/searchSanitize');
-const { CURRENT_REPAIR_REQUEST_SCHEMA_VERSION, validateRepairRequestSchemaVersion } = require('../utils/repairRequestSchema');
+const { CURRENT_REPAIR_REQUEST_SCHEMA_VERSION, validateRepairRequestSchemaVersion, isV2RepairRequest } = require('../utils/repairRequestSchema');
 const {
     STAGED_MIN_DAMAGE_IMAGES, validateProductInput, buildProductSnapshot, validateServiceDefinitionMatch,
     validateDamageDescription, validateDamageImages, buildDamageSnapshot, validateServiceLocation,
@@ -940,6 +940,73 @@ class ParcelController {
                         return;
                     }
 
+                    // v2 hard-eligibility revalidation (Phase 6.3 Unit 6).
+                    // Legacy requests (no schemaVersion or schemaVersion 1)
+                    // never reach this block, so their assignment behavior
+                    // is byte-for-byte unchanged. The Unit 5 recommendation
+                    // endpoint is advisory only and is never trusted here -
+                    // the service definition is re-read inside this same
+                    // transaction (so a definition deactivated concurrently
+                    // is never missed), and reuses
+                    // services/technicianEligibilityService.js's own
+                    // evaluateTechnician rather than re-deriving the rules.
+                    // Service area is intentionally not part of this
+                    // evaluation - it is ranking-only and must never block
+                    // assignment. Skipped for the redundant
+                    // reassign-to-same-technician case above so that its
+                    // existing, more specific REQUEST_ALREADY_ASSIGNED
+                    // outcome (via the parcel update guard below) is never
+                    // masked by a new eligibility rejection.
+                    let v2ExpertiseGuard = null;
+                    if (!isAlreadyThisTechnician && isV2RepairRequest(parcel)) {
+                        const requestTaxonomy = deriveRequestTaxonomy(parcel);
+                        if (!requestTaxonomy.valid) {
+                            throw Object.assign(new Error(requestTaxonomy.message), { code: requestTaxonomy.code, httpStatus: 409 });
+                        }
+
+                        const serviceDefinition = await this.ServiceDefinition.findById(requestTaxonomy.definitionId, { session: mongoSession });
+                        const definitionValidation = validateCurrentServiceDefinition(serviceDefinition, requestTaxonomy);
+                        if (!definitionValidation.valid) {
+                            throw Object.assign(new Error(definitionValidation.message), { code: definitionValidation.code, httpStatus: 409 });
+                        }
+
+                        const riderRole = await this.User.findRoleByEmail(technician.email, { session: mongoSession });
+
+                        // No other active assignment for this technician was
+                        // already independently confirmed above - passing an
+                        // empty set here just lets evaluateTechnician's own
+                        // TECHNICIAN_ALREADY_ASSIGNED check be a no-op rather
+                        // than re-querying the same fact a second time.
+                        const evaluation = evaluateTechnician(technician, {
+                            requestTaxonomy,
+                            serviceDefinition,
+                            activeRiderIds: new Set(),
+                            riderRole
+                        });
+
+                        if (!evaluation.eligible) {
+                            throw Object.assign(
+                                new Error('technician does not meet current service requirements'),
+                                { code: 'TECHNICIAN_NOT_ELIGIBLE', httpStatus: 409, reasonCodes: evaluation.reasonCodes }
+                            );
+                        }
+
+                        // The exact expertise array just validated becomes
+                        // part of the rider claim's own guard condition below
+                        // (mirrors models/Rider.js#replaceExpertise's "guard
+                        // on every field read, not just the field being
+                        // changed" pattern) - closes the race where a
+                        // concurrent expertise change lands between this
+                        // evaluation and the write, which would otherwise let
+                        // an assignment commit against expertise that was
+                        // never actually validated. `technician` itself was
+                        // captured once, before withTransaction's retry
+                        // boundary (see Phase 6.3 Unit 3), so this value
+                        // stays the exact snapshot that was just evaluated
+                        // even if the transaction retries.
+                        v2ExpertiseGuard = technician.expertise;
+                    }
+
                     // Guarded atomically against a concurrent customer
                     // cancellation or a competing assignment - the query
                     // condition itself is the race-resolver, not a
@@ -979,8 +1046,12 @@ class ParcelController {
                     // transactions match+modify this document while
                     // workStatus is still 'available', so a losing
                     // concurrent request always sees matchedCount 0 here.
+                    const riderUpdateFilter = { _id: technician._id, status: 'approved', workStatus: 'available' };
+                    if (v2ExpertiseGuard !== null) {
+                        riderUpdateFilter.expertise = v2ExpertiseGuard;
+                    }
                     const riderUpdateResult = await this.collections.riders.updateOne(
-                        { _id: technician._id, status: 'approved', workStatus: 'available' },
+                        riderUpdateFilter,
                         { $set: { workStatus: 'in_delivery' } },
                         { session: mongoSession }
                     );
@@ -1071,6 +1142,21 @@ class ParcelController {
                 // transaction above has already rolled back the parcel
                 // claim, so nothing partial is left behind.
                 return res.status(409).send({ message: 'technician is no longer available for assignment', code: 'ASSIGNMENT_CONFLICT' });
+            }
+            if (error.httpStatus) {
+                // v2 eligibility-revalidation rejections (Phase 6.3 Unit 6) -
+                // structured the same way as every other controlled
+                // rejection above, distinguished only by carrying an
+                // explicit status so this one handler covers every
+                // eligibility-derived code (REQUEST_TAXONOMY_INCOMPLETE,
+                // SERVICE_DEFINITION_NOT_FOUND, SERVICE_NOT_ACTIVE,
+                // REQUEST_SERVICE_MISMATCH, TECHNICIAN_NOT_ELIGIBLE) without
+                // one branch per code.
+                const body = { message: error.message, code: error.code };
+                if (error.reasonCodes) {
+                    body.reasonCodes = error.reasonCodes;
+                }
+                return res.status(error.httpStatus).send(body);
             }
             console.error('Assignment transaction aborted:', error.message);
             res.status(500).send({ message: 'Error assigning technician to repair request', code: 'ASSIGNMENT_FAILED' });

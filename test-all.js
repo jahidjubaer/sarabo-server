@@ -8740,17 +8740,25 @@ async function testRepairRequestV2() {
         );
 
         const raceTechEmail = `test-request-v2-tech-${runId}@test.local`;
-        const raceTechDoc = { name: `TEST-REQUEST-V2-TECH-${runId}`, email: raceTechEmail, status: 'approved', workStatus: 'available', createdAt: new Date() };
+        // Since Phase 6.3 Unit 6, assignRiderToParcel revalidates v2
+        // eligibility - this fixture needs a complete profile, a linked
+        // 'rider' account, and expertise matching activeDef (smartphone/
+        // charging-port, requiredExpertiseLevel 'intermediate') to still be
+        // assignable, exactly like any other genuine v2-eligible technician.
+        const raceTechDoc = {
+            name: `TEST-REQUEST-V2-TECH-${runId}`, email: raceTechEmail, region: 'Dhaka', district: 'Mirpur',
+            status: 'approved', workStatus: 'available',
+            expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['charging-port'], level: 'advanced', experienceYears: 5 }],
+            createdAt: new Date()
+        };
         const raceTechInsert = await collections.riders.insertOne(raceTechDoc);
         createdRiderIds.push(raceTechInsert.insertedId.toString());
+        await collections.users.insertOne({ email: raceTechEmail, role: 'rider', createdAt: new Date() });
+        createdUserEmails.push(raceTechEmail);
         const assignV2Req = { params: { id: v2Res.body.insertedId.toString() }, body: { riderId: raceTechInsert.insertedId.toString() }, decoded_email: `test-request-v2-admin-${runId}@test.local` };
-        // assignRiderToParcel notifies the request owner - our synthetic
-        // customerEmail has no real users-collection account, matching the
-        // established "best-effort, never fails creation/assignment"
-        // notification convention already used elsewhere in this file.
         const assignV2Res = fakeRes();
         await parcelController.assignRiderToParcel(assignV2Req, assignV2Res);
-        logTest('57. V2 request remains assignable using existing (non-expertise-aware) assignment logic', assignV2Res.statusCode === 200);
+        logTest('57. V2 request remains assignable through the (now expertise-aware, Phase 6.3 Unit 6) assignment path', assignV2Res.statusCode === 200);
 
         // ================= Payment guard (59-60) =================
         const v2PaymentRes = await callCreateCheckoutSession(v2Res.body.insertedId.toString(), customerEmail);
@@ -9345,6 +9353,464 @@ async function testEligibleTechnicianAPI() {
     console.log('');
 }
 
+// Phase 6.3 Unit 6 - Assignment-Time Expertise Revalidation. Exercises the
+// modified assignRiderToParcel transaction directly (the real controller
+// method, not a re-implementation) against a real local dev database,
+// mirroring testEligibleTechnicianAPI's self-contained synthetic-fixture
+// pattern so this section never depends on real seeded accounts or on
+// fixtures left behind by any other section.
+async function testAssignmentExpertiseRevalidation() {
+    console.log('33. Testing Assignment-Time Expertise Revalidation (Phase 6.3 Unit 6)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+
+    const runId = Date.now();
+    const createdParcelIds = [];
+    const createdServiceDefinitionIds = [];
+    const createdRiderIds = [];
+    const createdUserEmails = [];
+    let customerEmail = null;
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const parcelController = controllers.parcel;
+        const riderController = controllers.rider;
+
+        async function createTestServiceDefinition(pair, overrides = {}) {
+            const now = new Date();
+            const doc = {
+                productCategorySlug: pair.productCategorySlug, repairCategorySlug: pair.repairCategorySlug,
+                label: `TEST-ASSIGNEXPERT-SERVICE-${pair.repairCategorySlug}-${runId}`, description: 'Synthetic service definition for assignment-expertise-revalidation testing.',
+                isActive: true,
+                pricingRule: { currency: 'usd', baseMin: 25, baseMax: 75, inspectionFee: 10, version: 1 },
+                requiredExpertiseLevel: 'intermediate', estimatedDurationMinutes: 45,
+                inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true },
+                createdAt: now, updatedAt: now,
+                ...overrides
+            };
+            const result = await collections.serviceDefinitions.insertOne(doc);
+            createdServiceDefinitionIds.push(result.insertedId);
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        async function createTestUser(email, role) {
+            createdUserEmails.push(email);
+            await collections.users.insertOne({ email, role, createdAt: new Date() });
+        }
+
+        // linkedRole defaults to 'rider' - a real technician always has a
+        // matching users-collection account, and evaluateTechnician's own
+        // TECHNICIAN_ROLE_INCONSISTENT check independently requires it, so
+        // every fixture meant to be genuinely eligible needs one. Pass null
+        // to deliberately omit the linked account, or an explicit different
+        // role to construct a role-mismatch fixture.
+        async function createTestRider(marker, overrides = {}, linkedRole = 'rider') {
+            const doc = {
+                name: `TEST-ASSIGNEXPERT-${marker}`, email: `assignexpert-${marker.toLowerCase()}-${runId}@test.local`,
+                region: 'Dhaka', district: 'Mirpur', status: 'approved', workStatus: 'available',
+                expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'advanced', experienceYears: 5 }],
+                createdAt: new Date(),
+                ...overrides
+            };
+            const result = await collections.riders.insertOne(doc);
+            createdRiderIds.push(result.insertedId.toString());
+            if (linkedRole !== null) {
+                await createTestUser(doc.email, linkedRole);
+            }
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        function callCreateParcel(body, decoded_email) {
+            const req = { body, decoded_email };
+            const res = fakeRes();
+            return parcelController.createParcel(req, res).then(() => res);
+        }
+
+        function callAssign(parcelId, riderId, decoded_email) {
+            const req = { params: { id: parcelId }, body: { riderId }, decoded_email };
+            const res = fakeRes();
+            return parcelController.assignRiderToParcel(req, res).then(() => res);
+        }
+
+        function callUpdateExpertise(riderId, expertise, decoded_email) {
+            const req = { params: { id: riderId }, body: { expertise }, decoded_email };
+            const res = fakeRes();
+            return riderController.updateTechnicianExpertise(req, res).then(() => res);
+        }
+
+        customerEmail = `assignexpert-customer-${runId}@test.local`;
+        await createTestUser(customerEmail, 'user');
+        const adminEmail = `assignexpert-admin-${runId}@test.local`;
+        await createTestUser(adminEmail, 'admin');
+
+        // Primary active service definition: smartphone/motherboard,
+        // requiring 'intermediate' - deliberately not one of the reserved
+        // canonical seed pairs (Unit 5's own fixture lesson).
+        const serviceDef = await createTestServiceDefinition(
+            { productCategorySlug: 'smartphone', repairCategorySlug: 'motherboard' },
+            { requiredExpertiseLevel: 'intermediate' }
+        );
+        // A second, distinct definition created active and deactivated
+        // afterward (Phase E-I: "state must be read again fresh" means a
+        // definition that was active at request-creation time but has since
+        // been turned off must still block assignment) - creating it
+        // pre-deactivated would be rejected by createParcel's own
+        // creation-time validation, so the deactivation has to happen after.
+        const inactivableServiceDef = await createTestServiceDefinition(
+            { productCategorySlug: 'smartphone', repairCategorySlug: 'software-os' },
+            { requiredExpertiseLevel: 'intermediate' }
+        );
+
+        function validV2Body(overrides = {}) {
+            return {
+                schemaVersion: 2,
+                product: { categorySlug: 'smartphone', brand: 'TestBrand', model: 'TestModel' },
+                service: { definitionId: serviceDef.id },
+                damage: { description: 'The device does not power on after being dropped.' },
+                serviceLocation: { region: 'Dhaka', district: 'Mirpur', address: '123 Test Street' },
+                ...overrides
+            };
+        }
+
+        async function createV2Parcel(overrides = {}) {
+            const res = await callCreateParcel(validV2Body(overrides), customerEmail);
+            const id = res.body.insertedId.toString();
+            createdParcelIds.push(id);
+            return id;
+        }
+
+        async function createLegacyParcel(marker) {
+            const res = await callCreateParcel({ parcelName: `TEST-ASSIGNEXPERT-LEGACY-${marker}-${runId}`, cost: 40 }, customerEmail);
+            const id = res.body.insertedId.toString();
+            createdParcelIds.push(id);
+            return id;
+        }
+
+        // ---- Legacy dispatch is completely untouched (1-3) ----
+        const legacyParcelId = await createLegacyParcel('DISPATCH');
+        const legacyIneligibleRider = await createTestRider('LEGACY-INELIGIBLE', { expertise: [] });
+        const legacyAssignRes = await callAssign(legacyParcelId, legacyIneligibleRider.id, adminEmail);
+        logTest(
+            '1. Legacy request assignable to a rider with no usable expertise (v2 block never reached)',
+            legacyAssignRes.statusCode === 200 && legacyAssignRes.body.deliveryStatus === 'driver_assigned'
+        );
+        const legacyRiderAfter = await collections.riders.findOne({ _id: new ObjectId(legacyIneligibleRider.id) });
+        logTest('2. Legacy assignment claims the rider exactly as before (workStatus in_delivery)', legacyRiderAfter.workStatus === 'in_delivery');
+        const legacyParcelAfter = await models.Parcel.findById(legacyParcelId);
+        logTest(
+            '3. Legacy success response/side effects unchanged (riderId/riderName/riderEmail set, deliveryStatus driver_assigned)',
+            legacyParcelAfter.riderId === legacyIneligibleRider.id && legacyParcelAfter.deliveryStatus === 'driver_assigned' &&
+            legacyParcelAfter.riderName === legacyIneligibleRider.name && legacyParcelAfter.riderEmail === legacyIneligibleRider.email
+        );
+
+        // ---- v2 happy path: eligible technician, response/side-effect parity with legacy (4-9) ----
+        const eligibleParcelId = await createV2Parcel();
+        const eligibleRider = await createTestRider('ELIGIBLE');
+        const trackingCountBefore = await collections.trackings.countDocuments({});
+        const notifCountBefore = await collections.notifications.countDocuments({});
+        const eligibleAssignRes = await callAssign(eligibleParcelId, eligibleRider.id, adminEmail);
+        logTest(
+            '4. Eligible v2 technician assignment succeeds',
+            eligibleAssignRes.statusCode === 200 &&
+            JSON.stringify(eligibleAssignRes.body) === JSON.stringify({ acknowledged: true, matchedCount: 1, modifiedCount: 1, deliveryStatus: 'driver_assigned' })
+        );
+        const eligibleRiderAfter = await collections.riders.findOne({ _id: new ObjectId(eligibleRider.id) });
+        logTest('5. v2 success claims the rider exactly as before (workStatus in_delivery)', eligibleRiderAfter.workStatus === 'in_delivery');
+        const eligibleParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(eligibleParcelId) });
+        logTest(
+            '6. v2 success sets exactly the existing parcel fields, no more',
+            eligibleParcelAfter.deliveryStatus === 'driver_assigned' && eligibleParcelAfter.riderId === eligibleRider.id &&
+            eligibleParcelAfter.riderName === eligibleRider.name && eligibleParcelAfter.riderEmail === eligibleRider.email
+        );
+        logTest(
+            '7. No new persisted metadata on the parcel (no eligibilityVersion/recommendationScore/expertise snapshot)',
+            eligibleParcelAfter.eligibilityVersion === undefined && eligibleParcelAfter.recommendationScore === undefined &&
+            eligibleParcelAfter.matchedExpertise === undefined && eligibleParcelAfter.expertiseSnapshot === undefined
+        );
+        const trackingCountAfter = await collections.trackings.countDocuments({});
+        const notifCountAfter = await collections.notifications.countDocuments({});
+        logTest('8. Exactly one tracking log written', trackingCountAfter - trackingCountBefore === 1);
+        logTest('9. Exactly two notifications written (owner + technician)', notifCountAfter - notifCountBefore === 2);
+
+        // ---- Hard-eligibility rejections, one per reason code (10-16) ----
+        async function expectRejected(marker, riderOverrides, expectedReasonCode, linkedRole = 'rider') {
+            const parcelId = await createV2Parcel();
+            const rider = await createTestRider(marker, riderOverrides, linkedRole);
+            const res = await callAssign(parcelId, rider.id, adminEmail);
+            const parcelAfter = await collections.parcels.findOne({ _id: new ObjectId(parcelId) });
+            const riderAfter = await collections.riders.findOne({ _id: new ObjectId(rider.id) });
+            return {
+                rejected: res.statusCode === 409 && res.body.code === 'TECHNICIAN_NOT_ELIGIBLE' && Array.isArray(res.body.reasonCodes) && res.body.reasonCodes.includes(expectedReasonCode),
+                untouched: parcelAfter.deliveryStatus === 'pending-pickup' && parcelAfter.riderId === undefined && riderAfter.workStatus === 'available'
+            };
+        }
+
+        const rNoProfile = await expectRejected('NO-PROFILE', { expertise: [] }, 'INCOMPLETE_TECHNICIAN_PROFILE');
+        logTest('10. Missing/empty expertise rejected with INCOMPLETE_TECHNICIAN_PROFILE', rNoProfile.rejected);
+        logTest('11. Rejected assignment leaves parcel and rider completely unchanged (profile case)', rNoProfile.untouched);
+
+        const rWrongProduct = await expectRejected('WRONG-PRODUCT', {
+            expertise: [{ productCategorySlug: 'laptop-computer', repairCategorySlugs: ['motherboard'], level: 'advanced', experienceYears: 5 }]
+        }, 'PRODUCT_EXPERTISE_MISMATCH');
+        logTest('12. Wrong product category expertise rejected with PRODUCT_EXPERTISE_MISMATCH', rWrongProduct.rejected);
+
+        const rWrongRepair = await expectRejected('WRONG-REPAIR', {
+            expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'advanced', experienceYears: 5 }]
+        }, 'REPAIR_EXPERTISE_MISMATCH');
+        logTest('13. Right product, wrong repair category rejected with REPAIR_EXPERTISE_MISMATCH', rWrongRepair.rejected);
+
+        const rInsufficientLevel = await expectRejected('LOW-LEVEL', {
+            expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'beginner', experienceYears: 0 }]
+        }, 'INSUFFICIENT_EXPERTISE_LEVEL');
+        logTest('14. Below-required expertise level rejected with INSUFFICIENT_EXPERTISE_LEVEL', rInsufficientLevel.rejected);
+
+        const rNoLinkedUser = await expectRejected('NO-LINKED-USER', {}, 'TECHNICIAN_ROLE_INCONSISTENT', null);
+        logTest('15. Rider with no linked users-collection account rejected with TECHNICIAN_ROLE_INCONSISTENT', rNoLinkedUser.rejected);
+
+        const roleMismatchRider = await createTestRider('ROLE-MISMATCH', {}, 'user');
+        const roleMismatchParcelId = await createV2Parcel();
+        const roleMismatchRes = await callAssign(roleMismatchParcelId, roleMismatchRider.id, adminEmail);
+        logTest(
+            '16. Rider whose linked account role is not "rider" rejected with TECHNICIAN_ROLE_INCONSISTENT',
+            roleMismatchRes.statusCode === 409 && roleMismatchRes.body.reasonCodes.includes('TECHNICIAN_ROLE_INCONSISTENT')
+        );
+
+        // ---- Higher expertise than required still succeeds (17) ----
+        const higherLevelParcelId = await createV2Parcel();
+        const higherLevelRider = await createTestRider('HIGHER-LEVEL', {
+            expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'expert', experienceYears: 8 }]
+        });
+        const higherLevelRes = await callAssign(higherLevelParcelId, higherLevelRider.id, adminEmail);
+        logTest('17. Expertise level higher than required still succeeds', higherLevelRes.statusCode === 200);
+
+        // ---- Service area is ranking-only, never a hard gate (18-19) ----
+        const differentRegionParcelId = await createV2Parcel();
+        const differentRegionRider = await createTestRider('DIFF-REGION', { region: 'Chittagong', district: 'Pahartali' });
+        const differentRegionRes = await callAssign(differentRegionParcelId, differentRegionRider.id, adminEmail);
+        logTest('18. Technician in a completely different region/district is still assignable', differentRegionRes.statusCode === 200);
+
+        const differentDistrictParcelId = await createV2Parcel();
+        const differentDistrictRider = await createTestRider('DIFF-DISTRICT', { district: 'Gulshan' });
+        const differentDistrictRes = await callAssign(differentDistrictParcelId, differentDistrictRider.id, adminEmail);
+        logTest('19. Technician in the same region but a different district is still assignable', differentDistrictRes.statusCode === 200);
+
+        // ---- Service-definition state re-validated fresh, inside the transaction (20-22) ----
+        const inactiveDefParcelId = await createV2Parcel({
+            product: { categorySlug: 'smartphone', brand: 'TestBrand', model: 'TestModel' },
+            service: { definitionId: inactivableServiceDef.id }
+        });
+        // Deactivated only *after* the request was created, simulating an
+        // admin turning the service off while the request is still pending -
+        // proves the definition's current isActive state (not its state at
+        // request-creation time) is what gates assignment.
+        await collections.serviceDefinitions.updateOne({ _id: new ObjectId(inactivableServiceDef.id) }, { $set: { isActive: false } });
+        const inactiveDefRider = await createTestRider('INACTIVE-DEF', {
+            expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['software-os'], level: 'advanced', experienceYears: 5 }]
+        });
+        const inactiveDefRes = await callAssign(inactiveDefParcelId, inactiveDefRider.id, adminEmail);
+        logTest(
+            '20. Service definition deactivated after request creation blocks assignment (SERVICE_NOT_ACTIVE)',
+            inactiveDefRes.statusCode === 409 && inactiveDefRes.body.code === 'SERVICE_NOT_ACTIVE'
+        );
+
+        const mismatchDefParcelId = await createV2Parcel();
+        // Simulates an admin having repointed this definitionId at a
+        // different product category since the request was created - the
+        // request's own historical snapshot (still 'smartphone') no longer
+        // matches the definition's current productCategorySlug.
+        await collections.serviceDefinitions.updateOne({ _id: new ObjectId(serviceDef.id) }, { $set: { productCategorySlug: 'laptop-computer' } });
+        const mismatchDefRider = await createTestRider('MISMATCH-DEF');
+        const mismatchDefRes = await callAssign(mismatchDefParcelId, mismatchDefRider.id, adminEmail);
+        logTest(
+            '21. Service definition repointed to a different product blocks assignment (REQUEST_SERVICE_MISMATCH)',
+            mismatchDefRes.statusCode === 409 && mismatchDefRes.body.code === 'REQUEST_SERVICE_MISMATCH'
+        );
+        // Restored immediately so every later test in this section keeps
+        // using serviceDef as originally created.
+        await collections.serviceDefinitions.updateOne({ _id: new ObjectId(serviceDef.id) }, { $set: { productCategorySlug: 'smartphone' } });
+
+        const incompleteTaxonomyParcel = {
+            schemaVersion: 2,
+            trackingId: `TEST-ASSIGNEXPERT-INCOMPLETE-${runId}`,
+            senderEmail: customerEmail,
+            senderName: 'TEST-ASSIGNEXPERT',
+            parcelName: 'TEST-ASSIGNEXPERT-incomplete-taxonomy',
+            product: { categorySlug: 'smartphone', brand: 'TestBrand', model: 'TestModel' },
+            service: { definitionId: serviceDef.id, repairCategorySlug: 'motherboard' },
+            // region present, district deliberately omitted - directly
+            // inserted since the real createParcel v2 path would reject an
+            // incomplete taxonomy at creation time and this defensive branch
+            // can only otherwise be reached by pre-existing/corrupt data.
+            serviceLocation: { region: 'Dhaka' },
+            createdAt: new Date()
+        };
+        const incompleteInsert = await collections.parcels.insertOne(incompleteTaxonomyParcel);
+        createdParcelIds.push(incompleteInsert.insertedId.toString());
+        const incompleteTaxonomyRider = await createTestRider('INCOMPLETE-TAXONOMY');
+        const incompleteTaxonomyRes = await callAssign(incompleteInsert.insertedId.toString(), incompleteTaxonomyRider.id, adminEmail);
+        logTest(
+            '22. Request with incomplete persisted v2 taxonomy is rejected, not crashed, on assignment',
+            incompleteTaxonomyRes.statusCode === 409 && incompleteTaxonomyRes.body.code === 'REQUEST_TAXONOMY_INCOMPLETE'
+        );
+
+        // ---- Redundant reassignment to the same technician keeps its existing, more specific outcome (23) ----
+        const redundantParcelId = await createV2Parcel();
+        const redundantRider = await createTestRider('REDUNDANT');
+        const firstAssignRes = await callAssign(redundantParcelId, redundantRider.id, adminEmail);
+        logTest('23a. Setup: first assignment for redundant-reassignment case succeeds', firstAssignRes.statusCode === 200);
+        // Downgrades the rider's expertise via a raw write (bypassing
+        // updateTechnicianExpertise's own active-assignment guard on
+        // purpose, purely to construct this fixture) - if the redundant-
+        // reassignment path incorrectly ran the new eligibility check, this
+        // technician would now fail it and the existing, more specific
+        // REQUEST_ALREADY_ASSIGNED outcome would be masked.
+        await collections.riders.updateOne({ _id: new ObjectId(redundantRider.id) }, { $set: { expertise: [] } });
+        const redundantReassignRes = await callAssign(redundantParcelId, redundantRider.id, adminEmail);
+        logTest(
+            '23. Redundant reassignment to the same (now v2-ineligible) technician still reports REQUEST_ALREADY_ASSIGNED, not TECHNICIAN_NOT_ELIGIBLE',
+            redundantReassignRes.statusCode === 409 && redundantReassignRes.body.code === 'REQUEST_ALREADY_ASSIGNED'
+        );
+
+        // ---- Owner-role resolution / active-assignment / not-approved / unavailable checks still fire ahead of the new v2 block (24-26) ----
+        const noOwnerParcelId = await createV2Parcel();
+        // Overwrites senderEmail to an address with no users-collection
+        // record at all, reusing Unit 4/5's REPAIR_OWNER_ROLE_UNRESOLVED
+        // fixture pattern - proves this pre-existing guard still runs first.
+        // Deliberately distinct from the 'NO-OWNER' rider marker below -
+        // createTestRider now auto-links a 'rider'-role account at
+        // assignexpert-no-owner-*, so reusing that exact address here would
+        // accidentally give this "nonexistent" owner a real account.
+        await collections.parcels.updateOne({ _id: new ObjectId(noOwnerParcelId) }, { $set: { senderEmail: `assignexpert-nonexistent-owner-${runId}@test.local` } });
+        const noOwnerRider = await createTestRider('NO-OWNER');
+        const noOwnerRes = await callAssign(noOwnerParcelId, noOwnerRider.id, adminEmail);
+        logTest('24. Unresolved owner role still blocks assignment before the new v2 eligibility block runs', noOwnerRes.statusCode === 409 && noOwnerRes.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
+
+        const notApprovedParcelId = await createV2Parcel();
+        const notApprovedRider = await createTestRider('NOT-APPROVED', { status: 'pending' });
+        const notApprovedRes = await callAssign(notApprovedParcelId, notApprovedRider.id, adminEmail);
+        logTest('25. Not-approved technician still rejected with the existing TECHNICIAN_NOT_APPROVED (pre-existing check, unchanged)', notApprovedRes.statusCode === 409 && notApprovedRes.body.code === 'TECHNICIAN_NOT_APPROVED');
+
+        const unavailableParcelId = await createV2Parcel();
+        const unavailableRider = await createTestRider('UNAVAILABLE', { workStatus: 'in_delivery' });
+        const unavailableRes = await callAssign(unavailableParcelId, unavailableRider.id, adminEmail);
+        logTest('26. Unavailable technician still rejected with the existing RIDER_UNAVAILABLE (pre-existing check, unchanged)', unavailableRes.statusCode === 409 && unavailableRes.body.code === 'RIDER_UNAVAILABLE');
+
+        // ---- Concurrency guard: deterministic proof of the stale-expertise guard condition (27-28) ----
+        const guardRider = await createTestRider('GUARD-DETERMINISTIC');
+        const capturedExpertise = guardRider.expertise;
+        await collections.riders.updateOne({ _id: new ObjectId(guardRider.id) }, { $set: { expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'beginner', experienceYears: 0 }] } });
+        const staleGuardResult = await collections.riders.updateOne(
+            { _id: new ObjectId(guardRider.id), status: 'approved', workStatus: 'available', expertise: capturedExpertise },
+            { $set: { workStatus: 'in_delivery' } }
+        );
+        logTest('27. Guarded update using a stale (pre-change) expertise snapshot fails to match (matchedCount 0)', staleGuardResult.matchedCount === 0);
+        const freshGuardResult = await collections.riders.updateOne(
+            { _id: new ObjectId(guardRider.id), status: 'approved', workStatus: 'available', expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'beginner', experienceYears: 0 }] },
+            { $set: { workStatus: 'in_delivery' } }
+        );
+        logTest('28. Same guard using the current expertise value matches (matchedCount 1)', freshGuardResult.matchedCount === 1);
+        // Reset so this fixture doesn't interfere with cleanup accounting below.
+        await collections.riders.updateOne({ _id: new ObjectId(guardRider.id) }, { $set: { workStatus: 'available' } });
+
+        // ---- Concurrency guard: genuine end-to-end race against a real concurrent expertise update (29) ----
+        let raceInvariantHeld = true;
+        let raceConflictObserved = false;
+        for (let trial = 0; trial < 5; trial++) {
+            const raceParcelId = await createV2Parcel();
+            const raceRider = await createTestRider(`RACE-${trial}`);
+            const raceOriginalExpertise = raceRider.expertise;
+            const raceDowngradedExpertise = [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'beginner', experienceYears: 0 }];
+
+            const [assignOutcome, expertiseOutcome] = await Promise.all([
+                callAssign(raceParcelId, raceRider.id, adminEmail),
+                callUpdateExpertise(raceRider.id, raceDowngradedExpertise, raceRider.email)
+            ]);
+
+            if (assignOutcome.statusCode !== 200 || expertiseOutcome.statusCode !== 200) {
+                raceConflictObserved = true;
+            }
+
+            const finalParcel = await collections.parcels.findOne({ _id: new ObjectId(raceParcelId) });
+            const finalRider = await collections.riders.findOne({ _id: new ObjectId(raceRider.id) });
+            const parcelAssigned = finalParcel.deliveryStatus === 'driver_assigned';
+            const expertiseIsOriginal = JSON.stringify(finalRider.expertise) === JSON.stringify(raceOriginalExpertise);
+
+            // The safety invariant this whole unit exists to guarantee: an
+            // assignment must never be left committed against a technician
+            // whose expertise, as it now actually stands, no longer matches
+            // what was validated - if the parcel ended up assigned, the
+            // rider's expertise must still be the exact value that was
+            // evaluated, never the concurrently-written downgrade.
+            if (parcelAssigned && !expertiseIsOriginal) {
+                raceInvariantHeld = false;
+            }
+        }
+        logTest('29. Concurrent expertise downgrade racing assignment never commits an assignment against stale expertise (5 trials)', raceInvariantHeld);
+        logTest('29b. At least one real write conflict was observed across the 5 concurrent trials (genuine contention, not two calls that never actually overlapped)', raceConflictObserved);
+
+        // ---- Reuse, not duplication, of Unit 5's eligibility service (30) ----
+        const eligibilityServiceSource = require('fs').readFileSync(require('path').join(__dirname, 'controllers', 'parcelController.js'), 'utf8');
+        logTest(
+            '30. assignRiderToParcel reuses evaluateTechnician/deriveRequestTaxonomy/validateCurrentServiceDefinition rather than re-deriving the rules',
+            eligibilityServiceSource.includes("require('../services/technicianEligibilityService')") &&
+            /evaluateTechnician\(/.test(eligibilityServiceSource) && /deriveRequestTaxonomy\(/.test(eligibilityServiceSource)
+        );
+
+        // ---- No index change required (31) ----
+        const riderIndexNames = (await collections.riders.indexes()).map((i) => i.name);
+        logTest(
+            '31. No new index required - existing riders_status_workStatus / expertise indexes still cover this transaction\'s reads',
+            riderIndexNames.includes('riders_status_workStatus')
+        );
+
+    } finally {
+        if (createdParcelIds.length) {
+            const ownParcels = await collections.parcels.find(
+                { _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } },
+                { projection: { trackingId: 1 } }
+            ).toArray();
+            const ownTrackingIds = ownParcels.map((p) => p.trackingId).filter(Boolean);
+            if (ownTrackingIds.length) {
+                await collections.trackings.deleteMany({ trackingId: { $in: ownTrackingIds } });
+            }
+            await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
+            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
+        }
+        if (createdServiceDefinitionIds.length) {
+            await collections.serviceDefinitions.deleteMany({ _id: { $in: createdServiceDefinitionIds } });
+        }
+        if (createdRiderIds.length) {
+            await collections.riders.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
+        }
+        if (createdUserEmails.length) {
+            await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        }
+
+        const leftoverParcels = customerEmail ? await collections.parcels.countDocuments({ senderEmail: customerEmail }) : 0;
+        const leftoverDefs = await collections.serviceDefinitions.countDocuments({ label: { $regex: '^TEST-ASSIGNEXPERT-' } });
+        const leftoverRiders = await collections.riders.countDocuments({ name: { $regex: '^TEST-ASSIGNEXPERT-' } });
+        const leftoverUsers = await collections.users.countDocuments({ email: { $regex: '^assignexpert-' } });
+        logTest('32. No fixture leakage after tests', leftoverParcels === 0 && leftoverDefs === 0 && leftoverRiders === 0 && leftoverUsers === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -9554,6 +10020,7 @@ async function runAllTests() {
     await testTechnicianExpertise();
     await testRepairRequestV2();
     await testEligibleTechnicianAPI();
+    await testAssignmentExpertiseRevalidation();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
