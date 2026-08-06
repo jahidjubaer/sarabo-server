@@ -10,10 +10,11 @@ const { client } = require('../config/database');
 const { normalize } = require('../services/paymentProcessor');
 const { isV2RepairRequest } = require('../utils/repairRequestSchema');
 const {
-    UPLOAD_SESSION_TTL_MS, ALLOWED_IMAGE_MIME_TYPES, MAX_IMAGE_SIZE_BYTES, MAX_DAMAGE_IMAGES,
+    UPLOAD_SESSION_TTL_MS, READ_URL_TTL_MS, ALLOWED_IMAGE_MIME_TYPES, MAX_IMAGE_SIZE_BYTES, MAX_DAMAGE_IMAGES,
     isValidFileName, generateUploadSessionId, generateStorageKey, isDamageEvidenceEditable
 } = require('../utils/damageUpload');
 const { damageStorageService } = require('../services/damageStorageService');
+const { resolveImageAccess } = require('../services/damageImageAccessService');
 
 const UPLOAD_SESSION_BODY_FIELDS = ['fileName', 'mimeType', 'size'];
 
@@ -21,6 +22,9 @@ class DamageUploadController {
     constructor(models, collections, storageService = damageStorageService) {
         this.Parcel = models.Parcel;
         this.DamageUploadSession = models.DamageUploadSession;
+        this.User = models.User;
+        this.Rider = models.Rider;
+        this.models = models;
         this.collections = collections;
         this.storage = storageService;
     }
@@ -135,14 +139,23 @@ class DamageUploadController {
                 expiresAt
             });
 
+            // Browser-usable contract (Phase 6.4 Unit 2, Phase L): the
+            // client's PUT must send Content-Type: <mimeType> exactly - the
+            // V4 signed URL was signed with that content type as part of
+            // its signature, and GCS rejects a PUT whose actual
+            // Content-Type header doesn't match what was signed.
             return res.status(201).send({
                 uploadSessionId,
-                uploadUrl: uploadTarget.uploadUrl,
-                method: uploadTarget.method,
-                expiresAt: expiresAt.toISOString(),
+                upload: {
+                    method: uploadTarget.method,
+                    url: uploadTarget.uploadUrl,
+                    headers: { 'Content-Type': mimeType },
+                    expiresAt: expiresAt.toISOString()
+                },
                 constraints: {
                     allowedMimeTypes: ALLOWED_IMAGE_MIME_TYPES,
-                    maxSizeBytes: MAX_IMAGE_SIZE_BYTES
+                    maxSizeBytes: MAX_IMAGE_SIZE_BYTES,
+                    maxImages: MAX_DAMAGE_IMAGES
                 }
             });
         } catch (error) {
@@ -331,6 +344,127 @@ class DamageUploadController {
         } catch (error) {
             console.error('Damage image removal failed:', error.message);
             return res.status(500).send({ message: 'unable to remove damage image', code: 'REMOVAL_FAILED' });
+        }
+    }
+
+    // Authorized read access (Phase 6.4 Unit 2). Unlike upload/finalize/
+    // remove above (owner-only), this endpoint additionally admits an
+    // admin or the currently-assigned technician - see
+    // services/damageImageAccessService.js for the exact rule set. A
+    // denied caller receives the identical REQUEST_NOT_FOUND response as a
+    // genuinely missing request (existence-oracle safe).
+    async listImages(req, res) {
+        try {
+            const parcelId = req.params.id;
+            if (!ObjectId.isValid(parcelId)) {
+                return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
+            }
+
+            const parcel = await this.Parcel.findById(parcelId);
+            if (!parcel) {
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+            }
+
+            const access = await resolveImageAccess({ parcel, callerEmail: req.decoded_email, models: this.models });
+            if (!access.allowed) {
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+            }
+
+            if (!isV2RepairRequest(parcel)) {
+                return res.status(409).send({ message: 'damage image access is only available for schemaVersion 2 requests', code: 'LEGACY_REQUEST_NOT_SUPPORTED' });
+            }
+
+            // Authorization-bearing signed URLs below must never be cached
+            // by a shared proxy or reused past their own short expiry.
+            res.set('Cache-Control', 'private, no-store');
+
+            const attachedImages = (parcel.damage && Array.isArray(parcel.damage.images)) ? parcel.damage.images : [];
+            if (attachedImages.length === 0) {
+                return res.status(200).send({
+                    requestId: parcelId, accessRole: access.accessRole,
+                    images: [], totalImages: 0, maxImages: MAX_DAMAGE_IMAGES
+                });
+            }
+
+            // Persisted image metadata carries no explicit imageId - the
+            // finalized upload session whose storageKey matches is the
+            // join (see models/DamageUploadSession.js).
+            const finalizedSessions = await this.DamageUploadSession.findFinalizedByRequestId(parcelId);
+            const storageKeyToImageId = new Map(finalizedSessions.map((session) => [session.storageKey, session._id]));
+
+            const sortableImages = attachedImages
+                .map((image) => ({ image, imageId: storageKeyToImageId.get(image.storageKey) || null }))
+                // Defensive only: under Unit 1's transactional attach
+                // guarantee, every persisted image already has a matching
+                // finalized session. An entry with no resolvable imageId
+                // never occurs in normal operation and is dropped rather
+                // than surfaced with a fabricated identifier.
+                .filter((entry) => entry.imageId !== null);
+
+            sortableImages.sort((a, b) => {
+                const timeDiff = new Date(a.image.uploadedAt).getTime() - new Date(b.image.uploadedAt).getTime();
+                if (timeDiff !== 0) return timeDiff;
+                return a.imageId < b.imageId ? -1 : a.imageId > b.imageId ? 1 : 0;
+            });
+
+            const images = [];
+            const unavailableImages = [];
+            for (const { image, imageId } of sortableImages) {
+                let objectMetadata;
+                try {
+                    objectMetadata = await this.storage.verifyObject({ storageKey: image.storageKey });
+                } catch (error) {
+                    unavailableImages.push({ imageId, code: 'STORAGE_UNAVAILABLE' });
+                    continue;
+                }
+                if (!objectMetadata.exists) {
+                    unavailableImages.push({ imageId, code: 'STORAGE_OBJECT_NOT_FOUND' });
+                    continue;
+                }
+
+                let readUrl;
+                try {
+                    readUrl = await this.storage.createReadUrl({ storageKey: image.storageKey, expiresInMs: READ_URL_TTL_MS });
+                } catch (error) {
+                    unavailableImages.push({ imageId, code: 'STORAGE_UNAVAILABLE' });
+                    continue;
+                }
+
+                images.push({
+                    imageId,
+                    mimeType: image.mimeType,
+                    size: image.size,
+                    width: image.width,
+                    height: image.height,
+                    uploadedAt: image.uploadedAt instanceof Date ? image.uploadedAt.toISOString() : image.uploadedAt,
+                    readUrl,
+                    readUrlExpiresAt: new Date(Date.now() + READ_URL_TTL_MS).toISOString()
+                });
+            }
+
+            const responseBody = {
+                requestId: parcelId,
+                accessRole: access.accessRole,
+                images,
+                totalImages: sortableImages.length,
+                maxImages: MAX_DAMAGE_IMAGES
+            };
+
+            if (unavailableImages.length > 0) {
+                // Admin receives enough detail to actually investigate;
+                // owner/technician receive only a safe count - never
+                // storageKey, never a raw Firebase/GCS error.
+                if (access.accessRole === 'admin') {
+                    responseBody.unavailableImages = unavailableImages;
+                } else {
+                    responseBody.unavailableCount = unavailableImages.length;
+                }
+            }
+
+            return res.status(200).send(responseBody);
+        } catch (error) {
+            console.error('Damage image list failed:', error.message);
+            return res.status(500).send({ message: 'unable to list damage images', code: 'LIST_FAILED' });
         }
     }
 }

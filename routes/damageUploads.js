@@ -10,6 +10,17 @@ const { ensureDatabaseReady } = require('../middleware/database');
 function damageUploadRoutes(app, controllers) {
     const damageUploadController = controllers.damageUpload;
 
+    // Authorized read access (Phase 6.4 Unit 2) - admits owner, admin, and
+    // the currently-assigned technician; every role is resolved live inside
+    // the controller/service (see services/damageImageAccessService.js),
+    // never via a single-role route gate like verifyAdmin/verifyRider,
+    // since this one route must serve three different roles.
+    app.get(
+        '/parcels/:id/damage-images',
+        verifyFBToken, ensureDatabaseReady,
+        (req, res) => damageUploadController.listImages(req, res)
+    );
+
     app.post(
         '/parcels/:id/damage-images/upload-session',
         verifyFBToken, ensureDatabaseReady,

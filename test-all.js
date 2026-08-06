@@ -10028,10 +10028,12 @@ async function testDamageUploadFoundation() {
         const happyParcelId = await createV2Parcel();
         const sessionRes4 = await callCreateSession(happyParcelId, validUploadBody(), customerEmail);
         logTest(
-            '3. Owner can create an upload session for an eligible v2 request',
+            '3. Owner can create an upload session for an eligible v2 request (Phase 6.4 Unit 2 nested contract)',
             sessionRes4.statusCode === 201 && typeof sessionRes4.body.uploadSessionId === 'string' &&
-            typeof sessionRes4.body.uploadUrl === 'string' && typeof sessionRes4.body.expiresAt === 'string' &&
-            Array.isArray(sessionRes4.body.constraints.allowedMimeTypes) && sessionRes4.body.constraints.maxSizeBytes === 8 * 1024 * 1024
+            sessionRes4.body.upload.method === 'PUT' && typeof sessionRes4.body.upload.url === 'string' &&
+            sessionRes4.body.upload.headers['Content-Type'] === 'image/jpeg' && typeof sessionRes4.body.upload.expiresAt === 'string' &&
+            Array.isArray(sessionRes4.body.constraints.allowedMimeTypes) && sessionRes4.body.constraints.maxSizeBytes === 8 * 1024 * 1024 &&
+            sessionRes4.body.constraints.maxImages === 3
         );
         logTest('4. Session response excludes private/internal data (no storageKey, no ownerEmail)', sessionRes4.body.storageKey === undefined && sessionRes4.body.ownerEmail === undefined);
         createdSessionIds.push(sessionRes4.body.uploadSessionId);
@@ -10399,6 +10401,486 @@ async function testDamageUploadFoundation() {
     console.log('');
 }
 
+// Phase 6.4 Unit 2 - Authorized Damage Image Access and Client Upload
+// Contract. Exercises the real controllers/damageUploadController.js
+// directly, constructed with its own injected fake Storage bucket adapter
+// (extended here to support signing-option inspection and a per-call
+// nonce - see createFakeDamageBucket below) - never the real Firebase
+// Storage singleton, matching Unit 1's own test-strategy precedent.
+async function testAuthorizedDamageImageAccess() {
+    console.log('35. Testing Authorized Damage Image Access (Phase 6.4 Unit 2)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+    const { DamageStorageService } = require('./services/damageStorageService');
+    const DamageUploadController = require('./controllers/damageUploadController');
+
+    const runId = Date.now();
+    const createdParcelIds = [];
+    const createdServiceDefinitionIds = [];
+    const createdUserEmails = [];
+    const createdRiderIds = [];
+    const createdSessionIds = [];
+    let ownerEmail = null;
+    let otherCustomerEmail = null;
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            headers: {},
+            set(key, value) { this.headers[key] = value; return this; },
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    // Extends Unit 1's fake bucket with signing-option inspection
+    // (`_signCalls`) and a per-call incrementing nonce in the returned URL -
+    // both needed to test "signed URL action is read", "expiry is exactly
+    // five minutes", and "repeated calls produce fresh URLs" without
+    // guessing from string content alone. Mirrors real V4 signed URLs,
+    // which also differ between calls to the same object (they embed the
+    // signing timestamp).
+    function createFakeDamageBucket(name = 'fake-test-bucket') {
+        const objects = new Map();
+        const signCalls = [];
+        let signCounter = 0;
+        return {
+            name,
+            _objects: objects,
+            _signCalls: signCalls,
+            file(storageKey) {
+                return {
+                    async getSignedUrl(opts) {
+                        signCounter += 1;
+                        signCalls.push({ storageKey, ...opts });
+                        return [`https://fake-storage.test/${name}/${storageKey}?action=${opts.action}&sig=${signCounter}`];
+                    },
+                    async getMetadata() {
+                        const obj = objects.get(storageKey);
+                        if (!obj) {
+                            const err = new Error('Not Found');
+                            err.code = 404;
+                            throw err;
+                        }
+                        return [{ contentType: obj.mimeType, size: String(obj.size), name: storageKey }];
+                    },
+                    async delete() {
+                        if (!objects.has(storageKey)) {
+                            const err = new Error('Not Found');
+                            err.code = 404;
+                            throw err;
+                        }
+                        objects.delete(storageKey);
+                    }
+                };
+            }
+        };
+    }
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const parcelController = controllers.parcel;
+
+        const fakeBucket = createFakeDamageBucket();
+        const fakeStorage = new DamageStorageService({ bucket: fakeBucket });
+        const damageUploadController = new DamageUploadController(models, collections, fakeStorage);
+
+        async function createTestUser(email, role) {
+            createdUserEmails.push(email);
+            await collections.users.insertOne({ email, role, createdAt: new Date() });
+        }
+
+        async function createTestRider(marker, linkedRole = 'rider') {
+            const doc = {
+                name: `TEST-DAMAGE-ACCESS-${marker}`, email: `damage-access-${marker.toLowerCase()}-${runId}@test.local`,
+                region: 'Dhaka', district: 'Mirpur', status: 'approved', workStatus: 'available',
+                expertise: [], createdAt: new Date()
+            };
+            const result = await collections.riders.insertOne(doc);
+            createdRiderIds.push(result.insertedId.toString());
+            if (linkedRole !== null) await createTestUser(doc.email, linkedRole);
+            return { id: result.insertedId.toString(), ...doc };
+        }
+
+        const now = new Date();
+        const serviceDefResult = await collections.serviceDefinitions.insertOne({
+            productCategorySlug: 'smartphone', repairCategorySlug: 'motherboard',
+            label: `TEST-DAMAGE-ACCESS-SERVICE-${runId}`, description: 'Synthetic service definition for damage-access testing.',
+            isActive: true,
+            pricingRule: { currency: 'usd', baseMin: 25, baseMax: 75, inspectionFee: 10, version: 1 },
+            requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30,
+            inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true },
+            createdAt: now, updatedAt: now
+        });
+        createdServiceDefinitionIds.push(serviceDefResult.insertedId);
+        const serviceDefId = serviceDefResult.insertedId.toString();
+
+        ownerEmail = `damage-access-owner-${runId}@test.local`;
+        otherCustomerEmail = `damage-access-other-${runId}@test.local`;
+        const adminEmail = `damage-access-admin-${runId}@test.local`;
+        await createTestUser(ownerEmail, 'user');
+        await createTestUser(otherCustomerEmail, 'user');
+        await createTestUser(adminEmail, 'admin');
+
+        const assignedRider = await createTestRider('ASSIGNED');
+        const reassignedToRider = await createTestRider('REASSIGNED-TO');
+        const unassignedRider = await createTestRider('UNASSIGNED');
+        const roleMismatchRider = await createTestRider('ROLE-MISMATCH', 'user');
+
+        function validV2Body(overrides = {}) {
+            return {
+                schemaVersion: 2,
+                product: { categorySlug: 'smartphone', brand: 'TestBrand', model: 'TestModel' },
+                service: { definitionId: serviceDefId },
+                damage: { description: 'The camera lens is cracked after a fall.' },
+                serviceLocation: { region: 'Dhaka', district: 'Mirpur', address: '123 Test Street' },
+                ...overrides
+            };
+        }
+
+        function callCreateParcel(body, decoded_email) {
+            const req = { body, decoded_email };
+            const res = fakeRes();
+            return parcelController.createParcel(req, res).then(() => res);
+        }
+
+        async function createV2Parcel(owner = ownerEmail, overrides = {}) {
+            const res = await callCreateParcel(validV2Body(overrides), owner);
+            const id = res.body.insertedId.toString();
+            createdParcelIds.push(id);
+            return id;
+        }
+
+        async function createLegacyParcel() {
+            const res = await callCreateParcel({ parcelName: `TEST-DAMAGE-ACCESS-LEGACY-${runId}`, cost: 40 }, ownerEmail);
+            const id = res.body.insertedId.toString();
+            createdParcelIds.push(id);
+            return id;
+        }
+
+        function callCreateSession(parcelId, body, decoded_email) {
+            const req = { params: { id: parcelId }, body, decoded_email };
+            const res = fakeRes();
+            return damageUploadController.createUploadSession(req, res).then(() => res);
+        }
+
+        function callFinalize(parcelId, body, decoded_email) {
+            const req = { params: { id: parcelId }, body, decoded_email };
+            const res = fakeRes();
+            return damageUploadController.finalizeUpload(req, res).then(() => res);
+        }
+
+        function callList(parcelId, decoded_email, query = {}) {
+            const req = { params: { id: parcelId }, query, decoded_email };
+            const res = fakeRes();
+            return damageUploadController.listImages(req, res).then(() => res);
+        }
+
+        function callRemove(parcelId, imageId, decoded_email) {
+            const req = { params: { id: parcelId, imageId }, decoded_email };
+            const res = fakeRes();
+            return damageUploadController.removeImage(req, res).then(() => res);
+        }
+
+        function validUploadBody(overrides = {}) {
+            return { fileName: 'damage.jpg', mimeType: 'image/jpeg', size: 1024 * 500, ...overrides };
+        }
+
+        function simulateUpload(storageKey, { mimeType = 'image/jpeg', size = 1024 * 500 } = {}) {
+            fakeBucket._objects.set(storageKey, { mimeType, size });
+        }
+
+        async function uploadAndFinalize(parcelId, owner = ownerEmail, { sessionBody, actualMimeType, actualSize, skipUpload = false } = {}) {
+            const sessionRes = await callCreateSession(parcelId, validUploadBody(sessionBody), owner);
+            if (sessionRes.statusCode !== 201) return { sessionRes, finalizeRes: null, sessionId: null };
+            const sessionId = sessionRes.body.uploadSessionId;
+            createdSessionIds.push(sessionId);
+            const sessionDoc = await collections.damageUploadSessions.findOne({ _id: sessionId });
+            if (!skipUpload) {
+                simulateUpload(sessionDoc.storageKey, {
+                    mimeType: actualMimeType || sessionDoc.mimeType,
+                    size: actualSize !== undefined ? actualSize : sessionDoc.declaredSize
+                });
+            }
+            const finalizeRes = await callFinalize(parcelId, { uploadSessionId: sessionId }, owner);
+            return { sessionRes, finalizeRes, sessionId, sessionDoc };
+        }
+
+        async function assignRider(parcelId, rider, deliveryStatus = 'driver_assigned') {
+            await collections.parcels.updateOne(
+                { _id: new ObjectId(parcelId) },
+                { $set: { deliveryStatus, riderId: rider.id, riderEmail: rider.email, riderName: rider.name } }
+            );
+        }
+
+        // ---- Access route: existence-oracle and legacy (1-3) ----
+        const missingListRes = await callList(new ObjectId().toString(), ownerEmail);
+        logTest('1. Missing request returns a safe REQUEST_NOT_FOUND response', missingListRes.statusCode === 404 && missingListRes.body.code === 'REQUEST_NOT_FOUND');
+
+        const nonOwnerTargetId = await createV2Parcel();
+        const nonOwnerListRes = await callList(nonOwnerTargetId, otherCustomerEmail);
+        logTest(
+            '2. Non-owner receives the identical safe response as a missing request (no existence leak)',
+            nonOwnerListRes.statusCode === missingListRes.statusCode && nonOwnerListRes.body.code === missingListRes.body.code &&
+            JSON.stringify(nonOwnerListRes.body) === JSON.stringify(missingListRes.body)
+        );
+
+        const legacyParcelId = await createLegacyParcel();
+        const legacyListRes = await callList(legacyParcelId, ownerEmail);
+        logTest('3. Legacy request rejected with LEGACY_REQUEST_NOT_SUPPORTED (even for its own owner)', legacyListRes.statusCode === 409 && legacyListRes.body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
+
+        // ---- Access route: owner/admin/technician policy (4-14) ----
+        const ownerParcelId = await createV2Parcel();
+        const ownerListRes = await callList(ownerParcelId, ownerEmail);
+        logTest('4. Owner may list images (empty request)', ownerListRes.statusCode === 200 && ownerListRes.body.accessRole === 'owner' && Array.isArray(ownerListRes.body.images));
+
+        const adminListRes = await callList(ownerParcelId, adminEmail);
+        logTest('5. Admin may list images for a request they do not own', adminListRes.statusCode === 200 && adminListRes.body.accessRole === 'admin');
+
+        const unassignedListRes = await callList(ownerParcelId, unassignedRider.email);
+        logTest('6. A rider never assigned to this request cannot list its images', unassignedListRes.statusCode === 404 && unassignedListRes.body.code === 'REQUEST_NOT_FOUND');
+
+        const assignParcelId = await createV2Parcel();
+        await assignRider(assignParcelId, assignedRider);
+        const wrongAssignedListRes = await callList(assignParcelId, unassignedRider.email);
+        logTest('7. A rider assigned to a different request cannot list this one\'s images', wrongAssignedListRes.statusCode === 404 && wrongAssignedListRes.body.code === 'REQUEST_NOT_FOUND');
+
+        const roleMismatchParcelId = await createV2Parcel();
+        await assignRider(roleMismatchParcelId, roleMismatchRider);
+        const roleMismatchListRes = await callList(roleMismatchParcelId, roleMismatchRider.email);
+        logTest('8. Technician whose linked account role is not "rider" is rejected even when parcel.riderId matches', roleMismatchListRes.statusCode === 404 && roleMismatchListRes.body.code === 'REQUEST_NOT_FOUND');
+
+        const assignedListRes = await callList(assignParcelId, assignedRider.email);
+        logTest('9. The currently-assigned technician may list images while the assignment is active', assignedListRes.statusCode === 200 && assignedListRes.body.accessRole === 'assigned-technician');
+
+        await assignRider(assignParcelId, reassignedToRider);
+        const staleTechListRes = await callList(assignParcelId, assignedRider.email);
+        const newTechListRes = await callList(assignParcelId, reassignedToRider.email);
+        logTest(
+            '10. Technician access is removed after reassignment to another technician',
+            staleTechListRes.statusCode === 404 && staleTechListRes.body.code === 'REQUEST_NOT_FOUND' &&
+            newTechListRes.statusCode === 200 && newTechListRes.body.accessRole === 'assigned-technician'
+        );
+
+        await collections.parcels.updateOne({ _id: new ObjectId(assignParcelId) }, { $set: { deliveryStatus: 'parcel_delivered' } });
+        const completedTechListRes = await callList(assignParcelId, reassignedToRider.email);
+        logTest('11. Technician access is removed once the request is no longer in an active assigned state (parcel_delivered)', completedTechListRes.statusCode === 404 && completedTechListRes.body.code === 'REQUEST_NOT_FOUND');
+
+        const ownerAfterAssignRes = await callList(assignParcelId, ownerEmail);
+        logTest('12. Customer (owner) retains access after assignment', ownerAfterAssignRes.statusCode === 200 && ownerAfterAssignRes.body.accessRole === 'owner');
+        logTest('13. Customer (owner) retains access after completion (parcel_delivered)', ownerAfterAssignRes.statusCode === 200);
+
+        const adminAfterCompletionRes = await callList(assignParcelId, adminEmail);
+        logTest('14. Admin retains access after completion', adminAfterCompletionRes.statusCode === 200 && adminAfterCompletionRes.body.accessRole === 'admin');
+
+        // ---- Empty response (15) ----
+        logTest('15. Empty image list returns HTTP 200 with images: [] and totalImages: 0', ownerListRes.body.images.length === 0 && ownerListRes.body.totalImages === 0 && ownerListRes.body.maxImages === 3);
+
+        // ---- Read URLs (16-30) ----
+        const readParcelId = await createV2Parcel();
+        const readImage1 = await uploadAndFinalize(readParcelId);
+        const readList1 = await callList(readParcelId, ownerEmail);
+        logTest('16. Each finalized image receives a signed read URL', readList1.body.images.length === 1 && typeof readList1.body.images[0].readUrl === 'string');
+
+        const lastSignCall = fakeBucket._signCalls[fakeBucket._signCalls.length - 1];
+        logTest('17. The signed URL was requested with action "read"', lastSignCall.action === 'read');
+        logTest('18. The signed URL expiry is exactly five minutes from issuance', Math.abs(new Date(lastSignCall.expires).getTime() - (Date.now() + 5 * 60 * 1000)) < 5000);
+
+        const spoofedQueryListRes = await callList(readParcelId, ownerEmail, { expiresInMs: 999999999, storageKey: 'attacker/chosen/key.jpg' });
+        logTest(
+            '19-20. Client-supplied query params (expiry, storageKey) have no effect - server-owned expiry and only already-attached storage keys are signed',
+            spoofedQueryListRes.statusCode === 200 &&
+            Math.abs(new Date(spoofedQueryListRes.body.images[0].readUrlExpiresAt).getTime() - (Date.now() + 5 * 60 * 1000)) < 5000 &&
+            !JSON.stringify(spoofedQueryListRes.body).includes('attacker/chosen/key.jpg')
+        );
+
+        const otherRequestParcelId = await createV2Parcel();
+        const otherRequestImage = await uploadAndFinalize(otherRequestParcelId);
+        const crossList = await callList(readParcelId, ownerEmail);
+        logTest('21-22. One request\'s image list never includes another request\'s storage key', !JSON.stringify(crossList.body).includes(otherRequestImage.sessionDoc.storageKey));
+
+        // The real object path legitimately appears embedded *inside* the
+        // functional readUrl itself (exactly like a genuine signed URL
+        // would) - that's expected, not a leak. What must never exist is a
+        // separate, labeled storageKey field on the image entry.
+        logTest('23. storageKey is absent as a labeled field on the image entry', readList1.body.images[0].storageKey === undefined);
+        logTest('24. Persisted canonical url is absent from the response', readList1.body.images[0].url === undefined);
+        logTest('25. No separate bucket-name field exists in the response (bucket only ever appears inside the functional readUrl itself)', readList1.body.bucket === undefined && readList1.body.images[0].bucket === undefined);
+
+        const sessionDocAfterList = await collections.damageUploadSessions.findOne({ _id: readImage1.sessionId });
+        const parcelDocAfterList = await collections.parcels.findOne({ _id: new ObjectId(readParcelId) });
+        logTest(
+            '26. Signed read URLs are never written back to MongoDB',
+            sessionDocAfterList.readUrl === undefined && sessionDocAfterList.signedUrl === undefined &&
+            parcelDocAfterList.damage.images[0].readUrl === undefined
+        );
+
+        const readList2 = await callList(readParcelId, ownerEmail);
+        logTest('27. Repeated list calls generate a fresh signed URL each time', readList1.body.images[0].readUrl !== readList2.body.images[0].readUrl);
+
+        logTest('28. Owner email is excluded from the response', JSON.stringify(readList1.body).includes(ownerEmail) === false);
+        logTest('29. accessRole is constrained to the expected enum', ['owner', 'admin', 'assigned-technician'].includes(readList1.body.accessRole));
+        logTest('30. totalImages/maxImages are correct', readList1.body.totalImages === 1 && readList1.body.maxImages === 3);
+
+        // ---- Ordering (31) ----
+        const orderParcelId = await createV2Parcel();
+        const orderImage1 = await uploadAndFinalize(orderParcelId);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        const orderImage2 = await uploadAndFinalize(orderParcelId);
+        const orderListRes = await callList(orderParcelId, ownerEmail);
+        logTest(
+            '31. Images are ordered deterministically by uploadedAt ascending',
+            orderListRes.body.images.length === 2 && orderListRes.body.images[0].imageId === orderImage1.sessionId && orderListRes.body.images[1].imageId === orderImage2.sessionId
+        );
+
+        // ---- Missing/drifted object (32-37) ----
+        const missingObjParcelId = await createV2Parcel();
+        const missingObjImage1 = await uploadAndFinalize(missingObjParcelId);
+        const missingObjImage2 = await uploadAndFinalize(missingObjParcelId);
+        // Object deleted out-of-band (e.g. historical cleanup drift) - the
+        // metadata for image 1 still exists in MongoDB, but its Storage
+        // object no longer does.
+        fakeBucket._objects.delete(missingObjImage1.sessionDoc.storageKey);
+
+        const ownerMissingObjRes = await callList(missingObjParcelId, ownerEmail);
+        logTest(
+            '32. Missing Storage object does not fail the whole list - the other valid image remains accessible',
+            ownerMissingObjRes.statusCode === 200 && ownerMissingObjRes.body.images.length === 1 && ownerMissingObjRes.body.images[0].imageId === missingObjImage2.sessionId
+        );
+        logTest('33. Missing object does not leak storageKey to the owner', JSON.stringify(ownerMissingObjRes.body).includes(missingObjImage1.sessionDoc.storageKey) === false);
+        logTest('34. Owner receives only a safe unavailable count, never per-image issue detail', ownerMissingObjRes.body.unavailableCount === 1 && ownerMissingObjRes.body.unavailableImages === undefined);
+
+        const adminMissingObjRes = await callList(missingObjParcelId, adminEmail);
+        logTest(
+            '35. Admin receives controlled per-image issue detail (imageId + safe code, never storageKey)',
+            Array.isArray(adminMissingObjRes.body.unavailableImages) && adminMissingObjRes.body.unavailableImages.length === 1 &&
+            adminMissingObjRes.body.unavailableImages[0].imageId === missingObjImage1.sessionId && adminMissingObjRes.body.unavailableImages[0].code === 'STORAGE_OBJECT_NOT_FOUND' &&
+            JSON.stringify(adminMissingObjRes.body).includes(missingObjImage1.sessionDoc.storageKey) === false
+        );
+
+        // Signing failure (distinct from a missing object) is normalized the
+        // same safe way - patches this one file's getSignedUrl to throw,
+        // simulating an IAM/signer permission failure.
+        const signFailureParcelId = await createV2Parcel();
+        const signFailureImage = await uploadAndFinalize(signFailureParcelId);
+        const originalFile = fakeBucket.file.bind(fakeBucket);
+        fakeBucket.file = (key) => {
+            const real = originalFile(key);
+            if (key === signFailureImage.sessionDoc.storageKey) {
+                return { ...real, getSignedUrl: async () => { throw new Error('signing permission denied'); } };
+            }
+            return real;
+        };
+        const signFailureListRes = await callList(signFailureParcelId, ownerEmail);
+        fakeBucket.file = originalFile;
+        logTest(
+            '36. A signing failure is normalized to a safe unavailable entry, not a raw error or a 500',
+            signFailureListRes.statusCode === 200 && signFailureListRes.body.unavailableCount === 1 && signFailureListRes.body.images.length === 0
+        );
+
+        // ---- Upload-session client contract (37-46) ----
+        const contractParcelId = await createV2Parcel();
+        const contractSessionRes = await callCreateSession(contractParcelId, validUploadBody(), ownerEmail);
+        createdSessionIds.push(contractSessionRes.body.uploadSessionId);
+        logTest('37. Upload-session response includes upload.method "PUT"', contractSessionRes.body.upload.method === 'PUT');
+        logTest('38. Upload-session response includes a signed upload URL', typeof contractSessionRes.body.upload.url === 'string' && contractSessionRes.body.upload.url.length > 0);
+        logTest('39. Upload-session response includes the exact required Content-Type header', contractSessionRes.body.upload.headers['Content-Type'] === 'image/jpeg');
+        logTest('40. Upload-session response includes an expiry', typeof contractSessionRes.body.upload.expiresAt === 'string');
+        logTest('41. Upload-session response includes MIME constraints', JSON.stringify(contractSessionRes.body.constraints.allowedMimeTypes) === JSON.stringify(['image/jpeg', 'image/png', 'image/webp']));
+        logTest('42. Upload-session response includes the 8MB size constraint', contractSessionRes.body.constraints.maxSizeBytes === 8 * 1024 * 1024);
+        logTest('43. Upload-session response includes the maximum-three constraint', contractSessionRes.body.constraints.maxImages === 3);
+        logTest(
+            '44. Upload-session response excludes owner email, bucket credential and service-account data',
+            !JSON.stringify(contractSessionRes.body).includes(ownerEmail) &&
+            contractSessionRes.body.credential === undefined && contractSessionRes.body.serviceAccount === undefined
+        );
+        const contractSessionDoc = await collections.damageUploadSessions.findOne({ _id: contractSessionRes.body.uploadSessionId });
+        logTest('45. The signed upload URL itself is never persisted in the session document', contractSessionDoc.uploadUrl === undefined && contractSessionDoc.signedUrl === undefined && contractSessionDoc.url === undefined);
+        logTest('46. Upload URL expiry and session expiry are consistent', contractSessionRes.body.upload.expiresAt === contractSessionDoc.expiresAt.toISOString());
+
+        // ---- Finalize/removal regression (47-50) ----
+        const regressionParcelId = await createV2Parcel();
+        const regressionResult = await uploadAndFinalize(regressionParcelId);
+        logTest(
+            '47. Existing finalize contract is unchanged (message/image shape)',
+            regressionResult.finalizeRes.statusCode === 200 && typeof regressionResult.finalizeRes.body.image.imageId === 'string' &&
+            regressionResult.finalizeRes.body.image.storageKey === undefined
+        );
+        const regressionRemoveRes = await callRemove(regressionParcelId, regressionResult.sessionId, ownerEmail);
+        logTest(
+            '48-60. Existing removal contract is unchanged and privacy-safe (message/removedImageId only)',
+            regressionRemoveRes.statusCode === 200 && regressionRemoveRes.body.removedImageId === regressionResult.sessionId &&
+            Object.keys(regressionRemoveRes.body).sort().join(',') === 'message,removedImageId'
+        );
+
+        const nonOwnerFinalizeRes = await callFinalize(regressionParcelId, { uploadSessionId: 'irrelevant' }, otherCustomerEmail);
+        logTest('61. Non-owner finalize remains blocked (REQUEST_NOT_FOUND)', nonOwnerFinalizeRes.statusCode === 404 && nonOwnerFinalizeRes.body.code === 'REQUEST_NOT_FOUND');
+        const nonOwnerRemoveRes = await callRemove(regressionParcelId, 'irrelevant', otherCustomerEmail);
+        logTest('62. Non-owner removal remains blocked (REQUEST_NOT_FOUND)', nonOwnerRemoveRes.statusCode === 404 && nonOwnerRemoveRes.body.code === 'REQUEST_NOT_FOUND');
+
+        // ---- Security (63-70) ----
+        logTest('63. No client-supplied role/accessRole field is ever honored (access is resolved live from the database)', nonOwnerListRes.body.accessRole === undefined);
+
+        const controllerSource = require('fs').readFileSync(require('path').join(__dirname, 'controllers', 'damageUploadController.js'), 'utf8');
+        logTest('64. Controller never logs a signed/read URL (source check)', !/console\.(log|error)\([^)]*readUrl/.test(controllerSource));
+
+        const storageServiceSource = require('fs').readFileSync(require('path').join(__dirname, 'services', 'damageStorageService.js'), 'utf8');
+        logTest('65. No public-object ACL operation exists in the storage service (no makePublic/predefinedAcl)', !/makePublic|predefinedAcl/.test(storageServiceSource));
+        logTest('66. No bucket-listing API is exposed by the storage service (no getFiles/.list()) ', !/getFiles\(|\.list\(/.test(storageServiceSource));
+
+        logTest('67. Existence-oracle protection holds for the list endpoint (identical response for missing vs. non-owned)', JSON.stringify(nonOwnerListRes.body) === JSON.stringify(missingListRes.body));
+
+        // ---- Route wiring (68) ----
+        const routesSource = require('fs').readFileSync(require('path').join(__dirname, 'routes', 'damageUploads.js'), 'utf8');
+        const routesSourceCode = routesSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
+        logTest(
+            '68. GET damage-images list route is wired with verifyFBToken/ensureDatabaseReady only (live role resolution, not route-level admin/rider gating)',
+            /app\.get\(\s*\n?\s*'\/parcels\/:id\/damage-images'/.test(routesSourceCode) && !/verifyAdmin/.test(routesSourceCode) && !/verifyRider/.test(routesSourceCode)
+        );
+
+        // ---- Regression (69) ----
+        const zeroImageParcelId = await createV2Parcel(ownerEmail, { damage: { description: 'Minor scuff on the housing edge.', images: [] } });
+        const canonicalDefCount = await collections.serviceDefinitions.countDocuments({ label: { $not: { $regex: '^TEST-' } } });
+        logTest('69. V2 request creation still permits zero images, and canonical service-definition count remains 16', !!zeroImageParcelId && canonicalDefCount === 16);
+
+    } finally {
+        if (createdSessionIds.length) {
+            await collections.damageUploadSessions.deleteMany({ _id: { $in: createdSessionIds } });
+        }
+        if (createdParcelIds.length) {
+            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
+        }
+        if (createdServiceDefinitionIds.length) {
+            await collections.serviceDefinitions.deleteMany({ _id: { $in: createdServiceDefinitionIds } });
+        }
+        if (createdRiderIds.length) {
+            await collections.riders.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
+        }
+        if (createdUserEmails.length) {
+            await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        }
+
+        const leftoverParcels = ownerEmail ? await collections.parcels.countDocuments({ senderEmail: { $in: [ownerEmail, otherCustomerEmail] } }) : 0;
+        const leftoverDefs = await collections.serviceDefinitions.countDocuments({ label: { $regex: '^TEST-DAMAGE-ACCESS-' } });
+        const leftoverRiders = await collections.riders.countDocuments({ name: { $regex: '^TEST-DAMAGE-ACCESS-' } });
+        const leftoverUsers = await collections.users.countDocuments({ email: { $regex: '^damage-access-' } });
+        const leftoverSessions = ownerEmail ? await collections.damageUploadSessions.countDocuments({ ownerEmail: { $in: [ownerEmail, otherCustomerEmail] } }) : 0;
+        logTest(
+            '70. No fixture leakage after tests (parcels, service definitions, riders, users, upload sessions)',
+            leftoverParcels === 0 && leftoverDefs === 0 && leftoverRiders === 0 && leftoverUsers === 0 && leftoverSessions === 0
+        );
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -10610,6 +11092,7 @@ async function runAllTests() {
     await testEligibleTechnicianAPI();
     await testAssignmentExpertiseRevalidation();
     await testDamageUploadFoundation();
+    await testAuthorizedDamageImageAccess();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

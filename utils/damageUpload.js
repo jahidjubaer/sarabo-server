@@ -9,6 +9,12 @@ const { ALLOWED_IMAGE_MIME_TYPES, MAX_IMAGE_SIZE_BYTES, MAX_DAMAGE_IMAGES } = re
 // Fixed at the midpoint of the spec's 15-30 minute recommended range.
 const UPLOAD_SESSION_TTL_MS = 20 * 60 * 1000;
 
+// Authorized signed read-URL expiry (Phase 6.4 Unit 2) - short-lived by
+// design: damage evidence is private, five minutes is ample for a browser
+// to load an image, and a stale URL simply requires the client to refresh
+// the image list rather than staying valid indefinitely.
+const READ_URL_TTL_MS = 5 * 60 * 1000;
+
 // Only the three MIME types already allowed for a persisted damage image -
 // SVG/GIF/HEIC/PDF/octet-stream are rejected simply by absence from this map.
 const MIME_TO_EXTENSION = Object.freeze({
@@ -79,6 +85,7 @@ function isDamageEvidenceEditable(parcel) {
 
 module.exports = {
     UPLOAD_SESSION_TTL_MS,
+    READ_URL_TTL_MS,
     MIME_TO_EXTENSION,
     FILE_NAME_MAX_LENGTH,
     ALLOWED_IMAGE_MIME_TYPES,

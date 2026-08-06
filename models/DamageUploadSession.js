@@ -60,6 +60,17 @@ class DamageUploadSessionModel {
         );
     }
 
+    // Bounded fetch (at most MAX_DAMAGE_IMAGES per request in practice) used
+    // to resolve each attached damage.images[] entry's imageId - persisted
+    // image metadata carries no explicit imageId field, only storageKey; the
+    // finalized session whose storageKey matches is the join (Phase 6.4
+    // Unit 2, Phase J).
+    async findFinalizedByRequestId(requestId, options = {}) {
+        const findOptions = {};
+        if (options.session) findOptions.session = options.session;
+        return await this.collection.find({ requestId, status: 'finalized' }, findOptions).toArray();
+    }
+
     async markCancelled(id, { session } = {}) {
         return await this.collection.updateOne(
             { _id: id, status: { $in: ['pending', 'uploaded'] } },

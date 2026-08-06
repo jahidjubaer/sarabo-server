@@ -28,6 +28,15 @@ class RiderModel {
         return await this.collection.findOne(query);
     }
 
+    // Resolves "which rider record belongs to this caller" from a verified
+    // token email (Phase 6.4 Unit 2) - never trusts a client-supplied rider
+    // id. Session-aware for callers evaluating access inside a transaction.
+    async findByEmail(email, options = {}) {
+        const findOptions = {};
+        if (options.session) findOptions.session = options.session;
+        return await this.collection.findOne({ email }, findOptions);
+    }
+
     async create(riderData) {
         riderData.status = 'pending';
         riderData.createdAt = new Date();

@@ -161,17 +161,87 @@ through the API impractical). The flow is:
    Storage, never trusting client-declared metadata, then atomically
    attaches the image to the request (MongoDB transaction, max 3 images,
    race-safe).
+4. `GET /parcels/:id/damage-images` (Phase 6.4 Unit 2) - the request owner,
+   an admin, or the currently-assigned technician (while the assignment is
+   still active) can list attached images, each with a fresh, short-lived
+   signed *read* URL generated on demand. No client implementation exists
+   yet for this either.
 
 No Firebase Storage Security Rules deployment is required for this flow:
 signed URLs are pre-authorized by the Admin SDK and bypass Storage Rules
 entirely (rules only govern direct Firebase Client SDK access, which this
 feature does not use). Objects are never made publicly readable; the
-persisted `damage.images[].url` is a stable, non-public identifier, and
-actual byte access requires a fresh short-lived signed read URL (not yet
-exposed by any endpoint in this unit).
+persisted `damage.images[].url` is a stable, non-public identifier, never
+returned by the authorized list endpoint - actual byte access always goes
+through a fresh signed read URL, generated per request, never persisted.
+
+### Browser upload contract
+
+`POST /parcels/:id/damage-images/upload-session` returns:
+
+```json
+{
+  "uploadSessionId": "...",
+  "upload": {
+    "method": "PUT",
+    "url": "https://storage.googleapis.com/...(signed)...",
+    "headers": { "Content-Type": "image/jpeg" },
+    "expiresAt": "2026-01-01T00:20:00.000Z"
+  },
+  "constraints": { "allowedMimeTypes": ["image/jpeg", "image/png", "image/webp"], "maxSizeBytes": 8388608, "maxImages": 3 }
+}
+```
+
+The client must `fetch(upload.url, { method: upload.method, headers: upload.headers, body: fileBytes })` and send the **exact** `Content-Type` header shown - the signed URL was cryptographically signed with that content type, and GCS rejects the PUT if the actual header sent doesn't match.
+
+`GET /parcels/:id/damage-images` returns per-image `readUrl`/`readUrlExpiresAt` (5-minute expiry) - treat `readUrl` as temporary: never persist it (localStorage, app database), keep it only in memory/component state, and re-call this endpoint after `readUrlExpiresAt` to get a fresh one. Never log or send a signed URL to analytics.
 
 `scripts/audit-damage-uploads.js` provides a read-only report of
 expired/abandoned upload sessions - it never deletes anything.
+
+### Non-production live verification (manual, optional)
+
+No Firebase Storage bucket is configured in this repository's default
+development setup - the automated test suite never contacts real Firebase
+Storage (it uses an injected fake adapter). To manually verify the real
+Firebase Storage integration end-to-end, only against a **non-production**
+bucket:
+
+1. Create or reuse a Firebase project/bucket you control that is clearly
+   NOT the production bucket (e.g. a separate dev/staging Firebase project).
+2. Set `FIREBASE_STORAGE_BUCKET` in your local `.env` to that bucket's name.
+3. Confirm the service account behind `FB_SERVICE_KEY` belongs to that same
+   non-production project, or has been granted only narrow, bucket-scoped
+   permissions - never a production project's service account.
+4. Never point `FIREBASE_STORAGE_BUCKET` at a production bucket for
+   ordinary local testing.
+5. Start the local dev server (`node index.js`).
+6. Create a synthetic v2 repair request (a real customer account is fine
+   for a manual local check; avoid touching production data).
+7. Call `POST /parcels/:id/damage-images/upload-session` to get a signed
+   upload URL.
+8. `PUT` a small test image (e.g. a few KB JPEG) to that URL with the exact
+   `Content-Type` header from the response.
+9. Call `POST /parcels/:id/damage-images/finalize` and confirm it returns
+   canonical metadata (not the client's declared values).
+10. Call `GET /parcels/:id/damage-images` and confirm a working, browser-
+    loadable `readUrl` is returned for the image.
+11. Confirm the persisted canonical `url` (visible only via direct database
+    inspection, never via any API response) is **not** directly fetchable
+    anonymously - it should 403/401 without a signed query string.
+12. Call `DELETE /parcels/:id/damage-images/:imageId` and confirm the
+    response reports success.
+13. Confirm both the MongoDB metadata and the Firebase Storage object are
+    gone (re-listing returns no images; the object no longer exists in the
+    bucket).
+14. Delete the synthetic request/session documents you created for this
+    check.
+15. Unset `FIREBASE_STORAGE_BUCKET` again afterward if you don't want the
+    feature active in your local environment by default.
+
+Do not perform this walkthrough against a production bucket, and never
+commit real project IDs, bucket names, or credentials into this file or any
+tracked file.
 
 ### Stripe webhook configuration
 
