@@ -28,14 +28,22 @@ const QUOTE_SUBMITTED = 'quote_submitted';
 const QUOTE_APPROVED = 'quote_approved';
 const QUOTE_REJECTED = 'quote_rejected';
 
+// Approved-quote payment completed (Phase 6.4 Unit 6). Same design as the
+// statuses above: deliberately NOT in VALID_STATUSES (the generic PATCH
+// /parcels/:id/status can never reach or leave it), reached only through the
+// trusted Stripe payment-completion pipeline (services/paymentProcessor.js),
+// but IS active below - a paid-but-not-yet-repaired request still occupies its
+// technician, who stays busy until the repair workflow (a future unit) runs.
+const PAYMENT_COMPLETED = 'payment_completed';
+
 // The subset of statuses that represent a technician actively holding a
 // repair request - i.e. every status between assignment and completion,
-// including inspection_completed and the quote states. Used by
-// assignRiderToParcel (Phase 6.2 Unit 2) and technicianEligibilityService to
-// find any request still occupying a technician's single active-assignment slot.
+// including inspection_completed, the quote states, and payment_completed.
+// Used by assignRiderToParcel (Phase 6.2 Unit 2) and technicianEligibilityService
+// to find any request still occupying a technician's single active-assignment slot.
 const ACTIVE_STATUSES = [
     ...VALID_STATUSES.filter((status) => status !== 'parcel_delivered'),
-    INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED
+    INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, PAYMENT_COMPLETED
 ];
 
 // Maps a parcel's current deliveryStatus to the statuses it may move to next.
@@ -51,4 +59,4 @@ function isValidTransition(currentStatus, nextStatus) {
     return Array.isArray(allowedNext) && allowedNext.includes(nextStatus);
 }
 
-module.exports = { VALID_STATUSES, ACTIVE_STATUSES, INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, isValidTransition };
+module.exports = { VALID_STATUSES, ACTIVE_STATUSES, INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, PAYMENT_COMPLETED, isValidTransition };

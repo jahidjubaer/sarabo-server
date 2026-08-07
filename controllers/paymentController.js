@@ -2,9 +2,9 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const { ObjectId } = require('mongodb');
 const { createPaymentProcessor, normalize } = require('../services/paymentProcessor');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
-const { getPaymentEligibility } = require('../services/paymentEligibility');
+const { getPaymentEligibility, getV2PaymentEligibility } = require('../services/paymentEligibility');
 const { createNotificationService } = require('../services/notificationService');
-const { PAYMENT_CURRENCY, toSmallestUnit } = require('../config/paymentConfig');
+const { PAYMENT_CURRENCY, V2_PAYMENT_CURRENCY, toSmallestUnit } = require('../config/paymentConfig');
 const { normalizeSiteOrigin } = require('../config/siteOrigin');
 
 // Fails fast at module load (server startup) rather than at first checkout
@@ -185,6 +185,159 @@ class PaymentController {
         }
     }
 
+    // --- Repair Request v2 approved-quote payments (Phase 6.4 Unit 6) ---
+
+    // Owner-only read of whether an approved v2 quote is payable right now. The
+    // amount and currency come entirely from the persisted approved quote; no
+    // Stripe secret or internal field is ever returned. The client uses this to
+    // decide whether to show Pay Now - eligibility is never inferred from the
+    // quote status alone. An ineligible-but-owned request returns 200 with a
+    // controlled { eligible:false, code } so the client can render an
+    // appropriate state without treating it as an error.
+    async checkV2PaymentEligibility(req, res) {
+        try {
+            const id = req.params.id;
+            if (!ObjectId.isValid(id)) {
+                return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
+            }
+            const parcel = await this.Parcel.findById(id);
+            if (!parcel) {
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+            }
+            if (normalize(parcel.senderEmail) !== normalize(req.decoded_email)) {
+                return res.status(403).send({ message: 'forbidden access', code: 'NOT_REQUEST_OWNER' });
+            }
+            const eligibility = getV2PaymentEligibility(parcel);
+            if (!eligibility.eligible) {
+                return res.send({ eligible: false, code: eligibility.code });
+            }
+            return res.send({
+                eligible: true,
+                amount: eligibility.amount,
+                currency: eligibility.currency,
+                quoteVersion: eligibility.quoteVersion,
+            });
+        } catch (error) {
+            res.status(500).send({ message: 'Error checking payment eligibility', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // Creates a Stripe Checkout Session for an approved v2 quote. The request
+    // body is ignored entirely: the amount (BDT) and currency are derived from
+    // the approved quote and the owner from the authenticated token - a client
+    // can never influence any of them. Reuses the same per-parcel checkout-slot
+    // concurrency guard as the legacy flow, so repeated clicks or parallel
+    // requests never spawn more than one payable Stripe session. Completion
+    // funnels through the same idempotent processCheckoutSession (v2 branch).
+    async createV2CheckoutSession(req, res) {
+        try {
+            const id = req.params.id;
+            if (!ObjectId.isValid(id)) {
+                return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
+            }
+            const parcel = await this.Parcel.findById(id);
+            if (!parcel) {
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+            }
+            const ownerEmail = normalize(parcel.senderEmail);
+            if (ownerEmail !== normalize(req.decoded_email)) {
+                return res.status(403).send({ message: 'forbidden access', code: 'NOT_REQUEST_OWNER' });
+            }
+
+            const eligibility = getV2PaymentEligibility(parcel);
+            if (!eligibility.eligible) {
+                const statusByCode = { ALREADY_PAID: 409 };
+                return res.status(statusByCode[eligibility.code] || 409).send({ message: eligibility.reason, code: eligibility.code });
+            }
+
+            const amountTaka = eligibility.amount;
+            const unitAmount = toSmallestUnit(amountTaka);
+            const parcelId = parcel._id.toString();
+
+            const conflictResponse = () => res.status(409).send({
+                message: 'a checkout session is already being created for this request, please try again shortly',
+                code: 'CHECKOUT_CREATION_IN_PROGRESS'
+            });
+
+            // Reuse an existing, still-open Stripe session for this parcel - the
+            // real multi-tab / rapid-retry / parallel-request guard.
+            const activeRow = await this.checkoutSessions.findActive(parcelId);
+            if (activeRow) {
+                if (activeRow.status === 'creating') {
+                    return conflictResponse();
+                }
+                try {
+                    const existingSession = await stripe.checkout.sessions.retrieve(activeRow.sessionId);
+                    if (existingSession.status === 'open' && existingSession.url) {
+                        return res.send({ url: existingSession.url, reused: true });
+                    }
+                } catch (stripeError) {
+                    console.error('Stripe session retrieval failed during reuse check:', stripeError.message);
+                }
+                await this.checkoutSessions.markFailed(activeRow._id);
+            }
+
+            const claimResult = await this.checkoutSessions.claim({
+                parcelId, ownerEmail, amount: amountTaka, currency: V2_PAYMENT_CURRENCY
+            });
+            if (!claimResult.claimed) {
+                return conflictResponse();
+            }
+
+            let session;
+            try {
+                session = await stripe.checkout.sessions.create(
+                    {
+                        line_items: [
+                            {
+                                price_data: {
+                                    currency: V2_PAYMENT_CURRENCY,
+                                    unit_amount: unitAmount,
+                                    product_data: {
+                                        name: `Repair request: ${parcel.parcelName}`
+                                    }
+                                },
+                                quantity: 1,
+                            },
+                        ],
+                        mode: 'payment',
+                        // Only safe, non-authoritative references - never an
+                        // amount, currency, or any client-supplied field. The
+                        // completion path re-derives everything from the parcel.
+                        metadata: {
+                            parcelId,
+                            trackingId: parcel.trackingId,
+                            schemaVersion: '2',
+                            quoteVersion: String(eligibility.quoteVersion),
+                        },
+                        customer_email: parcel.senderEmail,
+                        success_url: `${SITE_ORIGIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+                        cancel_url: `${SITE_ORIGIN}/dashboard/payment-cancelled`,
+                    },
+                    { idempotencyKey: `v2-checkout-create-${claimResult.id.toString()}` }
+                );
+            } catch (stripeError) {
+                console.error('V2 checkout session creation failed:', stripeError.message);
+                await this.checkoutSessions.markFailed(claimResult.id);
+                return res.status(500).send({ message: 'Error creating checkout session' });
+            }
+
+            const expiresAt = session.expires_at
+                ? new Date(session.expires_at * 1000)
+                : new Date(Date.now() + 24 * 60 * 60 * 1000);
+            try {
+                await this.checkoutSessions.markOpen(claimResult.id, { sessionId: session.id, expiresAt });
+            } catch (dbError) {
+                console.error('Failed to persist checkout session record:', dbError.message);
+            }
+
+            res.send({ url: session.url, reused: false });
+        } catch (error) {
+            console.error('V2 checkout session creation failed:', error.message);
+            res.status(500).send({ message: 'Error creating checkout session' });
+        }
+    }
+
     // Verifies a completed Stripe Checkout Session server-side and marks the
     // corresponding request paid. The browser only ever supplies the
     // sessionId - every other fact (owner, amount, currency, parcel state)
@@ -237,6 +390,8 @@ class PaymentController {
                     return res.status(409).send({ message: 'payment session is not in a valid state' });
                 case 'NOT_PAID':
                     return res.status(409).send({ message: 'payment has not been completed' });
+                case 'V2_QUOTE_NOT_APPROVED':
+                    return res.status(409).send({ message: 'the repair quote is not in a payable state' });
                 case 'AMOUNT_MISMATCH':
                     return res.status(409).send({ message: 'payment amount does not match this request' });
                 case 'CURRENCY_MISMATCH':

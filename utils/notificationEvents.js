@@ -208,6 +208,32 @@ const NOTIFICATION_EVENTS = {
         actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
         deduplicationKey: ({ entityId }) => `repair:${entityId}:payment_confirmed`,
     },
+    payment_completed: {
+        entityType: 'parcel',
+        // Owner-facing (v2 approved-quote payment, Phase 6.4 Unit 6). Same
+        // variable-role reasoning as technician_assigned/payment_confirmed.
+        // Carries no card data, no Stripe IDs, no amount - just the tracking id.
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: [],
+        title: () => 'Payment received',
+        message: () => 'Payment received. Your repair will proceed to the next stage.',
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:payment_completed`,
+    },
+    payment_completed_technician: {
+        entityType: 'parcel',
+        // Addressed to the assigned technician - a fixed single role.
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: [],
+        title: () => 'Payment completed',
+        message: () => 'Payment has been completed for the assigned repair request.',
+        actionUrl: () => '/dashboard/assigned-jobs',
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:payment_completed_technician`,
+    },
 };
 
 module.exports = { NOTIFICATION_EVENTS, ENTITY_TYPES, ROLES, PRIORITIES };

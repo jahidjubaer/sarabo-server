@@ -2,7 +2,9 @@ const { ObjectId } = require('mongodb');
 const { client } = require('../config/database');
 const { logTracking } = require('../middleware/logging');
 const { createCheckoutSessionManager } = require('./checkoutSessionManager');
-const { PAYMENT_CURRENCY, toSmallestUnit, isValidStoredCost } = require('../config/paymentConfig');
+const { PAYMENT_CURRENCY, V2_PAYMENT_CURRENCY, toSmallestUnit, isValidStoredCost, isValidQuoteTotal, isBdtQuoteCurrency } = require('../config/paymentConfig');
+const { isV2RepairRequest } = require('../utils/repairRequestSchema');
+const { QUOTE_APPROVED, PAYMENT_COMPLETED } = require('../utils/parcelStatus');
 
 function normalize(value) {
     return (value || '').trim().toLowerCase();
@@ -31,6 +33,189 @@ function normalize(value) {
 function createPaymentProcessor(models, collections, notifications) {
     const { Parcel, User } = models;
     const checkoutSessionManager = createCheckoutSessionManager(collections);
+
+    // Completes a v2 approved-quote payment. Reached only from the shared
+    // processor below, after session mode/paid, metadata, parcel load, and
+    // ownership have already been verified for a v2 parcel. Everything
+    // authoritative is re-derived from the persisted approved quote; the client
+    // (and Stripe metadata) never influence the amount or currency here.
+    async function completeV2CheckoutSession({ session, parcel, sessionId, source }) {
+        const quote = parcel.quote;
+        // The quote must still be approved and the request still awaiting
+        // payment. These mirror the eligibility rules but are re-checked here
+        // against fresh parcel state, since a payment can only be finalized for
+        // a request that is genuinely in the payable state right now.
+        if (!quote || quote.status !== 'approved') {
+            return { code: 'V2_QUOTE_NOT_APPROVED' };
+        }
+        if (!isBdtQuoteCurrency(quote.currency) || !isValidQuoteTotal(quote.totalAmount)) {
+            return { code: 'INVALID_STORED_COST' };
+        }
+
+        const expectedAmount = toSmallestUnit(quote.totalAmount);
+        if (session.amount_total !== expectedAmount) {
+            return { code: 'AMOUNT_MISMATCH' };
+        }
+        if (normalize(session.currency) !== V2_PAYMENT_CURRENCY) {
+            return { code: 'CURRENCY_MISMATCH' };
+        }
+
+        // A cancelled request can never become paid - the customer's
+        // cancellation is authoritative (common non-racing case; the guarded
+        // update below covers the true concurrent race).
+        if (parcel.deliveryStatus === 'cancelled') {
+            return { code: 'REQUEST_CANCELLED' };
+        }
+        // Already completed through a different session (this exact session was
+        // ruled out by the existing-payment fast path in the caller).
+        if (parcel.deliveryStatus === PAYMENT_COMPLETED || (parcel.payment && parcel.payment.status === 'completed')) {
+            return { code: 'ALREADY_PAID_OTHER_SESSION' };
+        }
+
+        const ownerEmail = normalize(parcel.senderEmail);
+        const trackingId = parcel.trackingId;
+        const paymentIntentId = session.payment_intent || null;
+
+        const paymentRecord = {
+            sessionId,
+            transactionId: paymentIntentId,
+            parcelId: parcel._id.toString(),
+            trackingId,
+            customerEmail: ownerEmail,
+            amount: quote.totalAmount,
+            currency: quote.currency,
+            paymentStatus: 'paid',
+            // v2 provenance - never used for authorization; sessionId remains
+            // the sole idempotency key (unique index on payments.sessionId).
+            schemaVersion: 2,
+            quoteVersion: quote.version,
+            source,
+        };
+
+        const mongoSession = client.startSession();
+        let committed = null;
+        let conflict = false;
+        let ownerRoleUnresolved = false;
+        try {
+            await mongoSession.withTransaction(async () => {
+                conflict = false;
+                ownerRoleUnresolved = false;
+                committed = null;
+
+                const resolvedOwnerRole = await User.findRoleByEmail(parcel.senderEmail, { session: mongoSession });
+                if (!resolvedOwnerRole) {
+                    ownerRoleUnresolved = true;
+                    return;
+                }
+
+                const now = new Date();
+                let insertedId;
+                try {
+                    paymentRecord.paidAt = now;
+                    const insertResult = await collections.payments.insertOne(paymentRecord, { session: mongoSession });
+                    insertedId = insertResult.insertedId;
+                } catch (insertError) {
+                    if (insertError.code === 11000) {
+                        // A concurrent completion (webhook, browser, or Stripe
+                        // retry) already recorded this exact session.
+                        conflict = true;
+                        return;
+                    }
+                    throw insertError;
+                }
+
+                // Guarded update - the filter itself resolves every race: a
+                // concurrent cancellation, a concurrent completion, or a quote
+                // that is no longer approved all make matchedCount 0. The
+                // approved quote total/currency were validated above; the
+                // payment sub-document records the completion without ever
+                // altering the quote line items.
+                const updateResult = await collections.parcels.updateOne(
+                    {
+                        _id: parcel._id,
+                        schemaVersion: 2,
+                        deliveryStatus: QUOTE_APPROVED,
+                        'quote.status': 'approved',
+                        'payment.status': { $ne: 'completed' },
+                    },
+                    {
+                        $set: {
+                            deliveryStatus: PAYMENT_COMPLETED,
+                            payment: {
+                                status: 'completed',
+                                provider: 'stripe',
+                                paymentIntentId,
+                                amount: quote.totalAmount,
+                                currency: quote.currency,
+                                quoteVersion: quote.version,
+                                completedAt: now,
+                            },
+                            updatedAt: now,
+                        },
+                    },
+                    { session: mongoSession }
+                );
+                if (updateResult.matchedCount === 0) {
+                    conflict = true;
+                    await collections.payments.deleteOne({ _id: insertedId }, { session: mongoSession });
+                    return;
+                }
+
+                // Release the active checkout slot atomically with completion.
+                await checkoutSessionManager.completeByParcelId(parcel._id.toString(), mongoSession);
+
+                // Tracking + notifications join this same transaction, so no
+                // payment can commit without them and none can be emitted for a
+                // payment that did not commit. Safe text only - never card
+                // data, a client secret, a Stripe id, or an amount.
+                await logTracking(collections.trackings, trackingId, PAYMENT_COMPLETED, mongoSession);
+                await notifications.createNotification({
+                    session: mongoSession,
+                    recipientEmail: parcel.senderEmail,
+                    recipientRole: resolvedOwnerRole,
+                    type: 'payment_completed',
+                    entityType: 'parcel',
+                    entityId: parcel._id.toString(),
+                    actorEmail: null,
+                    metadata: { trackingId },
+                });
+                if (parcel.riderEmail) {
+                    await notifications.createNotification({
+                        session: mongoSession,
+                        recipientEmail: parcel.riderEmail,
+                        recipientRole: 'rider',
+                        type: 'payment_completed_technician',
+                        entityType: 'parcel',
+                        entityId: parcel._id.toString(),
+                        actorEmail: null,
+                        metadata: { trackingId },
+                    });
+                }
+
+                committed = { transactionId: paymentIntentId, trackingId };
+            });
+        } finally {
+            await mongoSession.endSession();
+        }
+
+        if (ownerRoleUnresolved) {
+            return { code: 'REPAIR_OWNER_ROLE_UNRESOLVED' };
+        }
+        if (conflict) {
+            const winner = await collections.payments.findOne({ sessionId });
+            if (winner) {
+                await checkoutSessionManager.completeByParcelId(winner.parcelId);
+                return { code: 'OK', alreadyProcessed: true, transactionId: winner.transactionId, trackingId: winner.trackingId };
+            }
+            const latestParcel = await Parcel.findById(parcel._id.toString());
+            if (latestParcel && latestParcel.deliveryStatus === 'cancelled') {
+                return { code: 'REQUEST_CANCELLED' };
+            }
+            return { code: 'ALREADY_PAID_OTHER_SESSION' };
+        }
+
+        return { code: 'OK', alreadyProcessed: false, transactionId: committed.transactionId, trackingId: committed.trackingId };
+    }
 
     return async function processVerifiedCheckoutSession({ session, source, callerEmail = null }) {
         const sessionId = session.id;
@@ -88,6 +273,21 @@ function createPaymentProcessor(models, collections, notifications) {
         }
         if (normalizedCaller && normalizedCaller !== ownerEmail) {
             return { code: 'OWNERSHIP_MISMATCH' };
+        }
+
+        // Repair Request v2 approved-quote payments (Phase 6.4 Unit 6) diverge
+        // from the legacy path entirely from here: the authoritative amount and
+        // currency come from the immutable approved quote (BDT), never from
+        // parcel.cost/PAYMENT_CURRENCY, and completion transitions
+        // deliveryStatus to payment_completed rather than only flipping
+        // paymentStatus. The shared checks above (session mode/paid, metadata,
+        // parcel load, ownership) and the idempotent existing-payment fast path
+        // at the top apply to both paths unchanged. A legacy request never
+        // reaches this branch (legacy checkout creation rejects every v2
+        // request), and a v2 request never falls through to the legacy code
+        // below.
+        if (isV2RepairRequest(parcel)) {
+            return await completeV2CheckoutSession({ session, parcel, sessionId, source });
         }
 
         const cost = Number(parcel.cost);

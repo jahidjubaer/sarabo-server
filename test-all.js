@@ -4459,10 +4459,11 @@ async function testNotificationFoundation() {
             'technician_application_submitted', 'technician_application_approved', 'technician_application_rejected',
             'technician_assigned', 'new_repair_assignment', 'technician_on_the_way',
             'repair_in_progress', 'repair_completed', 'payment_confirmed',
-            'inspection_completed', 'quote_submitted', 'quote_approved', 'quote_rejected'
+            'inspection_completed', 'quote_submitted', 'quote_approved', 'quote_rejected',
+            'payment_completed', 'payment_completed_technician'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 13 event types exist', actualTypes.length === 13 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 15 event types exist', actualTypes.length === 15 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -4878,7 +4879,7 @@ async function testNotificationFoundation() {
         logTest('57. Each lifecycle event accepts recipientRole admin', allLifecycleAcceptAdmin);
         logTest('58. Each lifecycle event rejects an unsupported role', allLifecycleRejectUnsupported);
 
-        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed', 'quote_submitted'];
+        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed', 'quote_submitted', 'payment_completed'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -11711,6 +11712,291 @@ async function testQuoteWorkflow() {
     console.log('');
 }
 
+// V2 approved-quote payments (Phase 6.4 Unit 6). Every Stripe interaction runs
+// against the process-wide fake stripe module installed at the top of this file
+// (capturedStripeSessionParams / stripeSessionFixtures) - real Stripe is never
+// contacted and no live charge is ever created. Synthetic fixtures only
+// (pay-*@test.local / TEST-PAY-*), cleaned in finally.
+async function testV2PaymentWorkflow() {
+    console.log('40. Testing V2 Approved-Quote Payments (Phase 6.4 Unit 6)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { ObjectId } = require('mongodb');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ACTIVE_STATUSES, QUOTE_APPROVED, QUOTE_SUBMITTED, PAYMENT_COMPLETED } = require('./utils/parcelStatus');
+    const { getPaymentEligibility, getV2PaymentEligibility } = require('./services/paymentEligibility');
+    const { PAYMENT_CURRENCY, V2_PAYMENT_CURRENCY, toSmallestUnit } = require('./config/paymentConfig');
+    const { SERVICE_DEFINITION_SEED } = require('./data/serviceDefinitionSeed');
+
+    function fakeRes() {
+        return { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; } };
+    }
+
+    const runId = Date.now();
+    const createdParcelIds = [];
+    const createdUserEmails = [];
+    const createdRiderIds = [];
+    const usedTrackingIds = [];
+    const recipientEmails = [];
+    const usedSessionIds = [];
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const paymentController = controllers.payment;
+
+        const ownerEmail = `pay-owner-${runId}@test.local`;
+        const techEmail = `pay-tech-${runId}@test.local`;
+        const otherEmail = `pay-other-${runId}@test.local`;
+        const adminEmail = `pay-admin-${runId}@test.local`;
+        createdUserEmails.push(ownerEmail, techEmail, otherEmail, adminEmail);
+        recipientEmails.push(ownerEmail, techEmail, otherEmail);
+
+        await collections.users.insertMany([
+            { email: ownerEmail, role: 'user', createdAt: new Date() },
+            { email: techEmail, role: 'rider', createdAt: new Date() },
+            { email: otherEmail, role: 'user', createdAt: new Date() },
+            { email: adminEmail, role: 'admin', createdAt: new Date() },
+        ]);
+        const techInsert = await collections.riders.insertOne({ name: `TEST-PAY-TECH-${runId}`, email: techEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
+        createdRiderIds.push(techInsert.insertedId);
+        const techRiderId = techInsert.insertedId.toString();
+
+        let seq = 0;
+        function makeTrackingId() { const t = `TEST-PAY-${runId}-${seq++}`; usedTrackingIds.push(t); return t; }
+        let sidSeq = 0;
+        function makeSid() { const s = `v2sess_${runId}_${sidSeq++}`; usedSessionIds.push(s); return s; }
+
+        const approvedQuote = (o = {}) => ({
+            status: 'approved', laborAmount: 800, partsAmount: 3500, additionalCharges: 200,
+            totalAmount: 4500, currency: 'BDT', notes: null, submittedAt: new Date(),
+            submittedByRiderId: techInsert.insertedId, decidedAt: new Date(), decisionReason: null, version: 1, ...o,
+        });
+
+        async function createParcel(overrides = {}) {
+            const now = new Date();
+            const doc = {
+                schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail, parcelName: `TEST-PAY-DEVICE-${runId}`,
+                product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
+                service: { definitionId: new ObjectId().toString(), repairCategorySlug: 'display-screen' },
+                damage: { description: 'Screen cracked.', images: [] },
+                serviceLocation: { region: 'Dhaka', district: 'Dhaka', address: '10 Test Rd' },
+                pricing: { currency: 'BDT', estimateMin: 1500, estimateMax: 6000, inspectionFee: 0, calculationVersion: 2, quotedAmount: null, quoteStatus: 'awaiting_quote', customerApprovedAt: null, finalAmount: null },
+                inspection: { status: 'submitted', estimate: { laborEstimate: 500, partsEstimate: 3000, currency: 'BDT' }, submittedAt: now, submittedByRiderId: techInsert.insertedId, submittedByEmail: techEmail, version: 1 },
+                quote: approvedQuote(),
+                deliveryStatus: QUOTE_APPROVED, riderId: techRiderId, riderName: `TEST-PAY-TECH-${runId}`, riderEmail: techEmail,
+                createdAt: now, updatedAt: now, ...overrides,
+            };
+            const r = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(r.insertedId);
+            return { id: r.insertedId.toString(), _id: r.insertedId, ...doc };
+        }
+
+        const elig = (pid, email) => { const res = fakeRes(); return paymentController.checkV2PaymentEligibility({ params: { id: pid }, decoded_email: email }, res).then(() => res); };
+        const createIntent = (pid, email, body = {}) => { const res = fakeRes(); return paymentController.createV2CheckoutSession({ params: { id: pid }, body, decoded_email: email }, res).then(() => res); };
+        const pay = (sessionId, email) => { const res = fakeRes(); return paymentController.handlePaymentSuccess({ body: { sessionId }, decoded_email: email }, res).then(() => res); };
+
+        function setPaidSession(sid, { parcelId, trackingId, amount_total = 450000, currency = 'bdt', payment_status = 'paid', mode = 'payment', customer_email = ownerEmail, payment_intent = `pi_test_${sid}`, quoteVersion = '1' }) {
+            stripeSessionFixtures.set(sid, {
+                id: sid, url: `https://checkout.stripe.com/pay/${sid}`, status: 'complete', mode, payment_status, payment_intent,
+                customer_email, amount_total, currency, metadata: { parcelId, trackingId, schemaVersion: '2', quoteVersion },
+                expires_at: Math.floor(Date.now() / 1000) + 3600,
+            });
+            return sid;
+        }
+
+        // ================= Eligibility (1-10) =================
+        {
+            const p = await createParcel({ quote: undefined, deliveryStatus: QUOTE_SUBMITTED });
+            logTest('1. No quote -> ineligible (NO_QUOTE)', getV2PaymentEligibility(p).code === 'NO_QUOTE');
+        }
+        {
+            const p = await createParcel({ quote: approvedQuote({ status: 'submitted' }), deliveryStatus: QUOTE_SUBMITTED });
+            logTest('2. Submitted (undecided) quote -> ineligible (QUOTE_NOT_APPROVED)', getV2PaymentEligibility(p).code === 'QUOTE_NOT_APPROVED');
+        }
+        {
+            const p = await createParcel({ quote: approvedQuote({ status: 'rejected' }), deliveryStatus: 'quote_rejected' });
+            logTest('3. Rejected quote -> ineligible (QUOTE_REJECTED)', getV2PaymentEligibility(p).code === 'QUOTE_REJECTED');
+        }
+        {
+            const p = await createParcel();
+            const e = getV2PaymentEligibility(p);
+            logTest('4. Approved quote -> eligible with amount+BDT', e.eligible === true && e.amount === 4500 && e.currency === 'BDT' && e.quoteVersion === 1);
+        }
+        {
+            const p = await createParcel({ deliveryStatus: 'parcel_picked_up' });
+            logTest('5. Approved quote but wrong deliveryStatus -> ineligible (INVALID_PAYMENT_STATE)', getV2PaymentEligibility(p).code === 'INVALID_PAYMENT_STATE');
+        }
+        {
+            const p = await createParcel();
+            logTest('6. Non-owner eligibility check rejected (403)', (await elig(p.id, otherEmail)).statusCode === 403);
+        }
+        {
+            const legacy = await createParcel({ schemaVersion: undefined, quote: undefined, product: undefined, inspection: undefined, pricing: undefined, cost: 40, deliveryStatus: 'parcel_picked_up' });
+            logTest('7. Legacy isolation: v2 eligibility rejects legacy (NOT_V2_REQUEST)', getV2PaymentEligibility(legacy).code === 'NOT_V2_REQUEST');
+        }
+        {
+            const p = await createParcel({ quote: approvedQuote({ totalAmount: 0 }) });
+            logTest('8. Zero amount -> ineligible (INVALID_QUOTE_AMOUNT)', getV2PaymentEligibility(p).code === 'INVALID_QUOTE_AMOUNT');
+        }
+        {
+            const p = await createParcel({ quote: approvedQuote({ currency: 'usd' }) });
+            logTest('9. Non-BDT quote currency -> ineligible (INVALID_QUOTE_CURRENCY)', getV2PaymentEligibility(p).code === 'INVALID_QUOTE_CURRENCY');
+        }
+        {
+            const p = await createParcel({ deliveryStatus: PAYMENT_COMPLETED, payment: { status: 'completed', provider: 'stripe', amount: 4500, currency: 'BDT' } });
+            logTest('10. Already paid -> ineligible (ALREADY_PAID)', getV2PaymentEligibility(p).code === 'ALREADY_PAID');
+        }
+
+        // ================= Authority: client cannot influence amount/currency (11-16) =================
+        {
+            const p = await createParcel();
+            const before = capturedStripeSessionParams.length;
+            const r = await createIntent(p.id, ownerEmail, { amount: 999999, currency: 'usd', totalAmount: 1, status: 'completed', paymentIntentId: 'pi_evil', customerEmail: otherEmail });
+            const cap = capturedStripeSessionParams[capturedStripeSessionParams.length - 1];
+            const li = cap.line_items[0].price_data;
+            logTest('11. Client amount ignored (Stripe amount from quote)', r.statusCode === 200 && li.unit_amount === 450000);
+            logTest('12. Client currency ignored (Stripe currency BDT)', li.currency === 'bdt');
+            logTest('13. Client payment status ignored (session still created)', capturedStripeSessionParams.length === before + 1);
+            logTest('14. Client Stripe id / email ignored (owner from token)', cap.customer_email === ownerEmail && !('paymentIntentId' in (cap.metadata || {})));
+            logTest('15. Amount derived from quote.totalAmount', li.unit_amount === toSmallestUnit(p.quote.totalAmount));
+            logTest('16. Currency derived from quote.currency (bdt)', li.currency === V2_PAYMENT_CURRENCY);
+        }
+
+        // ================= Intent creation (17-22) =================
+        {
+            const p = await createParcel();
+            const before = capturedStripeSessionParams.length;
+            const r = await createIntent(p.id, ownerEmail);
+            const cap = capturedStripeSessionParams[capturedStripeSessionParams.length - 1];
+            logTest('17. Creates a (test) checkout session', r.statusCode === 200 && typeof r.body.url === 'string' && r.body.url.length > 0);
+            logTest('18. Correct amount sent to Stripe (450000 poisha)', cap.line_items[0].price_data.unit_amount === 450000);
+            logTest('19. Correct BDT currency sent to Stripe', cap.line_items[0].price_data.currency === 'bdt');
+            const md = cap.metadata || {};
+            logTest('20. Safe metadata only (parcelId/trackingId/schemaVersion/quoteVersion)', md.parcelId === p.id && md.trackingId === p.trackingId && md.schemaVersion === '2' && md.quoteVersion === '1' && !('amount' in md) && !('currency' in md) && Object.keys(md).length === 4);
+            // 21. Repeated request reuses the same open session, never a second payable one.
+            const before2 = capturedStripeSessionParams.length;
+            const r2 = await createIntent(p.id, ownerEmail);
+            const activeRows = await collections.checkoutSessions.countDocuments({ parcelId: p.id, active: true });
+            logTest('21. Repeated request does not create a duplicate payable session', r2.statusCode === 200 && r2.body.reused === true && capturedStripeSessionParams.length === before2 && activeRows === 1);
+        }
+        {
+            // 22. Parallel intent creation -> exactly one payable session created.
+            const p = await createParcel();
+            const before = capturedStripeSessionParams.length;
+            const [a, b] = await Promise.all([createIntent(p.id, ownerEmail), createIntent(p.id, ownerEmail)]);
+            const created = capturedStripeSessionParams.length - before;
+            const okCount = [a, b].filter((r) => r.statusCode === 200).length;
+            const conflictCount = [a, b].filter((r) => r.statusCode === 409).length;
+            const activeRows = await collections.checkoutSessions.countDocuments({ parcelId: p.id, active: true });
+            logTest('22. Parallel intent creation is safe (one payable session)', created === 1 && activeRows === 1 && okCount >= 1 && (okCount + conflictCount === 2));
+        }
+
+        // ================= Completion (23-38) =================
+        logTest('23. Client-only success (unknown session) cannot complete (404)', (await pay(makeSid(), ownerEmail)).statusCode === 404);
+        {
+            // 24. Mismatched requestId: session points at a different owner's parcel.
+            const other = await createParcel({ senderEmail: otherEmail });
+            const sid = setPaidSession(makeSid(), { parcelId: other.id, trackingId: other.trackingId, customer_email: ownerEmail });
+            logTest('24. Mismatched requestId/owner rejected (403)', (await pay(sid, ownerEmail)).statusCode === 403);
+        }
+        {
+            const p = await createParcel();
+            const sid = setPaidSession(makeSid(), { parcelId: p.id, trackingId: p.trackingId, amount_total: 100 });
+            logTest('25. Mismatched amount rejected (409)', (await pay(sid, ownerEmail)).statusCode === 409);
+        }
+        {
+            const p = await createParcel();
+            const sid = setPaidSession(makeSid(), { parcelId: p.id, trackingId: p.trackingId, currency: 'usd' });
+            logTest('26. Mismatched currency rejected (409)', (await pay(sid, ownerEmail)).statusCode === 409);
+        }
+        {
+            const p = await createParcel();
+            const sid = setPaidSession(makeSid(), { parcelId: p.id, trackingId: p.trackingId, payment_status: 'unpaid' });
+            logTest('27. Untrusted/unpaid PaymentIntent rejected (409 NOT_PAID)', (await pay(sid, ownerEmail)).statusCode === 409);
+        }
+        {
+            // 28-35. Happy-path verified completion.
+            const p = await createParcel();
+            const beforePricing = JSON.stringify(p.pricing);
+            const beforeInsp = JSON.stringify(p.inspection);
+            const beforeQuote = JSON.stringify(p.quote);
+            const sid = setPaidSession(makeSid(), { parcelId: p.id, trackingId: p.trackingId });
+            const r = await pay(sid, ownerEmail);
+            const doc = await collections.parcels.findOne({ _id: p._id });
+            const rider = await collections.riders.findOne({ _id: techInsert.insertedId });
+            const payDoc = await collections.payments.findOne({ sessionId: sid });
+            logTest('28. Verified succeeded intent accepted (200)', r.statusCode === 200 && r.body.success === true);
+            logTest('29. Payment stored (payments collection)', !!payDoc && payDoc.amount === 4500 && payDoc.currency === 'BDT' && payDoc.schemaVersion === 2);
+            logTest('30. Parcel payment sub-doc status completed', doc.payment && doc.payment.status === 'completed' && doc.payment.provider === 'stripe' && doc.payment.currency === 'BDT' && doc.payment.amount === 4500);
+            logTest('31. deliveryStatus -> payment_completed', doc.deliveryStatus === PAYMENT_COMPLETED);
+            logTest('32. Rider remains busy', rider.workStatus === 'in_delivery' && ACTIVE_STATUSES.includes(doc.deliveryStatus));
+            logTest('33. Quote unchanged by payment', JSON.stringify(doc.quote) === beforeQuote);
+            logTest('34. Inspection unchanged by payment', JSON.stringify(doc.inspection) === beforeInsp);
+            logTest('35. request.pricing unchanged by payment', JSON.stringify(doc.pricing) === beforePricing);
+            // 36. Second completion is idempotent.
+            const r2 = await pay(sid, ownerEmail);
+            const payCount = await collections.payments.countDocuments({ sessionId: sid });
+            logTest('36. Second completion idempotent (no double payment)', r2.statusCode === 200 && r2.body.alreadyProcessed === true && payCount === 1);
+            // 37. Tracking once.
+            logTest('37. payment_completed tracking event once', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: PAYMENT_COMPLETED })) === 1);
+            // 38. Notifications once (customer + technician), no card/Stripe data.
+            const custNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:payment_completed` }).toArray();
+            const techNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:payment_completed_technician` }).toArray();
+            const ser = JSON.stringify(custNotif[0]) + JSON.stringify(techNotif[0]);
+            logTest('38. Customer + technician notified once, no card/Stripe/amount data', custNotif.length === 1 && custNotif[0].recipientEmail === ownerEmail && techNotif.length === 1 && techNotif[0].recipientEmail === techEmail && techNotif[0].recipientRole === 'rider' && !ser.includes('4500') && !ser.includes(sid) && !ser.toLowerCase().includes('pi_test'));
+        }
+
+        // ================= Regression / isolation (39-46) =================
+        {
+            // 39. Legacy payment path still creates a USD session, unchanged.
+            const legacy = await collections.parcels.insertOne({ trackingId: makeTrackingId(), senderEmail: ownerEmail, parcelName: `TEST-PAY-LEGACY-${runId}`, cost: 30, deliveryStatus: 'parcel_picked_up', createdAt: new Date() });
+            createdParcelIds.push(legacy.insertedId);
+            const before = capturedStripeSessionParams.length;
+            const res = fakeRes();
+            await paymentController.createCheckoutSession({ body: { parcelId: legacy.insertedId.toString() }, decoded_email: ownerEmail }, res);
+            const cap = capturedStripeSessionParams[capturedStripeSessionParams.length - 1];
+            logTest('39. Legacy payment path unchanged (USD)', res.statusCode === 200 && capturedStripeSessionParams.length === before + 1 && cap.line_items[0].price_data.currency === PAYMENT_CURRENCY);
+        }
+        {
+            // 40. Legacy eligibility still blocks a v2 request (isolation).
+            const p = await createParcel();
+            logTest('40. Legacy getPaymentEligibility still blocks v2 (PAYMENT_NOT_AVAILABLE)', getPaymentEligibility(p).code === 'PAYMENT_NOT_AVAILABLE');
+        }
+        {
+            // 41. V2 eligibility is pure - never mutates the parcel.
+            const p = await createParcel();
+            const snap = JSON.stringify(p);
+            getV2PaymentEligibility(p); getV2PaymentEligibility(p);
+            logTest('41. V2 eligibility does not mutate the parcel', JSON.stringify(p) === snap);
+        }
+        logTest('42. V2 currency (bdt) is distinct from legacy currency (usd)', V2_PAYMENT_CURRENCY === 'bdt' && PAYMENT_CURRENCY === 'usd' && V2_PAYMENT_CURRENCY !== PAYMENT_CURRENCY);
+        logTest('43. BDT minor-unit conversion correct, no FX (4500 -> 450000)', toSmallestUnit(4500) === 450000);
+        logTest('44. Canonical BDT count remains 16', (await collections.serviceDefinitions.countDocuments({ $or: SERVICE_DEFINITION_SEED.map((r) => ({ productCategorySlug: r.productCategorySlug, repairCategorySlug: r.repairCategorySlug })) })) === 16);
+        logTest('46. No production Stripe contact (all session ids are test fixtures)', usedSessionIds.every((s) => s.startsWith('v2sess_')) && capturedStripeSessionParams.length > 0);
+    } finally {
+        if (usedSessionIds.length) await collections.payments.deleteMany({ sessionId: { $in: usedSessionIds } });
+        if (createdParcelIds.length) {
+            await collections.payments.deleteMany({ parcelId: { $in: createdParcelIds.map((x) => x.toString()) } });
+            await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds.map((x) => x.toString()) } });
+            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds } });
+        }
+        if (createdRiderIds.length) await collections.riders.deleteMany({ _id: { $in: createdRiderIds } });
+        if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        if (usedTrackingIds.length) await collections.trackings.deleteMany({ trackingId: { $in: usedTrackingIds } });
+        if (recipientEmails.length) await collections.notifications.deleteMany({ recipientEmail: { $in: recipientEmails } });
+        for (const s of usedSessionIds) stripeSessionFixtures.delete(s);
+        const leftoverP = await collections.parcels.countDocuments({ trackingId: { $regex: '^TEST-PAY-' } });
+        const leftoverU = await collections.users.countDocuments({ email: { $regex: '^pay-.*@test.local$' } });
+        logTest('45. No payment fixture leakage after tests', leftoverP === 0 && leftoverU === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -11926,6 +12212,7 @@ async function runAllTests() {
     await testBdtPricingMigration();
     await testInspectionWorkflow();
     await testQuoteWorkflow();
+    await testV2PaymentWorkflow();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

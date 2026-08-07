@@ -1,5 +1,5 @@
-const { VALID_STATUSES } = require('../utils/parcelStatus');
-const { isValidStoredCost } = require('../config/paymentConfig');
+const { VALID_STATUSES, QUOTE_APPROVED, PAYMENT_COMPLETED } = require('../utils/parcelStatus');
+const { isValidStoredCost, isValidQuoteTotal, isBdtQuoteCurrency, V2_PAYMENT_CURRENCY } = require('../config/paymentConfig');
 const { isV2RepairRequest } = require('../utils/repairRequestSchema');
 
 // Every status the current repair lifecycle can ever produce, including the
@@ -54,4 +54,61 @@ function getPaymentEligibility(parcel) {
     return { eligible: true, cost };
 }
 
-module.exports = { getPaymentEligibility, ELIGIBLE_STATUSES };
+// V2 approved-quote payment eligibility (Phase 6.4 Unit 6). Parcel-state-only,
+// exactly like getPaymentEligibility above (caller identity is the controller's
+// responsibility). Kept as a SEPARATE function so the legacy path above keeps
+// rejecting every v2 request outright (PAYMENT_NOT_AVAILABLE) - legacy
+// isolation: the legacy /payment-checkout-session endpoint can never
+// accidentally price a v2 request, and this v2 function can never touch a
+// legacy request. The authoritative amount and currency come ONLY from the
+// persisted, immutable approved quote (quote.totalAmount / quote.currency),
+// never from request.pricing, the inspection estimate, or any client input.
+//
+// Every rejection is a controlled code; only an approved quote on a
+// quote_approved request, in BDT, with a valid positive integer total, and not
+// already paid, is eligible.
+function getV2PaymentEligibility(parcel) {
+    if (!parcel || !isV2RepairRequest(parcel)) {
+        return { eligible: false, code: 'NOT_V2_REQUEST', reason: 'this payment path is only available for newer (v2) repair requests' };
+    }
+
+    // Already paid takes precedence over any quote/state check - once a v2
+    // request has a completed payment it is never eligible to be charged again,
+    // regardless of its other fields.
+    if (parcel.deliveryStatus === PAYMENT_COMPLETED || (parcel.payment && parcel.payment.status === 'completed')) {
+        return { eligible: false, code: 'ALREADY_PAID', reason: 'this request has already been paid for' };
+    }
+
+    const quote = parcel.quote;
+    if (!quote || !quote.status) {
+        return { eligible: false, code: 'NO_QUOTE', reason: 'no repair quote exists for this request yet' };
+    }
+    if (quote.status === 'rejected') {
+        return { eligible: false, code: 'QUOTE_REJECTED', reason: 'the repair quote was declined and cannot be paid' };
+    }
+    if (quote.status !== 'approved') {
+        // submitted / any other non-approved state.
+        return { eligible: false, code: 'QUOTE_NOT_APPROVED', reason: 'the repair quote has not been approved yet' };
+    }
+    if (parcel.deliveryStatus !== QUOTE_APPROVED) {
+        return { eligible: false, code: 'INVALID_PAYMENT_STATE', reason: 'this request is not in a payable state' };
+    }
+    if (!isBdtQuoteCurrency(quote.currency)) {
+        return { eligible: false, code: 'INVALID_QUOTE_CURRENCY', reason: 'the repair quote currency is not payable' };
+    }
+    if (!isValidQuoteTotal(quote.totalAmount)) {
+        return { eligible: false, code: 'INVALID_QUOTE_AMOUNT', reason: 'the repair quote amount is invalid' };
+    }
+
+    // amount is whole taka (display + Stripe-major-unit source); currency is the
+    // uppercase code the quote stores. quoteVersion lets the client/Stripe
+    // metadata pin exactly which immutable quote is being paid.
+    return {
+        eligible: true,
+        amount: quote.totalAmount,
+        currency: quote.currency,
+        quoteVersion: quote.version,
+    };
+}
+
+module.exports = { getPaymentEligibility, getV2PaymentEligibility, ELIGIBLE_STATUSES, V2_PAYMENT_CURRENCY };
