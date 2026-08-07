@@ -7,6 +7,7 @@ const NotificationModel = require('./Notification');
 const { ServiceDefinitionModel } = require('./ServiceDefinition');
 const DamageUploadSessionModel = require('./DamageUploadSession');
 const RepairEvidenceSessionModel = require('./RepairEvidenceSession');
+const DeletionCleanupModel = require('./DeletionCleanup');
 
 function initializeModels(collections) {
     return {
@@ -18,7 +19,8 @@ function initializeModels(collections) {
         Notification: new NotificationModel(collections.notifications),
         ServiceDefinition: new ServiceDefinitionModel(collections.serviceDefinitions),
         DamageUploadSession: new DamageUploadSessionModel(collections.damageUploadSessions),
-        RepairEvidenceSession: new RepairEvidenceSessionModel(collections.repairEvidenceSessions)
+        RepairEvidenceSession: new RepairEvidenceSessionModel(collections.repairEvidenceSessions),
+        DeletionCleanup: new DeletionCleanupModel(collections.deletionCleanups)
     };
 }
 

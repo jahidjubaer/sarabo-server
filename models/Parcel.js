@@ -101,6 +101,34 @@ class ParcelModel {
         return await this.collection.deleteOne(query);
     }
 
+    // Guarded hard delete (Phase 6.5 Unit 8) - the filter condition itself is
+    // the race-resolver against a concurrent assignment, payment, inspection,
+    // quote, or repair landing between the caller's eligibility read and this
+    // write (mirrors the guarded-update pattern used throughout Phase 6.3/6.4:
+    // the condition, not a prior read, is what MongoDB serializes). The ONLY
+    // document this ever removes is a schemaVersion-2 request that is still
+    // pending-pickup, unassigned, unpaid, and carries no inspection/quote/
+    // repair subdocument. A deletedCount of 0 means the request changed
+    // underneath us and must NOT be deleted - the caller aborts the whole
+    // transaction so nothing partial is left behind.
+    async deleteGuarded({ id, session }) {
+        const filter = {
+            _id: new ObjectId(id),
+            schemaVersion: 2,
+            $or: [
+                { deliveryStatus: { $exists: false } },
+                { deliveryStatus: 'pending-pickup' }
+            ],
+            riderEmail: { $exists: false },
+            riderId: { $exists: false },
+            inspection: { $exists: false },
+            quote: { $exists: false },
+            repair: { $exists: false },
+            paymentStatus: { $ne: 'paid' }
+        };
+        return await this.collection.deleteOne(filter, { session });
+    }
+
     // Set-based active-assignment lookup for eligible-technician evaluation
     // (Phase 6.3 Unit 5) - one query for every candidate rider, never one
     // query per rider. Deliberately generic (accepts the status list as a

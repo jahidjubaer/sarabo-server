@@ -8,6 +8,9 @@ const { normalize } = require('../services/paymentProcessor');
 const { createNotificationService } = require('../services/notificationService');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
 const { getCancellationEligibility } = require('../services/cancellationPolicy');
+const { getDeletionEligibility } = require('../services/deletionPolicy');
+const { runStorageCleanup } = require('../services/deletionCleanup');
+const { damageStorageService } = require('../services/damageStorageService');
 const { canAssignRequest } = require('../services/assignmentEligibility');
 const { escapeRegex, sanitizeSearchText } = require('../utils/searchSanitize');
 const { CURRENT_REPAIR_REQUEST_SCHEMA_VERSION, validateRepairRequestSchemaVersion, isV2RepairRequest } = require('../utils/repairRequestSchema');
@@ -35,17 +38,23 @@ const ADMIN_LIST_MAX_SEARCH_LENGTH = 100;
 const ADMIN_LIST_VALID_STATUSES = ['pending-pickup', 'driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered', 'cancelled'];
 
 class ParcelController {
-    constructor(models, collections) {
+    constructor(models, collections, storageService = damageStorageService) {
         this.Parcel = models.Parcel;
         this.Rider = models.Rider;
         this.User = models.User;
         this.ServiceDefinition = models.ServiceDefinition;
+        this.DeletionCleanup = models.DeletionCleanup;
         this.collections = collections;
         // Guards against duplicate concurrent Stripe Checkout Sessions and
         // is reused here to release/expire an active session on cancellation
         // - see services/checkoutSessionManager.js.
         this.checkoutSessions = createCheckoutSessionManager(collections);
         this.notifications = createNotificationService(models);
+        // Generic storage adapter (services/damageStorageService.js is generic
+        // over any storageKey) - used by safe deletion to purge a request's
+        // damage/evidence objects. Injectable so tests exercise the cleanup
+        // path against a fake bucket, never a real one.
+        this.storage = storageService;
     }
 
     async getAllParcels(req, res) {
@@ -1180,14 +1189,167 @@ class ParcelController {
         }
     }
 
+    // Safe hard deletion (Phase 6.5 Unit 8). Replaces the old unguarded raw
+    // delete, which removed only the parcel document and orphaned every
+    // damage/evidence Storage object, upload session, checkout row, and (worst
+    // of all) payment record. A request is deletable ONLY at the very first
+    // lifecycle stage - the caller must be the owner or an admin, the request
+    // must be a still-pending-pickup v2 request with no technician, inspection,
+    // quote, payment, active checkout, or repair. Everything is re-verified
+    // atomically inside the delete transaction, so a request that progresses
+    // between the eligibility read and the write is never destroyed.
     async deleteParcel(req, res) {
-        try {
-            const id = req.params.id;
-            const result = await this.Parcel.delete(id);
-            res.send(result);
-        } catch (error) {
-            res.status(500).send({ message: 'Error deleting repair request', error: error.message });
+        const id = req.params.id;
+        if (!ObjectId.isValid(id)) {
+            return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
         }
+
+        let parcel;
+        let isAdmin = false;
+        try {
+            parcel = await this.Parcel.findById(id);
+            if (!parcel) {
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+            }
+            const caller = await this.User.findByEmail(req.decoded_email);
+            isAdmin = !!caller && caller.role === 'admin';
+        } catch (error) {
+            return res.status(500).send({ message: 'Error deleting repair request', code: 'REQUEST_DELETE_FAILED' });
+        }
+
+        // Authorization: only the request's own owner or an admin may delete.
+        // Anyone else (including an assigned technician) receives the same 404
+        // an unknown id would - deletion never confirms a request's existence
+        // to a caller with no authority over it (existence-oracle safety).
+        const callerEmail = normalize(req.decoded_email);
+        const ownerEmail = normalize(parcel.senderEmail);
+        const isOwner = !!ownerEmail && ownerEmail === callerEmail;
+        if (!isOwner && !isAdmin) {
+            return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+        }
+
+        // Safe deletion is scoped to newer (v2) repair requests only - legacy
+        // courier-era records are never removed through this path.
+        if (!isV2RepairRequest(parcel)) {
+            return res.status(409).send({ message: 'only newer (v2) repair requests can be deleted', code: 'REQUEST_DELETE_NOT_ALLOWED' });
+        }
+
+        // Financial/checkout state is confirmed against the real collections,
+        // never inferred from parcel.paymentStatus alone - a payment or active
+        // checkout row is authoritative and blocks deletion.
+        let hasAnyPayment;
+        let hasActiveCheckout;
+        try {
+            const existingPayment = await this.collections.payments.findOne({ parcelId: id });
+            hasAnyPayment = !!existingPayment;
+            const activeCheckout = await this.checkoutSessions.findActive(id);
+            hasActiveCheckout = !!activeCheckout;
+        } catch (error) {
+            return res.status(500).send({ message: 'Error deleting repair request', code: 'REQUEST_DELETE_FAILED' });
+        }
+
+        const eligibility = getDeletionEligibility(parcel, { hasAnyPayment, hasActiveCheckout });
+        if (!eligibility.eligible) {
+            return res.status(409).send({ message: eligibility.reason, code: eligibility.code });
+        }
+
+        // Collect every Storage object key tied to this request BEFORE any DB
+        // delete. Once the parcel document and its session rows are gone the
+        // keys are unrecoverable, so they must be gathered first and only
+        // purged from Storage AFTER the DB transaction has committed - never
+        // the reverse (which could destroy an object while the request lives).
+        const storageKeys = new Set();
+        if (parcel.damage && Array.isArray(parcel.damage.images)) {
+            for (const img of parcel.damage.images) {
+                if (img && img.storageKey) storageKeys.add(img.storageKey);
+            }
+        }
+        if (parcel.repair && parcel.repair.completion && Array.isArray(parcel.repair.completion.evidenceImages)) {
+            // Defensive: an eligible (pre-repair) request never has completion
+            // evidence, but never assume - gather it if somehow present.
+            for (const ev of parcel.repair.completion.evidenceImages) {
+                if (ev && ev.storageKey) storageKeys.add(ev.storageKey);
+            }
+        }
+        try {
+            const [damageSessions, evidenceSessions] = await Promise.all([
+                this.collections.damageUploadSessions.find({ requestId: id }).toArray(),
+                this.collections.repairEvidenceSessions.find({ requestId: id }).toArray()
+            ]);
+            for (const s of damageSessions) if (s.storageKey) storageKeys.add(s.storageKey);
+            for (const s of evidenceSessions) if (s.storageKey) storageKeys.add(s.storageKey);
+        } catch (error) {
+            return res.status(500).send({ message: 'Error deleting repair request', code: 'REQUEST_DELETE_FAILED' });
+        }
+
+        // Atomic delete of the request and every exact request-scoped record in
+        // one transaction. The guarded parcel delete's filter is the real
+        // race-resolver: if an assignment / payment / inspection / quote /
+        // repair landed after the eligibility read above, deletedCount is 0 and
+        // the whole transaction aborts, leaving the now-progressed request fully
+        // intact. Sessions/checkout/tracking rows are only ever removed once
+        // that guarded parcel delete has actually matched.
+        const storageKeyList = [...storageKeys];
+        const mongoSession = client.startSession();
+        try {
+            await mongoSession.withTransaction(async () => {
+                const del = await this.Parcel.deleteGuarded({ id, session: mongoSession });
+                if (del.deletedCount === 0) {
+                    throw Object.assign(new Error('this request has changed and can no longer be deleted'), { code: 'REQUEST_DELETE_NOT_ALLOWED' });
+                }
+                // Defensive financial re-check inside the transaction - a
+                // payment that raced in is authoritative and must never be left
+                // orphaned by a committed delete.
+                const racedPayment = await this.collections.payments.findOne({ parcelId: id }, { session: mongoSession });
+                if (racedPayment) {
+                    throw Object.assign(new Error('a payment landed for this request and it can no longer be deleted'), { code: 'REQUEST_DELETE_NOT_ALLOWED' });
+                }
+                // Durably record the trusted Storage keys for cleanup BEFORE the
+                // source metadata (damage images, upload/evidence sessions) is
+                // deleted below - all in this one transaction. If the process
+                // dies right after commit, the keys survive in this record and
+                // scripts/retry-deletion-cleanup.js can finish the purge; they
+                // can never be silently orphaned. Keyed by requestId (_id), so a
+                // concurrent duplicate delete cannot create a second record.
+                // Only created when there is actually something to purge.
+                if (storageKeyList.length > 0) {
+                    await this.DeletionCleanup.create({ requestId: id, storageKeys: storageKeyList }, { session: mongoSession });
+                }
+                await this.collections.damageUploadSessions.deleteMany({ requestId: id }, { session: mongoSession });
+                await this.collections.repairEvidenceSessions.deleteMany({ requestId: id }, { session: mongoSession });
+                await this.collections.checkoutSessions.deleteMany({ parcelId: id }, { session: mongoSession });
+                if (parcel.trackingId) {
+                    await this.collections.trackings.deleteMany({ trackingId: parcel.trackingId }, { session: mongoSession });
+                }
+            });
+        } catch (error) {
+            if (error.code === 'REQUEST_DELETE_NOT_ALLOWED') {
+                return res.status(409).send({ message: error.message, code: 'REQUEST_DELETE_NOT_ALLOWED' });
+            }
+            console.error('Deletion transaction aborted:', error.message);
+            return res.status(500).send({ message: 'Error deleting repair request', code: 'REQUEST_DELETE_FAILED' });
+        } finally {
+            await mongoSession.endSession();
+        }
+
+        // Durable Storage cleanup AFTER the DB is already consistent. This first
+        // pass runs the shared, idempotent cleanup routine: if every object is
+        // deleted (or already gone) the cleanup record is removed; if any delete
+        // fails the record is retained (narrowed to the still-failing keys) for
+        // scripts/retry-deletion-cleanup.js to finish later. Either way this can
+        // never roll the DB back and must not fail the response - the request is
+        // gone and the response never exposes the storage keys.
+        if (storageKeyList.length > 0) {
+            try {
+                await runStorageCleanup({ storage: this.storage, cleanupModel: this.DeletionCleanup, requestId: id, storageKeys: storageKeyList });
+            } catch (error) {
+                // A bug in the cleanup pass itself must not fail the response;
+                // the durable record persists for retry.
+                console.error('Deletion storage-cleanup pass errored (non-fatal, cleanup record retained):', error.code || error.message);
+            }
+        }
+
+        return res.send({ success: true, deletedRequestId: id });
     }
 
     // Customer-initiated soft cancellation - the only cancellation path in

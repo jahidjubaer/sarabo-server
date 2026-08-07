@@ -44,8 +44,15 @@ function parcelRoutes(app, controllers) {
     // Assign technician to repair request (admin only)
     app.patch('/parcels/:id', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.assignRiderToParcel(req, res));
 
-    // Delete repair request (admin only)
-    app.delete('/parcels/:id', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.deleteParcel(req, res));
+    // Safe deletion of a repair request (Phase 6.5 Unit 8). Ownership/role is
+    // enforced inside the controller - the request's own owner OR an admin may
+    // delete, but only while the request is still at its first lifecycle stage
+    // (pending-pickup, unassigned, uninspected, unquoted, unpaid, no repair).
+    // Deliberately NOT gated by verifyAdmin at the route level (unlike before):
+    // a customer must be able to delete their own not-yet-started request, and
+    // the controller is the single authority that decides who and when, the
+    // same convention already used for cancelParcel above.
+    app.delete('/parcels/:id', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.deleteParcel(req, res));
 }
 
 module.exports = parcelRoutes;

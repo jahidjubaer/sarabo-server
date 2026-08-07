@@ -35,6 +35,7 @@ const collections = {
     serviceDefinitions: db.collection("serviceDefinitions"),
     damageUploadSessions: db.collection("damageUploadSessions"),
     repairEvidenceSessions: db.collection("repairEvidenceSessions"),
+    deletionCleanups: db.collection("deletionCleanups"),
 };
 
 let connectionPromise = null;
@@ -199,6 +200,20 @@ async function connectDatabase() {
                 await collections.repairEvidenceSessions.createIndex(
                     { expiresAt: 1 },
                     { name: 'repairEvidenceSessions_expiresAt' }
+                );
+                // Durable deletion-cleanup records (Phase 6.5 Unit 8, Fix 2).
+                // The record's _id IS the requestId, so uniqueness-by-request
+                // is enforced by the primary key itself - no extra unique index
+                // is needed, and two concurrent deletes can never create two
+                // records for the same request. This plain index serves the
+                // retry script's "all still-pending cleanups" scan
+                // (scripts/retry-deletion-cleanup.js). No TTL: an unresolved
+                // cleanup must never silently vanish while its Storage objects
+                // are still orphaned - it is only ever removed once every key
+                // is resolved.
+                await collections.deletionCleanups.createIndex(
+                    { status: 1 },
+                    { name: 'deletionCleanups_status' }
                 );
                 return { db, collections };
             })

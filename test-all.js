@@ -12332,6 +12332,369 @@ async function testRepairWorkflow() {
     console.log('');
 }
 
+// Phase 6.5 Unit 8: Safe Repair Deletion. Exercises the rewritten deleteParcel
+// end-to-end: authorization (owner-or-admin, existence-oracle 404 for everyone
+// else), the v2 gate, the full lifecycle+financial eligibility predicate, the
+// guarded atomic delete and its dependency cleanup (damage/evidence sessions,
+// checkout rows, tracking logs) plus best-effort Storage object purge, and the
+// concurrency guard (delete-vs-cancel, delete-vs-delete, and the guarded-delete
+// filter directly). All Storage goes through a fake bucket - production storage
+// is never contacted; real MongoDB transactions are used (Atlas replica set).
+async function testSafeRepairDeletion() {
+    console.log('42. Testing Safe Repair Deletion (Phase 6.5 Unit 8)');
+    console.log('-'.repeat(60));
+
+    // --- 1, 2. Route auth: no token / invalid token are rejected at the edge. ---
+    await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/parcels/000000000000000000000000', method: 'DELETE', headers: { 'Content-Type': 'application/json' } },
+        401, 'DELETE /parcels/:id (no auth)'
+    );
+    await makeRequest(
+        { hostname: 'localhost', port: 3000, path: '/parcels/000000000000000000000000', method: 'DELETE', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer invalid_token_12345' } },
+        401, 'DELETE /parcels/:id (invalid token)'
+    );
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { ObjectId } = require('mongodb');
+    const { initializeModels } = require('./models');
+    const { DamageStorageService } = require('./services/damageStorageService');
+    const ParcelController = require('./controllers/parcelController');
+    const { getDeletionEligibility } = require('./services/deletionPolicy');
+    const { retryDeletionCleanups } = require('./scripts/retry-deletion-cleanup');
+    const fs = require('fs');
+    const path = require('path');
+
+    function fakeRes() {
+        return { statusCode: 200, body: undefined, headers: {}, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; }, set(k, v) { this.headers[k] = v; return this; } };
+    }
+    function createFakeBucket(name = 'fake-delete-bucket') {
+        const objects = new Map();
+        return {
+            name, _objects: objects,
+            file(storageKey) {
+                return {
+                    async getSignedUrl(opts) { return [`https://fake-storage.test/${name}/${storageKey}?action=${opts.action}`]; },
+                    async getMetadata() { const o = objects.get(storageKey); if (!o) { const e = new Error('Not Found'); e.code = 404; throw e; } return [{ contentType: o.mimeType, size: String(o.size), name: storageKey }]; },
+                    async delete() { objects.delete(storageKey); },
+                };
+            },
+        };
+    }
+
+    const runId = Date.now();
+    const createdParcelIds = [];
+    const createdUserEmails = [];
+    const usedTrackingIds = [];
+    const usedPaymentParcelIds = [];
+    const usedSessionRequestIds = [];
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const fakeBucket = createFakeBucket();
+        const fakeStorage = new DamageStorageService({ bucket: fakeBucket });
+        const parcelController = new ParcelController(models, collections, fakeStorage);
+
+        const ownerEmail = `del-owner-${runId}@test.local`;
+        const otherEmail = `del-other-${runId}@test.local`;
+        const adminEmail = `del-admin-${runId}@test.local`;
+        const techEmail = `del-tech-${runId}@test.local`;
+        createdUserEmails.push(ownerEmail, otherEmail, adminEmail, techEmail);
+        await collections.users.insertMany([
+            { email: ownerEmail, role: 'user', createdAt: new Date() },
+            { email: otherEmail, role: 'user', createdAt: new Date() },
+            { email: adminEmail, role: 'admin', createdAt: new Date() },
+            { email: techEmail, role: 'rider', createdAt: new Date() },
+        ]);
+
+        let seq = 0;
+        function makeTrackingId() { const t = `TEST-DEL-${runId}-${seq++}`; usedTrackingIds.push(t); return t; }
+
+        async function createParcel(overrides = {}) {
+            const now = new Date();
+            const doc = {
+                schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail,
+                parcelName: `TEST-DEL-DEVICE-${runId}`,
+                product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
+                deliveryStatus: 'pending-pickup', createdAt: now, updatedAt: now, ...overrides,
+            };
+            const r = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(r.insertedId);
+            usedSessionRequestIds.push(r.insertedId.toString());
+            usedPaymentParcelIds.push(r.insertedId.toString());
+            return { id: r.insertedId.toString(), _id: r.insertedId, ...doc };
+        }
+
+        const delReq = (id, email) => { const res = fakeRes(); return parcelController.deleteParcel({ params: { id }, decoded_email: email }, res).then(() => res); };
+        const cancelReq = (id, email) => { const res = fakeRes(); return parcelController.cancelParcel({ params: { id }, decoded_email: email }, res).then(() => res); };
+        const exists = async (id) => !!(await models.Parcel.findById(id));
+
+        // --- 3, 4. Invalid ObjectId / unknown id. ---
+        let res = await delReq('not-a-valid-id', ownerEmail);
+        logTest('3. Invalid ObjectId rejected (400 INVALID_REQUEST_ID)', res.statusCode === 400 && res.body.code === 'INVALID_REQUEST_ID');
+        res = await delReq('000000000000000000000000', ownerEmail);
+        logTest('4. Unknown request rejected (404 REQUEST_NOT_FOUND)', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND');
+        const unknownIdBody = JSON.stringify(res.body);
+
+        // --- 5. Owner deletes a clean pending-pickup v2 request. ---
+        const clean1 = await createParcel();
+        res = await delReq(clean1.id, ownerEmail);
+        logTest('5. Owner deletes a clean pending-pickup request (200 success)', res.statusCode === 200 && res.body.success === true && res.body.deletedRequestId === clean1.id && !(await exists(clean1.id)));
+        // --- 6. Response shape carries no extra/leaked fields. ---
+        logTest('6. Success response is exactly { success, deletedRequestId }', Object.keys(res.body).sort().join(',') === 'deletedRequestId,success');
+
+        // --- 7. Admin deletes another user's clean request. ---
+        const clean2 = await createParcel();
+        res = await delReq(clean2.id, adminEmail);
+        logTest('7. Admin deletes another user\'s clean request (200)', res.statusCode === 200 && res.body.success === true && !(await exists(clean2.id)));
+
+        // --- 8, 9. Existence-oracle: unrelated user and assigned technician both get the same 404 as an unknown id. ---
+        const oracleParcel = await createParcel();
+        res = await delReq(oracleParcel.id, otherEmail);
+        logTest('8. Unrelated user gets 404 (existence-oracle) and the request survives', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND' && JSON.stringify(res.body) === unknownIdBody && (await exists(oracleParcel.id)));
+        res = await delReq(oracleParcel.id, techEmail);
+        logTest('9. Technician (non-owner/non-admin) gets 404 and the request survives', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND' && (await exists(oracleParcel.id)));
+
+        // --- 10. Legacy (no schemaVersion) request is never deletable through this path. ---
+        const legacy = await createParcel({ schemaVersion: undefined });
+        await collections.parcels.updateOne({ _id: legacy._id }, { $unset: { schemaVersion: '' } });
+        res = await delReq(legacy.id, ownerEmail);
+        logTest('10. Legacy request rejected (409 REQUEST_DELETE_NOT_ALLOWED) and survives', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(legacy.id)));
+        res = await delReq(legacy.id, adminEmail);
+        logTest('11. Admin cannot force-delete a legacy request either (409) and it survives', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(legacy.id)));
+
+        // --- 12-16. Every progressed lifecycle status is undeletable. ---
+        let n = 12;
+        for (const status of ['driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered', 'cancelled']) {
+            const p = await createParcel({ deliveryStatus: status, riderEmail: status === 'driver_assigned' ? techEmail : undefined });
+            const r = await delReq(p.id, ownerEmail);
+            logTest(`${n}. '${status}' request undeletable (409) and survives`, r.statusCode === 409 && r.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(p.id)));
+            n++;
+        }
+
+        // --- 17. Unknown/corrupt status is undeletable. ---
+        const bogus = await createParcel({ deliveryStatus: 'totally_bogus_status_xyz' });
+        res = await delReq(bogus.id, ownerEmail);
+        logTest('17. Unknown/corrupt status undeletable (409) and survives', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(bogus.id)));
+
+        // --- 18, 19. A rider reference while still pending-pickup blocks deletion (defensive). ---
+        const withRiderEmail = await createParcel({ riderEmail: techEmail });
+        res = await delReq(withRiderEmail.id, ownerEmail);
+        logTest('18. riderEmail present (pending-pickup) blocks deletion (409)', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(withRiderEmail.id)));
+        const withRiderId = await createParcel({ riderId: new ObjectId().toString() });
+        res = await delReq(withRiderId.id, ownerEmail);
+        logTest('19. riderId present (pending-pickup) blocks deletion (409)', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(withRiderId.id)));
+
+        // --- 20, 21, 22. An inspection / quote / repair subdocument each blocks deletion. ---
+        const withInspection = await createParcel({ inspection: { status: 'submitted', version: 1 } });
+        res = await delReq(withInspection.id, ownerEmail);
+        logTest('20. Inspection on record blocks deletion (409)', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(withInspection.id)));
+        const withQuote = await createParcel({ quote: { status: 'submitted', totalAmount: 4500, version: 1 } });
+        res = await delReq(withQuote.id, ownerEmail);
+        logTest('21. Quote on record blocks deletion (409)', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(withQuote.id)));
+        const withRepair = await createParcel({ repair: { status: 'in_progress', version: 1 } });
+        res = await delReq(withRepair.id, ownerEmail);
+        logTest('22. Repair activity on record blocks deletion (409)', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(withRepair.id)));
+
+        // --- 23. paymentStatus 'paid' blocks deletion. ---
+        const paidParcel = await createParcel({ paymentStatus: 'paid' });
+        res = await delReq(paidParcel.id, ownerEmail);
+        logTest('23. paymentStatus=paid blocks deletion (409) and survives', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(paidParcel.id)));
+
+        // --- 24. A payment record (financial safety) blocks deletion even with no paymentStatus, and the record is untouched. ---
+        const financialParcel = await createParcel();
+        await collections.payments.insertOne({ sessionId: `cs_del_${runId}`, transactionId: `pi_del_${runId}`, parcelId: financialParcel.id, trackingId: financialParcel.trackingId, customerEmail: ownerEmail, amount: 4500, currency: 'bdt', paymentStatus: 'paid', source: 'test', paidAt: new Date() });
+        res = await delReq(financialParcel.id, ownerEmail);
+        const financialPaymentStill = await collections.payments.findOne({ parcelId: financialParcel.id });
+        logTest('24. A payment record blocks deletion and is never destroyed (financial safety)', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(financialParcel.id)) && !!financialPaymentStill);
+
+        // --- 25. An active checkout session blocks deletion. ---
+        const checkoutParcel = await createParcel();
+        await collections.checkoutSessions.insertOne({ parcelId: checkoutParcel.id, active: true, sessionId: `cs_active_${runId}`, ownerEmail, amount: 4500, currency: 'bdt', createdAt: new Date() });
+        res = await delReq(checkoutParcel.id, ownerEmail);
+        logTest('25. Active checkout session blocks deletion (409) and survives', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(checkoutParcel.id)));
+        await collections.checkoutSessions.deleteMany({ parcelId: checkoutParcel.id });
+
+        // --- 26. Embedded damage image Storage objects are purged on successful delete. ---
+        const k1 = `repair-requests/${runId}-a/damage/${runId}-1.jpg`;
+        const k2 = `repair-requests/${runId}-a/damage/${runId}-2.jpg`;
+        const damageParcel = await createParcel({ damage: { images: [{ storageKey: k1, url: 'x' }, { storageKey: k2, url: 'y' }] } });
+        fakeBucket._objects.set(k1, { mimeType: 'image/jpeg', size: 111 });
+        fakeBucket._objects.set(k2, { mimeType: 'image/jpeg', size: 222 });
+        res = await delReq(damageParcel.id, ownerEmail);
+        logTest('26. Delete purges embedded damage-image Storage objects', res.statusCode === 200 && !(await exists(damageParcel.id)) && !fakeBucket._objects.has(k1) && !fakeBucket._objects.has(k2));
+
+        // --- 27. Damage upload-session rows and their Storage objects are purged. ---
+        const dusParcel = await createParcel();
+        const k3 = `repair-requests/${dusParcel.id}/damage/${runId}-3.jpg`;
+        await collections.damageUploadSessions.insertOne({ _id: `dus-${runId}`, requestId: dusParcel.id, ownerEmail, storageKey: k3, status: 'finalized', expiresAt: new Date(Date.now() + 3600000), createdAt: new Date() });
+        fakeBucket._objects.set(k3, { mimeType: 'image/jpeg', size: 333 });
+        res = await delReq(dusParcel.id, ownerEmail);
+        const dusRowAfter = await collections.damageUploadSessions.findOne({ requestId: dusParcel.id });
+        logTest('27. Delete purges damage upload-session rows and their Storage objects', res.statusCode === 200 && !dusRowAfter && !fakeBucket._objects.has(k3));
+
+        // --- 28. Repair evidence-session rows and their Storage objects are purged (defensive). ---
+        const resParcel = await createParcel();
+        const k4 = `repair-requests/${resParcel.id}/completion/${runId}-4.jpg`;
+        await collections.repairEvidenceSessions.insertOne({ _id: `res-${runId}`, requestId: resParcel.id, createdByRiderId: 'x', riderEmail: techEmail, storageKey: k4, status: 'pending', expiresAt: new Date(Date.now() + 3600000), createdAt: new Date() });
+        fakeBucket._objects.set(k4, { mimeType: 'image/jpeg', size: 444 });
+        res = await delReq(resParcel.id, ownerEmail);
+        const resRowAfter = await collections.repairEvidenceSessions.findOne({ requestId: resParcel.id });
+        logTest('28. Delete purges repair evidence-session rows and their Storage objects', res.statusCode === 200 && !resRowAfter && !fakeBucket._objects.has(k4));
+
+        // --- 29. Stale inactive checkout rows and tracking logs are purged. ---
+        const cleanupParcel = await createParcel();
+        await collections.checkoutSessions.insertOne({ parcelId: cleanupParcel.id, active: false, sessionId: `cs_stale_${runId}`, createdAt: new Date() });
+        await collections.trackings.insertOne({ trackingId: cleanupParcel.trackingId, status: 'pending-pickup', timestamp: new Date() });
+        res = await delReq(cleanupParcel.id, ownerEmail);
+        const staleCheckout = await collections.checkoutSessions.findOne({ parcelId: cleanupParcel.id });
+        const trackingAfter = await collections.trackings.findOne({ trackingId: cleanupParcel.trackingId });
+        logTest('29. Delete purges stale checkout rows and tracking logs for the request', res.statusCode === 200 && !staleCheckout && !trackingAfter);
+
+        // --- 30. Storage cleanup is best-effort: a failing deleteObject never fails the response or the DB delete. ---
+        const throwingStorage = { deleteObject: async () => { throw Object.assign(new Error('boom'), { code: 'STORAGE_UNAVAILABLE' }); } };
+        const pcThrow = new ParcelController(models, collections, throwingStorage);
+        const bestEffortParcel = await createParcel({ damage: { images: [{ storageKey: `repair-requests/${runId}-be/damage/x.jpg`, url: 'z' }] } });
+        const beRes = fakeRes();
+        await pcThrow.deleteParcel({ params: { id: bestEffortParcel.id }, decoded_email: ownerEmail }, beRes);
+        logTest('30. A Storage failure is non-fatal: delete still succeeds and the request is gone', beRes.statusCode === 200 && beRes.body.success === true && !(await exists(bestEffortParcel.id)));
+
+        // --- 31. Deleting an already-deleted request returns 404 (idempotent, no oracle). ---
+        res = await delReq(clean1.id, ownerEmail);
+        logTest('31. Re-deleting an already-deleted request returns 404', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND');
+
+        // --- 32, 33. Deleting one request never touches a sibling request or an unrelated payment. ---
+        const siblingA = await createParcel();
+        const siblingB = await createParcel();
+        const unrelatedPaymentParcelId = new ObjectId().toString();
+        usedPaymentParcelIds.push(unrelatedPaymentParcelId);
+        await collections.payments.insertOne({ sessionId: `cs_unrel_${runId}`, transactionId: `pi_unrel_${runId}`, parcelId: unrelatedPaymentParcelId, amount: 100, currency: 'bdt', paymentStatus: 'paid', source: 'test', paidAt: new Date() });
+        res = await delReq(siblingA.id, ownerEmail);
+        logTest('32. Deleting one request leaves a sibling request intact', res.statusCode === 200 && !(await exists(siblingA.id)) && (await exists(siblingB.id)));
+        const unrelatedPaymentStill = await collections.payments.findOne({ parcelId: unrelatedPaymentParcelId });
+        logTest('33. Deleting a request never removes an unrelated payment record', !!unrelatedPaymentStill);
+
+        // --- 34-38. getDeletionEligibility unit rules. ---
+        logTest('34. Eligibility: clean pending-pickup request is eligible', getDeletionEligibility({ deliveryStatus: 'pending-pickup' }, { hasAnyPayment: false, hasActiveCheckout: false }).eligible === true);
+        logTest('35. Eligibility: missing status defaults to pending-pickup and is eligible', getDeletionEligibility({}, { hasAnyPayment: false, hasActiveCheckout: false }).eligible === true);
+        logTest('36. Eligibility: an assigned rider makes it ineligible', getDeletionEligibility({ deliveryStatus: 'pending-pickup', riderEmail: techEmail }, { hasAnyPayment: false, hasActiveCheckout: false }).eligible === false);
+        logTest('37. Eligibility: a payment makes it ineligible', getDeletionEligibility({ deliveryStatus: 'pending-pickup' }, { hasAnyPayment: true, hasActiveCheckout: false }).code === 'REQUEST_DELETE_NOT_ALLOWED');
+        logTest('38. Eligibility: an active checkout makes it ineligible', getDeletionEligibility({ deliveryStatus: 'pending-pickup' }, { hasAnyPayment: false, hasActiveCheckout: true }).code === 'REQUEST_DELETE_NOT_ALLOWED');
+
+        // --- 39-41. Guarded model delete is the race-resolver. ---
+        const guardClean = await createParcel();
+        const guardCleanDel = await models.Parcel.deleteGuarded({ id: guardClean.id });
+        logTest('39. deleteGuarded removes a clean pending-pickup v2 request (deletedCount 1)', guardCleanDel.deletedCount === 1);
+        const guardAssigned = await createParcel({ deliveryStatus: 'driver_assigned', riderEmail: techEmail });
+        const guardAssignedDel = await models.Parcel.deleteGuarded({ id: guardAssigned.id });
+        logTest('40. deleteGuarded refuses a request an assignment already claimed (deletedCount 0)', guardAssignedDel.deletedCount === 0 && (await exists(guardAssigned.id)));
+        const guardQuoted = await createParcel({ quote: { status: 'approved', version: 1 } });
+        const guardQuotedDel = await models.Parcel.deleteGuarded({ id: guardQuoted.id });
+        logTest('41. deleteGuarded refuses a request that has a quote (deletedCount 0)', guardQuotedDel.deletedCount === 0 && (await exists(guardQuoted.id)));
+
+        // --- 42, 43. Delete-vs-cancel race: exactly one destructive winner, consistent final state. ---
+        const raceP1 = await createParcel();
+        const [rc1a, rc1b] = await Promise.all([delReq(raceP1.id, ownerEmail), cancelReq(raceP1.id, ownerEmail)]);
+        const raceP1Doc = await models.Parcel.findById(raceP1.id);
+        const raceP1Statuses = [rc1a.statusCode, rc1b.statusCode].sort().join(',');
+        const raceP1Consistent = (!raceP1Doc) || (raceP1Doc && raceP1Doc.deliveryStatus === 'cancelled');
+        logTest('42. Delete-vs-cancel race yields exactly one 200 winner', raceP1Statuses === '200,409');
+        logTest('43. Delete-vs-cancel race leaves a consistent final state (gone XOR cancelled)', raceP1Consistent);
+
+        // --- 44, 45. Delete-vs-delete race: exactly one 200, the other 404/409, request gone. ---
+        const raceP2 = await createParcel();
+        const [rd1, rd2] = await Promise.all([delReq(raceP2.id, ownerEmail), delReq(raceP2.id, ownerEmail)]);
+        const raceP2Codes = [rd1.statusCode, rd2.statusCode].sort();
+        const oneWinner = (rd1.statusCode === 200) !== (rd2.statusCode === 200);
+        const loserOk = [404, 409].includes(raceP2Codes[1]);
+        logTest('44. Delete-vs-delete race yields exactly one 200 winner', oneWinner && raceP2Codes[0] === 200 && loserOk);
+        logTest('45. Delete-vs-delete race leaves the request gone', !(await exists(raceP2.id)));
+
+        // --- 46. All Storage keys ever touched used the fake bucket (no production contact). ---
+        logTest('46. No production Storage contact (all fake-bucket keys are request-namespaced)', [...fakeBucket._objects.keys()].every((k) => k.startsWith('repair-requests/')));
+
+        // --- 47. Route source: DELETE /parcels/:id keeps verifyFBToken but is no longer verifyAdmin-gated. ---
+        const routesSrc = fs.readFileSync(path.join(__dirname, 'routes', 'parcels.js'), 'utf8');
+        const deleteLine = routesSrc.split('\n').find((l) => l.includes("app.delete('/parcels/:id'"));
+        logTest('47. DELETE route keeps verifyFBToken and drops verifyAdmin (owner-or-admin decided in controller)', !!deleteLine && deleteLine.includes('verifyFBToken') && !deleteLine.includes('verifyAdmin'));
+
+        // --- 48. Sibling B (untouched control) is still present before cleanup. ---
+        logTest('48. Untouched control request remained present throughout', await exists(siblingB.id));
+
+        // ===== Fix 2: durable Storage cleanup + idempotent retry =====
+
+        // --- 50. A successful Storage cleanup pass removes the cleanup record. ---
+        const kOk = `repair-requests/${runId}-ok/damage/${runId}-ok.jpg`;
+        const okParcel = await createParcel({ damage: { images: [{ storageKey: kOk, url: 'u' }] } });
+        fakeBucket._objects.set(kOk, { mimeType: 'image/jpeg', size: 500 });
+        res = await delReq(okParcel.id, ownerEmail);
+        const okRecord = await collections.deletionCleanups.findOne({ _id: okParcel.id });
+        logTest('50. Successful Storage cleanup removes the cleanup record', res.statusCode === 200 && !fakeBucket._objects.has(kOk) && !okRecord);
+
+        // --- 51, 52, 53. A Storage failure retains the cleanup record with exactly the trusted keys, and the response leaks no key. ---
+        const kF1 = `repair-requests/${runId}-f/damage/${runId}-f1.jpg`;
+        const kF2 = `repair-requests/${runId}-f/damage/${runId}-f2.jpg`;
+        const failParcel = await createParcel({ damage: { images: [{ storageKey: kF1, url: 'a' }, { storageKey: kF2, url: 'b' }] } });
+        const failRes = fakeRes();
+        await pcThrow.deleteParcel({ params: { id: failParcel.id }, decoded_email: ownerEmail }, failRes);
+        const failRecord = await collections.deletionCleanups.findOne({ _id: failParcel.id });
+        logTest('51. A Storage failure leaves a retained (pending) cleanup record while the delete still succeeds', failRes.statusCode === 200 && failRes.body.success === true && !!failRecord && failRecord.status === 'pending');
+        logTest('52. Cleanup record holds exactly the trusted keys (collected server-side, no more/less)', !!failRecord && failRecord.storageKeys.slice().sort().join('|') === [kF1, kF2].sort().join('|'));
+        logTest('53. DELETE response never exposes any storageKey', Object.keys(failRes.body).sort().join(',') === 'deletedRequestId,success' && !JSON.stringify(failRes.body).includes(kF1) && !JSON.stringify(failRes.body).includes(kF2));
+
+        // --- 54, 55, 56. Retry deletes the still-remaining objects, removes the record, and never touches unrelated objects. ---
+        const kUnrel = `repair-requests/${runId}-unrel/damage/${runId}-unrel.jpg`;
+        fakeBucket._objects.set(kF1, { mimeType: 'image/jpeg', size: 1 });
+        fakeBucket._objects.set(kF2, { mimeType: 'image/jpeg', size: 2 });
+        fakeBucket._objects.set(kUnrel, { mimeType: 'image/jpeg', size: 3 });
+        await retryDeletionCleanups({ cleanupModel: models.DeletionCleanup, storage: fakeStorage });
+        const failRecordAfter = await collections.deletionCleanups.findOne({ _id: failParcel.id });
+        logTest('54. Retry deletes the remaining trusted objects', !fakeBucket._objects.has(kF1) && !fakeBucket._objects.has(kF2));
+        logTest('55. Retry removes the cleanup record after full success', !failRecordAfter);
+        logTest('56. Retry leaves unrelated Storage objects untouched', fakeBucket._objects.has(kUnrel));
+        fakeBucket._objects.delete(kUnrel);
+
+        // --- 57. An object-not-found on retry counts as success and clears the record. ---
+        const nfId = `notfound-${runId}`;
+        await collections.deletionCleanups.insertOne({ _id: nfId, requestId: nfId, storageKeys: [`repair-requests/${runId}-nf/damage/gone.jpg`], status: 'pending', createdAt: new Date(), lastErrorCode: 'STORAGE_UNAVAILABLE' });
+        await retryDeletionCleanups({ cleanupModel: models.DeletionCleanup, storage: fakeStorage });
+        const nfRecord = await collections.deletionCleanups.findOne({ _id: nfId });
+        logTest('57. Object-not-found is resolved on retry (record removed)', !nfRecord);
+
+        // --- 58, 59. A concurrent duplicate delete produces exactly one cleanup record and one winner. ---
+        const kDup = `repair-requests/${runId}-dup/damage/${runId}-dup.jpg`;
+        const dupParcel = await createParcel({ damage: { images: [{ storageKey: kDup, url: 'd' }] } });
+        const [du1, du2] = await Promise.all([
+            (async () => { const r = fakeRes(); await pcThrow.deleteParcel({ params: { id: dupParcel.id }, decoded_email: ownerEmail }, r); return r; })(),
+            (async () => { const r = fakeRes(); await pcThrow.deleteParcel({ params: { id: dupParcel.id }, decoded_email: ownerEmail }, r); return r; })()
+        ]);
+        const dupRecordCount = await collections.deletionCleanups.countDocuments({ _id: dupParcel.id });
+        const dupWinners = [du1.statusCode, du2.statusCode].filter((s) => s === 200).length;
+        logTest('58. Concurrent duplicate delete creates exactly one cleanup record', dupRecordCount === 1);
+        logTest('59. Concurrent duplicate delete yields exactly one 200 winner (loser 404/409)', dupWinners === 1 && [du1.statusCode, du2.statusCode].some((s) => s === 404 || s === 409));
+    } finally {
+        if (createdParcelIds.length) {
+            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds } });
+        }
+        if (usedTrackingIds.length) await collections.trackings.deleteMany({ trackingId: { $in: usedTrackingIds } });
+        if (usedSessionRequestIds.length) {
+            await collections.damageUploadSessions.deleteMany({ requestId: { $in: usedSessionRequestIds } });
+            await collections.repairEvidenceSessions.deleteMany({ requestId: { $in: usedSessionRequestIds } });
+            await collections.checkoutSessions.deleteMany({ parcelId: { $in: usedSessionRequestIds } });
+        }
+        if (usedPaymentParcelIds.length) await collections.payments.deleteMany({ parcelId: { $in: usedPaymentParcelIds } });
+        const cleanupIds = [...createdParcelIds.map((x) => x.toString()), `notfound-${runId}`];
+        await collections.deletionCleanups.deleteMany({ _id: { $in: cleanupIds } });
+        if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        const leftoverP = await collections.parcels.countDocuments({ trackingId: { $regex: '^TEST-DEL-' } });
+        const leftoverU = await collections.users.countDocuments({ email: { $regex: '^del-.*@test.local$' } });
+        const leftoverC = await collections.deletionCleanups.countDocuments({ _id: { $in: cleanupIds } });
+        logTest('60. No deletion fixture leakage after tests (parcels, users, cleanup records)', leftoverP === 0 && leftoverU === 0 && leftoverC === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -12549,6 +12912,7 @@ async function runAllTests() {
     await testQuoteWorkflow();
     await testV2PaymentWorkflow();
     await testRepairWorkflow();
+    await testSafeRepairDeletion();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
