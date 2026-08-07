@@ -4459,10 +4459,10 @@ async function testNotificationFoundation() {
             'technician_application_submitted', 'technician_application_approved', 'technician_application_rejected',
             'technician_assigned', 'new_repair_assignment', 'technician_on_the_way',
             'repair_in_progress', 'repair_completed', 'payment_confirmed',
-            'inspection_completed'
+            'inspection_completed', 'quote_submitted', 'quote_approved', 'quote_rejected'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 10 event types exist', actualTypes.length === 10 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 13 event types exist', actualTypes.length === 13 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -4878,7 +4878,7 @@ async function testNotificationFoundation() {
         logTest('57. Each lifecycle event accepts recipientRole admin', allLifecycleAcceptAdmin);
         logTest('58. Each lifecycle event rejects an unsupported role', allLifecycleRejectUnsupported);
 
-        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed'];
+        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed', 'quote_submitted'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -11483,6 +11483,234 @@ async function testInspectionWorkflow() {
     console.log('');
 }
 
+// Phase 6.4 Unit 5 - Repair Quote Workflow (submission + customer decision).
+// Test-database safety: synthetic quote-*@test.local / TEST-QUOTE-* identities
+// only, each created document removed in `finally`, no real account or
+// canonical service definition touched, local dev DB only.
+async function testQuoteWorkflow() {
+    console.log('39. Testing Repair Quote Workflow (Phase 6.4 Unit 5)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { ObjectId } = require('mongodb');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ACTIVE_STATUSES, INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED } = require('./utils/parcelStatus');
+    const { getPaymentEligibility } = require('./services/paymentEligibility');
+    const { SERVICE_DEFINITION_SEED } = require('./data/serviceDefinitionSeed');
+
+    function fakeRes() {
+        return { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; } };
+    }
+
+    const runId = Date.now();
+    const createdParcelIds = [];
+    const createdUserEmails = [];
+    const createdRiderIds = [];
+    const usedTrackingIds = [];
+    const recipientEmails = [];
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const quoteController = controllers.quote;
+
+        const ownerEmail = `quote-owner-${runId}@test.local`;
+        const techEmail = `quote-tech-${runId}@test.local`;
+        const otherTechEmail = `quote-othertech-${runId}@test.local`;
+        const adminEmail = `quote-admin-${runId}@test.local`;
+        createdUserEmails.push(ownerEmail, techEmail, otherTechEmail, adminEmail);
+        recipientEmails.push(ownerEmail, techEmail, otherTechEmail);
+
+        await collections.users.insertMany([
+            { email: ownerEmail, role: 'user', createdAt: new Date() },
+            { email: techEmail, role: 'rider', createdAt: new Date() },
+            { email: otherTechEmail, role: 'rider', createdAt: new Date() },
+            { email: adminEmail, role: 'admin', createdAt: new Date() },
+        ]);
+        const techInsert = await collections.riders.insertOne({ name: `TEST-QUOTE-TECH-${runId}`, email: techEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
+        const otherInsert = await collections.riders.insertOne({ name: `TEST-QUOTE-OTHERTECH-${runId}`, email: otherTechEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
+        createdRiderIds.push(techInsert.insertedId, otherInsert.insertedId);
+        const techRiderId = techInsert.insertedId.toString();
+        const otherRiderId = otherInsert.insertedId.toString();
+
+        let seq = 0;
+        function makeTrackingId() { const t = `TEST-QUOTE-${runId}-${seq++}`; usedTrackingIds.push(t); return t; }
+
+        async function createParcel(overrides = {}) {
+            const now = new Date();
+            const doc = {
+                schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail,
+                product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
+                service: { definitionId: new ObjectId().toString(), repairCategorySlug: 'display-screen' },
+                damage: { description: 'Screen cracked after a fall onto pavement.', images: [] },
+                serviceLocation: { region: 'Dhaka', district: 'Dhaka', address: '10 Test Rd' },
+                pricing: { currency: 'BDT', estimateMin: 1500, estimateMax: 6000, inspectionFee: 0, calculationVersion: 2, quotedAmount: null, quoteStatus: 'awaiting_quote', customerApprovedAt: null, finalAmount: null },
+                inspection: { status: 'submitted', diagnosis: { summary: 'panel dead', detectedIssues: [{ code: null, label: 'Panel', severity: 'major', notes: null }] }, repairability: { decision: 'repairable_with_parts', reason: 'needs panel' }, estimate: { laborEstimate: 500, partsEstimate: 3000, currency: 'BDT' }, internalNotes: null, submittedAt: now, submittedByRiderId: techInsert.insertedId, submittedByEmail: techEmail, version: 1 },
+                deliveryStatus: INSPECTION_COMPLETED, riderId: techRiderId, riderName: `TEST-QUOTE-TECH-${runId}`, riderEmail: techEmail,
+                createdAt: now, updatedAt: now, ...overrides,
+            };
+            const r = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(r.insertedId);
+            return { id: r.insertedId.toString(), _id: r.insertedId, ...doc };
+        }
+        const validQuote = (o = {}) => ({ laborAmount: 800, partsAmount: 3500, additionalCharges: 200, notes: 'Panel + labor.', ...o });
+        const submit = (pid, email, body) => { const res = fakeRes(); return quoteController.submitQuote({ params: { id: pid }, body, decoded_email: email }, res).then(() => res); };
+        const decide = (pid, email, body) => { const res = fakeRes(); return quoteController.decideQuote({ params: { id: pid }, body, decoded_email: email }, res).then(() => res); };
+        const getQ = (pid, email) => { const res = fakeRes(); return quoteController.getQuote({ params: { id: pid }, decoded_email: email }, res).then(() => res); };
+        async function submittedParcel() { const p = await createParcel(); await submit(p.id, techEmail, validQuote()); return p; }
+
+        // ================= Submit authorization (1-10) =================
+        await makeRequest({ hostname: 'localhost', port: 3000, path: '/parcels/507f1f77bcf86cd799439011/quote', method: 'POST' }, 401, '1. Unauthenticated quote submit rejected (401)');
+        {
+            const p = await createParcel();
+            logTest('2. Customer cannot submit quote', (await submit(p.id, ownerEmail, validQuote())).body.code === 'TECHNICIAN_ROLE_REQUIRED');
+            logTest('3. Admin cannot submit quote', (await submit(p.id, adminEmail, validQuote())).body.code === 'TECHNICIAN_ROLE_REQUIRED');
+            logTest('4. Unrelated technician gets existence-oracle-safe 404', (await submit(p.id, otherTechEmail, validQuote())).statusCode === 404);
+        }
+        {
+            const p = await createParcel();
+            await collections.parcels.updateOne({ _id: p._id }, { $set: { riderId: otherRiderId, riderEmail: otherTechEmail } });
+            logTest('5. Reassigned rider (stale) blocked', (await submit(p.id, techEmail, validQuote())).statusCode === 404);
+        }
+        {
+            const p = await createParcel();
+            await collections.users.updateOne({ email: techEmail }, { $set: { role: 'user' } });
+            const r = await submit(p.id, techEmail, validQuote());
+            await collections.users.updateOne({ email: techEmail }, { $set: { role: 'rider' } });
+            logTest('6. Removed rider role blocked', r.statusCode === 403 && r.body.code === 'TECHNICIAN_ROLE_REQUIRED');
+        }
+        logTest('7. Pre-inspection request rejected', (await submit((await createParcel({ deliveryStatus: 'parcel_picked_up' })).id, techEmail, validQuote())).body.code === 'QUOTE_NOT_ALLOWED');
+        {
+            const p = await createParcel();
+            const ok = await submit(p.id, techEmail, validQuote());
+            logTest('8. inspection_completed quote accepted', ok.statusCode === 201 && ok.body.deliveryStatus === QUOTE_SUBMITTED);
+            logTest('10. Duplicate quote rejected', (await submit(p.id, techEmail, validQuote())).body.code === 'QUOTE_ALREADY_SUBMITTED');
+        }
+        logTest('9. Legacy request rejected', (await submit((await createParcel({ schemaVersion: undefined, product: undefined, inspection: undefined, pricing: undefined, parcelName: `TEST-QUOTE-LEGACY-${runId}`, cost: 40 })).id, techEmail, validQuote())).body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
+
+        // ================= Validation (11-18) =================
+        async function invalid(num, name, body, code) {
+            const p = await createParcel();
+            const r = await submit(p.id, techEmail, body);
+            logTest(`${num}. ${name}`, r.statusCode === 400 && r.body.code === code);
+        }
+        await invalid(11, 'negative amount rejected', validQuote({ laborAmount: -1 }), 'INVALID_QUOTE_AMOUNT');
+        await invalid(12, 'decimal amount rejected', validQuote({ partsAmount: 100.5 }), 'INVALID_QUOTE_AMOUNT');
+        await invalid(13, 'numeric-string amount rejected', validQuote({ laborAmount: '800' }), 'INVALID_QUOTE_AMOUNT');
+        await invalid(14, 'excessive amount rejected', validQuote({ partsAmount: 600000 }), 'INVALID_QUOTE_AMOUNT');
+        await invalid(15, 'invalid notes rejected', validQuote({ notes: 'x'.repeat(1001) }), 'INVALID_QUOTE');
+        await invalid(16, 'client totalAmount rejected', validQuote({ totalAmount: 1 }), 'INVALID_QUOTE');
+        await invalid(17, 'client currency rejected', validQuote({ currency: 'usd' }), 'INVALID_QUOTE');
+        await invalid(18, 'client authority field (status) rejected', validQuote({ status: 'approved' }), 'INVALID_QUOTE');
+
+        // ================= Persistence (19-25) =================
+        {
+            const p = await createParcel();
+            const beforePricing = JSON.stringify(p.pricing);
+            const beforeInsp = JSON.stringify(p.inspection);
+            const stripeBefore = capturedStripeSessionParams.length;
+            const r = await submit(p.id, techEmail, validQuote());
+            const doc = await collections.parcels.findOne({ _id: p._id });
+            logTest('19. Quote stored', !!doc.quote && doc.quote.status === 'submitted');
+            logTest('20. Quote currency server-owned BDT', doc.quote.currency === 'BDT');
+            logTest('21. Server-computed total correct (800+3500+200=4500)', doc.quote.totalAmount === 4500 && r.body.quote.totalAmount === 4500);
+            logTest('22. deliveryStatus becomes quote_submitted', doc.deliveryStatus === QUOTE_SUBMITTED);
+            const rider = await collections.riders.findOne({ _id: techInsert.insertedId });
+            logTest('23. Rider stays busy (workStatus + active status)', rider.workStatus === 'in_delivery' && ACTIVE_STATUSES.includes(doc.deliveryStatus));
+            logTest('24. request.pricing unchanged by quote', JSON.stringify(doc.pricing) === beforePricing);
+            logTest('25. inspection unchanged by quote', JSON.stringify(doc.inspection) === beforeInsp);
+            logTest('48. No Stripe call during quote', capturedStripeSessionParams.length === stripeBefore);
+            logTest('46. Quote view excludes internal submitter id', r.body.quote.submittedByRiderId === undefined);
+        }
+
+        // ================= Customer decision (26-35) =================
+        {
+            const p = await submittedParcel();
+            const r = await decide(p.id, ownerEmail, { decision: 'approve' });
+            const doc = await collections.parcels.findOne({ _id: p._id });
+            logTest('26/34/35. Owner approve -> quote_approved', r.statusCode === 200 && doc.quote.status === 'approved' && doc.deliveryStatus === QUOTE_APPROVED && doc.quote.decidedAt instanceof Date);
+            logTest('32. Second decision rejected', (await decide(p.id, ownerEmail, { decision: 'reject', reason: 'changed mind' })).body.code === 'QUOTE_ALREADY_DECIDED');
+            logTest('47. Payment still blocked after approval', getPaymentEligibility(doc).code === 'PAYMENT_NOT_AVAILABLE');
+        }
+        {
+            const p = await submittedParcel();
+            const r = await decide(p.id, ownerEmail, { decision: 'reject', reason: 'Too expensive for this device.' });
+            const doc = await collections.parcels.findOne({ _id: p._id });
+            logTest('27. Owner reject -> quote_rejected with reason', r.statusCode === 200 && doc.quote.status === 'rejected' && doc.deliveryStatus === QUOTE_REJECTED && doc.quote.decisionReason === 'Too expensive for this device.');
+        }
+        logTest('28. Rejection reason required', (await decide((await submittedParcel()).id, ownerEmail, { decision: 'reject' })).body.code === 'QUOTE_REJECTION_REASON_REQUIRED');
+        {
+            const p = await submittedParcel();
+            logTest('29. Non-owner (unknown) decision -> 404', (await decide(p.id, `quote-nobody-${runId}@test.local`, { decision: 'approve' })).statusCode === 404);
+            logTest('30. Assigned rider cannot decide', (await decide(p.id, techEmail, { decision: 'approve' })).body.code === 'NOT_REQUEST_OWNER');
+            logTest('31. Admin cannot decide (no impersonation)', (await decide(p.id, adminEmail, { decision: 'approve' })).body.code === 'NOT_REQUEST_OWNER');
+        }
+        {
+            // 33. concurrent approve/reject -> one winner.
+            const p = await submittedParcel();
+            const [a, b] = await Promise.all([decide(p.id, ownerEmail, { decision: 'approve' }), decide(p.id, ownerEmail, { decision: 'reject', reason: 'concurrent reject attempt' })]);
+            const statuses = [a.statusCode, b.statusCode].sort();
+            const doc = await collections.parcels.findOne({ _id: p._id });
+            logTest('33. Concurrent approve/reject -> one winner', JSON.stringify(statuses) === JSON.stringify([200, 409]) && (doc.quote.status === 'approved' || doc.quote.status === 'rejected') && (doc.deliveryStatus === QUOTE_APPROVED || doc.deliveryStatus === QUOTE_REJECTED));
+        }
+
+        // ================= Tracking / Notification (36-41) =================
+        {
+            const p = await createParcel();
+            await submit(p.id, techEmail, validQuote());
+            await decide(p.id, ownerEmail, { decision: 'approve' });
+            logTest('36. quote_submitted tracking event once', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED })) === 1);
+            logTest('37. quote_approved tracking event once', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: QUOTE_APPROVED })) === 1);
+            const subNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:quote_submitted` }).toArray();
+            logTest('40. Customer quote_submitted notification once', subNotif.length === 1 && subNotif[0].recipientEmail === ownerEmail);
+            const ser = JSON.stringify(subNotif[0]);
+            logTest('41. Notification carries no line-item/total/internal data', subNotif[0].message === 'Your repair quote is ready for review.' && !ser.includes('4500') && !('totalAmount' in subNotif[0]) && Object.keys(subNotif[0].metadata || {}).every((k) => k === 'trackingId'));
+            const apprNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:quote_approved` }).toArray();
+            logTest('37b. Technician quote_approved notification once', apprNotif.length === 1 && apprNotif[0].recipientEmail === techEmail && apprNotif[0].recipientRole === 'rider');
+        }
+        {
+            const p = await createParcel();
+            await submit(p.id, techEmail, validQuote());
+            await decide(p.id, ownerEmail, { decision: 'reject', reason: 'Prefer to replace the device.' });
+            logTest('38. quote_rejected tracking event once', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: QUOTE_REJECTED })) === 1);
+        }
+        {
+            // 39. failed submit -> no tracking event, no notification.
+            const p = await createParcel();
+            await submit(p.id, techEmail, validQuote({ laborAmount: -5 }));
+            logTest('39. Failed submit creates no tracking/notification', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED })) === 0 && (await collections.notifications.countDocuments({ deduplicationKey: `repair:${p.id}:quote_submitted` })) === 0);
+        }
+
+        // ================= Read (42-46) =================
+        {
+            const p = await submittedParcel();
+            const owner = await getQ(p.id, ownerEmail);
+            logTest('42. Owner reads quote', owner.statusCode === 200 && owner.body.quote.status === 'submitted' && owner.body.quote.totalAmount === 4500);
+            logTest('43. Admin reads quote', (await getQ(p.id, adminEmail)).statusCode === 200);
+            logTest('44. Assigned technician reads quote', (await getQ(p.id, techEmail)).statusCode === 200);
+            logTest('45. Unrelated technician denied', (await getQ(p.id, otherTechEmail)).statusCode === 404);
+            logTest('46b. Read view excludes submittedByRiderId', owner.body.quote.submittedByRiderId === undefined);
+        }
+
+        // ================= Regression (49) =================
+        logTest('49. Canonical BDT count remains 16', (await collections.serviceDefinitions.countDocuments({ $or: SERVICE_DEFINITION_SEED.map((r) => ({ productCategorySlug: r.productCategorySlug, repairCategorySlug: r.repairCategorySlug })) })) === 16);
+    } finally {
+        if (createdParcelIds.length) await collections.parcels.deleteMany({ _id: { $in: createdParcelIds } });
+        if (createdRiderIds.length) await collections.riders.deleteMany({ _id: { $in: createdRiderIds } });
+        if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        if (usedTrackingIds.length) await collections.trackings.deleteMany({ trackingId: { $in: usedTrackingIds } });
+        if (recipientEmails.length) await collections.notifications.deleteMany({ recipientEmail: { $in: recipientEmails } });
+        const leftoverP = await collections.parcels.countDocuments({ trackingId: { $regex: '^TEST-QUOTE-' } });
+        const leftoverR = await collections.riders.countDocuments({ name: { $regex: '^TEST-QUOTE-' } });
+        const leftoverU = await collections.users.countDocuments({ email: { $regex: '^quote-.*@test.local$' } });
+        logTest('53. No quote fixture leakage after tests', leftoverP === 0 && leftoverR === 0 && leftoverU === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -11697,6 +11925,7 @@ async function runAllTests() {
     await testAuthorizedDamageImageAccess();
     await testBdtPricingMigration();
     await testInspectionWorkflow();
+    await testQuoteWorkflow();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

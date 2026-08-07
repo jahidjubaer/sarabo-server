@@ -8,6 +8,7 @@ const HealthController = require('./healthController');
 const ServiceDefinitionController = require('./serviceDefinitionController');
 const DamageUploadController = require('./damageUploadController');
 const InspectionController = require('./inspectionController');
+const QuoteController = require('./quoteController');
 
 function initializeControllers(models, collections) {
     return {
@@ -20,7 +21,8 @@ function initializeControllers(models, collections) {
         health: new HealthController(),
         serviceDefinition: new ServiceDefinitionController(models),
         damageUpload: new DamageUploadController(models, collections),
-        inspection: new InspectionController(models, collections)
+        inspection: new InspectionController(models, collections),
+        quote: new QuoteController(models, collections)
     };
 }
 

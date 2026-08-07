@@ -158,6 +158,41 @@ const NOTIFICATION_EVENTS = {
         actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
         deduplicationKey: ({ entityId }) => `repair:${entityId}:inspection_completed`,
     },
+    quote_submitted: {
+        entityType: 'parcel',
+        // Owner-facing, same variable-role reasoning as technician_assigned.
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: [],
+        title: () => 'Your repair quote is ready',
+        message: () => 'Your repair quote is ready for review.',
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:quote_submitted`,
+    },
+    quote_approved: {
+        entityType: 'parcel',
+        // Addressed to the assigned technician - a fixed single role.
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: [],
+        title: () => 'Quote approved',
+        message: () => 'The customer approved the repair quote.',
+        actionUrl: () => '/dashboard/assigned-jobs',
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:quote_approved`,
+    },
+    quote_rejected: {
+        entityType: 'parcel',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: [],
+        title: () => 'Quote declined',
+        message: () => 'The customer declined the repair quote.',
+        actionUrl: () => '/dashboard/assigned-jobs',
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:quote_rejected`,
+    },
     payment_confirmed: {
         entityType: 'parcel',
         // Same reasoning as technician_assigned/technician_on_the_way/

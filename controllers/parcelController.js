@@ -118,7 +118,13 @@ class ParcelController {
             // are served only through their own authorized endpoint. Only the
             // inspection field is stripped; deliveryStatus (which may be
             // inspection_completed) is preserved.
-            const { inspection, ...safeParcel } = parcel;
+            // The inspection and quote sub-documents (Phase 6.4 Units 4-5) are
+            // never served through this raw-parcel endpoint - they are read
+            // only through their own dedicated, role-projected endpoints (see
+            // controllers/inspectionController.js and quoteController.js), which
+            // strip internal submitter identity. deliveryStatus (which may be a
+            // quote_* state) is preserved.
+            const { inspection, quote, ...safeParcel } = parcel;
             res.send(safeParcel);
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair request', error: error.message });
