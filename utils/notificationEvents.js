@@ -234,6 +234,34 @@ const NOTIFICATION_EVENTS = {
         actionUrl: () => '/dashboard/assigned-jobs',
         deduplicationKey: ({ entityId }) => `repair:${entityId}:payment_completed_technician`,
     },
+    // V2 repair progress + completion (Phase 6.4 Unit 7). Deliberately distinct
+    // event types (and dedup keys) from the legacy courier-era repair_in_progress
+    // /repair_completed above: those fire on the legacy parcel_picked_up /
+    // parcel_delivered transitions and a v2 request already receives the legacy
+    // repair_in_progress at pickup, so reusing them here would let the v2
+    // start/finish notification be silently deduplicated away.
+    repair_started: {
+        entityType: 'parcel',
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: [],
+        title: () => 'Repair started',
+        message: () => 'Repair work has started.',
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:repair_started`,
+    },
+    repair_finished: {
+        entityType: 'parcel',
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: [],
+        title: () => 'Repair completed',
+        message: () => 'Your repair has been completed.',
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:repair_finished`,
+    },
 };
 
 module.exports = { NOTIFICATION_EVENTS, ENTITY_TYPES, ROLES, PRIORITIES };

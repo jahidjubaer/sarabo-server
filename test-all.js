@@ -4460,10 +4460,11 @@ async function testNotificationFoundation() {
             'technician_assigned', 'new_repair_assignment', 'technician_on_the_way',
             'repair_in_progress', 'repair_completed', 'payment_confirmed',
             'inspection_completed', 'quote_submitted', 'quote_approved', 'quote_rejected',
-            'payment_completed', 'payment_completed_technician'
+            'payment_completed', 'payment_completed_technician',
+            'repair_started', 'repair_finished'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 15 event types exist', actualTypes.length === 15 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 17 event types exist', actualTypes.length === 17 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -4879,7 +4880,7 @@ async function testNotificationFoundation() {
         logTest('57. Each lifecycle event accepts recipientRole admin', allLifecycleAcceptAdmin);
         logTest('58. Each lifecycle event rejects an unsupported role', allLifecycleRejectUnsupported);
 
-        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed', 'quote_submitted', 'payment_completed'];
+        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed', 'quote_submitted', 'payment_completed', 'repair_started', 'repair_finished'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -11997,6 +11998,340 @@ async function testV2PaymentWorkflow() {
     console.log('');
 }
 
+// Repair progress + completion + technician release (Phase 6.4 Unit 7). All
+// storage I/O runs against an injected fake GCS bucket (never real Firebase);
+// synthetic fixtures only (rep-*@test.local / TEST-REP-*), cleaned in finally.
+async function testRepairWorkflow() {
+    console.log('41. Testing Repair Progress + Completion (Phase 6.4 Unit 7)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { ObjectId } = require('mongodb');
+    const { initializeModels } = require('./models');
+    const { DamageStorageService } = require('./services/damageStorageService');
+    const RepairController = require('./controllers/repairController');
+    const { ACTIVE_STATUSES, PAYMENT_COMPLETED, QUOTE_APPROVED, REPAIR_IN_PROGRESS, REPAIR_COMPLETED } = require('./utils/parcelStatus');
+    const { getV2PaymentEligibility } = require('./services/paymentEligibility');
+    const { MAX_PROGRESS_UPDATES } = require('./utils/repair');
+    const { SERVICE_DEFINITION_SEED } = require('./data/serviceDefinitionSeed');
+
+    function fakeRes() {
+        return { statusCode: 200, body: undefined, headers: {}, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; }, set(k, v) { this.headers[k] = v; return this; } };
+    }
+    function createFakeBucket(name = 'fake-repair-bucket') {
+        const objects = new Map();
+        return {
+            name, _objects: objects,
+            file(storageKey) {
+                return {
+                    async getSignedUrl(opts) { return [`https://fake-storage.test/${name}/${storageKey}?action=${opts.action}`]; },
+                    async getMetadata() { const o = objects.get(storageKey); if (!o) { const e = new Error('Not Found'); e.code = 404; throw e; } return [{ contentType: o.mimeType, size: String(o.size), name: storageKey }]; },
+                    async delete() { objects.delete(storageKey); },
+                };
+            },
+        };
+    }
+
+    const runId = Date.now();
+    const createdParcelIds = [];
+    const createdUserEmails = [];
+    const createdRiderIds = [];
+    const usedTrackingIds = [];
+    const recipientEmails = [];
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const fakeBucket = createFakeBucket();
+        const fakeStorage = new DamageStorageService({ bucket: fakeBucket });
+        const repair = new RepairController(models, collections, fakeStorage);
+
+        const ownerEmail = `rep-owner-${runId}@test.local`;
+        const techEmail = `rep-tech-${runId}@test.local`;
+        const otherTechEmail = `rep-othertech-${runId}@test.local`;
+        const adminEmail = `rep-admin-${runId}@test.local`;
+        createdUserEmails.push(ownerEmail, techEmail, otherTechEmail, adminEmail);
+        recipientEmails.push(ownerEmail, techEmail, otherTechEmail);
+
+        await collections.users.insertMany([
+            { email: ownerEmail, role: 'user', createdAt: new Date() },
+            { email: techEmail, role: 'rider', createdAt: new Date() },
+            { email: otherTechEmail, role: 'rider', createdAt: new Date() },
+            { email: adminEmail, role: 'admin', createdAt: new Date() },
+        ]);
+        const techInsert = await collections.riders.insertOne({ name: `TEST-REP-TECH-${runId}`, email: techEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
+        const otherInsert = await collections.riders.insertOne({ name: `TEST-REP-OTHERTECH-${runId}`, email: otherTechEmail, status: 'approved', workStatus: 'available', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
+        createdRiderIds.push(techInsert.insertedId, otherInsert.insertedId);
+        const techRiderId = techInsert.insertedId.toString();
+
+        let seq = 0;
+        function makeTrackingId() { const t = `TEST-REP-${runId}-${seq++}`; usedTrackingIds.push(t); return t; }
+
+        async function createParcel(overrides = {}) {
+            const now = new Date();
+            const doc = {
+                schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail, parcelName: `TEST-REP-DEVICE-${runId}`,
+                product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
+                inspection: { status: 'submitted', estimate: { laborEstimate: 500, partsEstimate: 3000, currency: 'BDT' }, submittedAt: now, version: 1 },
+                pricing: { currency: 'BDT', estimateMin: 1500, estimateMax: 6000, calculationVersion: 2 },
+                quote: { status: 'approved', laborAmount: 800, partsAmount: 3500, additionalCharges: 200, totalAmount: 4500, currency: 'BDT', notes: null, submittedAt: now, decidedAt: now, decisionReason: null, version: 1 },
+                payment: { status: 'completed', provider: 'stripe', paymentIntentId: 'pi_test', amount: 4500, currency: 'BDT', quoteVersion: 1, completedAt: now },
+                deliveryStatus: PAYMENT_COMPLETED, riderId: techRiderId, riderName: `TEST-REP-TECH-${runId}`, riderEmail: techEmail,
+                createdAt: now, updatedAt: now, ...overrides,
+            };
+            const r = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(r.insertedId);
+            return { id: r.insertedId.toString(), _id: r.insertedId, ...doc };
+        }
+
+        const start = (pid, email) => { const res = fakeRes(); return repair.startRepair({ params: { id: pid }, body: {}, decoded_email: email }, res).then(() => res); };
+        const progress = (pid, email, body) => { const res = fakeRes(); return repair.addProgress({ params: { id: pid }, body, decoded_email: email }, res).then(() => res); };
+        const complete = (pid, email, body) => { const res = fakeRes(); return repair.completeRepair({ params: { id: pid }, body, decoded_email: email }, res).then(() => res); };
+        const getRep = (pid, email) => { const res = fakeRes(); return repair.getRepair({ params: { id: pid }, decoded_email: email }, res).then(() => res); };
+        async function uploadEvidence(pid, email = techEmail) {
+            const res = fakeRes();
+            await repair.createEvidenceUploadSession({ params: { id: pid }, body: { fileName: 'evi.jpg', mimeType: 'image/jpeg', size: 22222 }, decoded_email: email }, res);
+            const sid = res.body.uploadSessionId;
+            const sess = await collections.repairEvidenceSessions.findOne({ _id: sid });
+            if (sess) fakeBucket._objects.set(sess.storageKey, { mimeType: 'image/jpeg', size: 22222 });
+            return sid;
+        }
+        async function startedParcel(ov = {}) { const p = await createParcel(ov); await start(p.id, techEmail); return p; }
+        const validSummary = 'Replaced the cracked display panel and tested all touch input successfully.';
+        async function completeWithEvidence(pid) { const eid = await uploadEvidence(pid); return complete(pid, techEmail, { summary: validSummary, evidenceImageIds: [eid] }); }
+
+        // ================= Start (1-9) =================
+        await makeRequest({ hostname: 'localhost', port: 3000, path: '/parcels/507f1f77bcf86cd799439011/repair/start', method: 'POST' }, 401, '1. Unauthenticated start rejected (401)');
+        {
+            const p = await createParcel();
+            logTest('2. Customer cannot start repair', (await start(p.id, ownerEmail)).body.code === 'TECHNICIAN_ROLE_REQUIRED');
+            logTest('3. Admin cannot start repair', (await start(p.id, adminEmail)).body.code === 'TECHNICIAN_ROLE_REQUIRED');
+            logTest('4. Unrelated technician gets existence-oracle 404', (await start(p.id, otherTechEmail)).statusCode === 404);
+        }
+        {
+            const p = await createParcel();
+            await collections.users.updateOne({ email: techEmail }, { $set: { role: 'user' } });
+            const r = await start(p.id, techEmail);
+            await collections.users.updateOne({ email: techEmail }, { $set: { role: 'rider' } });
+            logTest('5. Role-removed rider rejected', r.statusCode === 403 && r.body.code === 'TECHNICIAN_ROLE_REQUIRED');
+        }
+        logTest('6. Pre-payment start rejected', (await start((await createParcel({ deliveryStatus: QUOTE_APPROVED, payment: undefined })).id, techEmail)).body.code === 'REPAIR_NOT_PAYABLE_COMPLETE');
+        {
+            const p = await createParcel();
+            const r = await start(p.id, techEmail);
+            const doc = await collections.parcels.findOne({ _id: p._id });
+            logTest('7. payment_completed start accepted', r.statusCode === 201 && r.body.deliveryStatus === REPAIR_IN_PROGRESS && doc.repair.status === 'in_progress' && doc.repair.startedAt instanceof Date);
+            logTest('8. Duplicate start rejected', (await start(p.id, techEmail)).body.code === 'REPAIR_ALREADY_STARTED');
+        }
+        logTest('9. Legacy start rejected', (await start((await createParcel({ schemaVersion: undefined, quote: undefined, payment: undefined, cost: 40 })).id, techEmail)).body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
+
+        // ================= Progress (10-16) =================
+        logTest('10. Progress before start rejected', (await progress((await createParcel()).id, techEmail, { message: 'Working on it now.' })).body.code === 'REPAIR_NOT_IN_PROGRESS');
+        {
+            const p = await startedParcel();
+            const r = await progress(p.id, techEmail, { message: 'Opened the device and inspected the board.' });
+            const doc = await collections.parcels.findOne({ _id: p._id });
+            logTest('11. Valid progress update accepted', r.statusCode === 201 && doc.repair.progressUpdates.length === 1 && r.body.update.id);
+            logTest('12a. Too-short message rejected', (await progress(p.id, techEmail, { message: 'hi' })).body.code === 'INVALID_PROGRESS_MESSAGE');
+            logTest('12b. Too-long message rejected', (await progress(p.id, techEmail, { message: 'x'.repeat(501) })).body.code === 'INVALID_PROGRESS_MESSAGE');
+            const r2 = await progress(p.id, techEmail, { message: 'Ordered a replacement part.', foo: 'bar' });
+            const doc2 = await collections.parcels.findOne({ _id: p._id });
+            const last = doc2.repair.progressUpdates[doc2.repair.progressUpdates.length - 1];
+            logTest('13. Unknown fields excluded from stored update', r2.statusCode === 201 && !('foo' in last) && Object.keys(last).sort().join() === 'createdAt,createdByRiderId,id,message');
+            logTest('14a. Client-supplied id rejected', (await progress(p.id, techEmail, { message: 'valid message here', id: 'forged' })).body.code === 'INVALID_PROGRESS');
+            logTest('14b. Client-supplied createdAt rejected', (await progress(p.id, techEmail, { message: 'valid message here', createdAt: new Date() })).body.code === 'INVALID_PROGRESS');
+        }
+        {
+            // 15. Max 50 enforced.
+            const p = await startedParcel();
+            const seed = [];
+            for (let i = 0; i < MAX_PROGRESS_UPDATES; i++) seed.push({ id: `seed-${i}`, message: `seed ${i}`, createdAt: new Date(), createdByRiderId: techInsert.insertedId });
+            await collections.parcels.updateOne({ _id: p._id }, { $set: { 'repair.progressUpdates': seed } });
+            logTest('15. Max 50 progress updates enforced', (await progress(p.id, techEmail, { message: 'one too many updates' })).body.code === 'PROGRESS_LIMIT_REACHED');
+        }
+        {
+            // 16. Concurrent progress appends both preserved.
+            const p = await startedParcel();
+            await Promise.all([progress(p.id, techEmail, { message: 'concurrent update one' }), progress(p.id, techEmail, { message: 'concurrent update two' })]);
+            const doc = await collections.parcels.findOne({ _id: p._id });
+            logTest('16. Concurrent progress appends both preserved', doc.repair.progressUpdates.length === 2);
+        }
+
+        // ================= Completion (17-35) =================
+        logTest('17. Completion before start rejected', (await complete((await createParcel()).id, techEmail, { summary: validSummary, evidenceImageIds: ['00000000-0000-4000-8000-000000000000'] })).body.code === 'REPAIR_NOT_IN_PROGRESS');
+        {
+            const p = await startedParcel();
+            logTest('18. No evidence rejected', (await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: [] })).body.code === 'INVALID_COMPLETION_EVIDENCE');
+            const four = []; for (let i = 0; i < 4; i++) four.push(await uploadEvidence(p.id));
+            logTest('19. More than 3 evidence rejected', (await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: four })).body.code === 'INVALID_COMPLETION_EVIDENCE');
+            const one = await uploadEvidence(p.id);
+            logTest('20. Duplicate evidence ids rejected', (await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: [one, one] })).body.code === 'INVALID_COMPLETION_EVIDENCE');
+            logTest('21. Invalid evidence id rejected', (await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: ['not-a-uuid'] })).body.code === 'INVALID_COMPLETION_EVIDENCE');
+        }
+        {
+            // 22. Foreign evidence (session for a different request) rejected.
+            const p1 = await startedParcel();
+            const p2 = await startedParcel();
+            const foreign = await uploadEvidence(p2.id);
+            logTest('22. Foreign evidence rejected', (await complete(p1.id, techEmail, { summary: validSummary, evidenceImageIds: [foreign] })).statusCode === 404);
+        }
+        {
+            const p = await startedParcel();
+            const eid = await uploadEvidence(p.id);
+            logTest('23. Wrong technician completion rejected (404)', (await complete(p.id, otherTechEmail, { summary: validSummary, evidenceImageIds: [eid] })).statusCode === 404);
+        }
+        {
+            const p = await startedParcel();
+            const eid = await uploadEvidence(p.id);
+            await collections.users.updateOne({ email: techEmail }, { $set: { role: 'user' } });
+            const r = await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: [eid] });
+            await collections.users.updateOne({ email: techEmail }, { $set: { role: 'rider' } });
+            logTest('24. Role removal completion rejected', r.statusCode === 403 && r.body.code === 'TECHNICIAN_ROLE_REQUIRED');
+        }
+        {
+            // 25-35. Valid completion + isolation.
+            const p = await startedParcel();
+            await progress(p.id, techEmail, { message: 'Finished the repair and testing.' });
+            const beforePricing = JSON.stringify(p.pricing), beforeInsp = JSON.stringify(p.inspection), beforeQuote = JSON.stringify(p.quote), beforePay = JSON.stringify(p.payment);
+            const eid = await uploadEvidence(p.id);
+            const r = await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: [eid] });
+            const doc = await collections.parcels.findOne({ _id: p._id });
+            logTest('25. Valid completion accepted (200)', r.statusCode === 200 && r.body.deliveryStatus === REPAIR_COMPLETED);
+            logTest('26. Double completion -> one winner', (await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: [eid] })).body.code === 'REPAIR_ALREADY_COMPLETED');
+            logTest('27. deliveryStatus -> repair_completed, repair.status completed', doc.deliveryStatus === REPAIR_COMPLETED && doc.repair.status === 'completed');
+            logTest('28. Progress updates preserved', doc.repair.progressUpdates.length === 1);
+            logTest('29. Completion summary stored', doc.repair.completion.summary === validSummary && doc.repair.completion.completedAt instanceof Date);
+            logTest('30. Evidence references safe (imageId + verified mime/size)', doc.repair.completion.evidenceImages.length === 1 && doc.repair.completion.evidenceImages[0].imageId === eid && doc.repair.completion.evidenceImages[0].mimeType === 'image/jpeg' && doc.repair.completion.evidenceImages[0].size === 22222);
+            const readOwner = await getRep(p.id, ownerEmail);
+            // The signed read url necessarily contains the object path (that is
+            // how signed URLs work, exactly like the damage-image endpoint) - what
+            // must never appear is a raw `storageKey` field of its own.
+            logTest('31. Read view exposes no storageKey field', !JSON.stringify(readOwner.body).includes('storageKey'));
+            logTest('32. request.pricing unchanged', JSON.stringify(doc.pricing) === beforePricing);
+            logTest('33. inspection unchanged', JSON.stringify(doc.inspection) === beforeInsp);
+            logTest('34. quote unchanged', JSON.stringify(doc.quote) === beforeQuote);
+            logTest('35. payment unchanged', JSON.stringify(doc.payment) === beforePay);
+        }
+
+        // ================= Rider release (36-40) =================
+        // Each release test uses a FRESH dedicated technician whose only active
+        // assignment is the parcel under test - so the "other active assignment"
+        // defense-in-depth guard (correctly retained from the legacy completion
+        // path) never confounds the release assertion.
+        let relSeq = 0;
+        async function freshRiderParcel() {
+            const email = `rep-rel-${runId}-${relSeq++}@test.local`;
+            createdUserEmails.push(email); recipientEmails.push(email);
+            await collections.users.insertOne({ email, role: 'rider', createdAt: new Date() });
+            const ins = await collections.riders.insertOne({ name: `TEST-REP-REL-${runId}-${relSeq}`, email, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
+            createdRiderIds.push(ins.insertedId);
+            const p = await createParcel({ riderId: ins.insertedId.toString(), riderName: `TEST-REP-REL-${runId}`, riderEmail: email });
+            await start(p.id, email);
+            return { p, riderEmail: email, riderId: ins.insertedId };
+        }
+        {
+            const { p, riderEmail, riderId } = await freshRiderParcel();
+            const riderDuring = await collections.riders.findOne({ _id: riderId });
+            const docDuring = await collections.parcels.findOne({ _id: p._id });
+            logTest('36. Rider busy before completion', riderDuring.workStatus === 'in_delivery' && ACTIVE_STATUSES.includes(docDuring.deliveryStatus));
+            const eid = await uploadEvidence(p.id, riderEmail);
+            await complete(p.id, riderEmail, { summary: validSummary, evidenceImageIds: [eid] });
+            const riderAfter = await collections.riders.findOne({ _id: riderId });
+            logTest('37. Rider available after completion', riderAfter.workStatus === 'available');
+            logTest('40. Rider assignment-eligible again (released, terminal status not active)', riderAfter.workStatus === 'available' && !ACTIVE_STATUSES.includes(REPAIR_COMPLETED));
+        }
+        {
+            // 38. Failed completion (no evidence) does not release the rider.
+            const { p, riderEmail, riderId } = await freshRiderParcel();
+            await complete(p.id, riderEmail, { summary: validSummary, evidenceImageIds: [] });
+            const rider = await collections.riders.findOne({ _id: riderId });
+            logTest('38. Failed completion does not release rider', rider.workStatus === 'in_delivery');
+        }
+        {
+            // 39. Double (concurrent) completion releases exactly once.
+            const { p, riderEmail, riderId } = await freshRiderParcel();
+            const eid = await uploadEvidence(p.id, riderEmail);
+            const [a, b] = await Promise.all([complete(p.id, riderEmail, { summary: validSummary, evidenceImageIds: [eid] }), complete(p.id, riderEmail, { summary: validSummary, evidenceImageIds: [eid] })]);
+            const statuses = [a.statusCode, b.statusCode].sort((x, y) => x - y);
+            const rider = await collections.riders.findOne({ _id: riderId });
+            const oneWinner = statuses[0] === 200 && (statuses[1] === 404 || statuses[1] === 409);
+            logTest('39. Double completion releases rider exactly once', oneWinner && rider.workStatus === 'available');
+        }
+
+        // ================= Tracking / notification (41-46) =================
+        {
+            const p = await startedParcel();
+            await progress(p.id, techEmail, { message: 'Progress update for tracking.' });
+            await completeWithEvidence(p.id);
+            logTest('41. repair_started tracking event once', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: 'repair_started' })) === 1);
+            logTest('42. repair_progress_updated tracking event present', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: 'repair_progress_updated' })) >= 1);
+            logTest('43. repair_completed tracking event once', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: 'repair_completed' })) === 1);
+            logTest('44. No duplicate repair_started event', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: 'repair_started' })) === 1);
+            const finishNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:repair_finished` }).toArray();
+            const ser = JSON.stringify(finishNotif[0] || {});
+            logTest('46. Customer completion notification once, safe copy', finishNotif.length === 1 && finishNotif[0].recipientEmail === ownerEmail && finishNotif[0].message === 'Your repair has been completed.' && !ser.includes('storageKey') && !ser.includes('4500'));
+        }
+        {
+            // 45. Failed start creates no tracking event.
+            const p = await createParcel({ deliveryStatus: QUOTE_APPROVED, payment: undefined });
+            await start(p.id, techEmail);
+            logTest('45. No tracking event on failed start', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: 'repair_started' })) === 0);
+        }
+
+        // ================= Read / privacy (47-54) =================
+        {
+            const p = await startedParcel();
+            await completeWithEvidence(p.id);
+            const owner = await getRep(p.id, ownerEmail);
+            logTest('47. Owner can read repair', owner.statusCode === 200 && owner.body.repair.status === 'completed');
+            logTest('48. Admin can read repair', (await getRep(p.id, adminEmail)).statusCode === 200);
+            logTest('49. Assigned technician can read repair', (await getRep(p.id, techEmail)).statusCode === 200);
+            logTest('50. Unrelated technician denied (404)', (await getRep(p.id, otherTechEmail)).statusCode === 404);
+            const body = owner.body.repair;
+            logTest('51. No rider ids in read view', !JSON.stringify(body).includes('createdByRiderId') && !JSON.stringify(body).includes(techRiderId));
+            logTest('52. No storageKey field in read view', !JSON.stringify(body).includes('storageKey'));
+            const ev = body.completion.evidenceImages[0];
+            logTest('53. Signed read url present and short-lived', typeof ev.url === 'string' && ev.url.includes('fake-storage.test') && !!ev.readUrlExpiresAt);
+            logTest('54. Evidence view exposes only imageId/url/mime/size', Object.keys(ev).sort().join() === 'imageId,mimeType,readUrlExpiresAt,size,url');
+        }
+
+        // ================= Regression / isolation (55-64) =================
+        {
+            const p = await startedParcel();
+            await completeWithEvidence(p.id);
+            const doc = await collections.parcels.findOne({ _id: p._id });
+            logTest('55. Payment remains completed after repair', doc.payment.status === 'completed');
+            logTest('56. Quote remains approved after repair', doc.quote.status === 'approved' && doc.quote.totalAmount === 4500);
+            logTest('57. V2 payment eligibility reflects already-paid', getV2PaymentEligibility(doc).code === 'ALREADY_PAID');
+            logTest('58. Inspection sub-document preserved', doc.inspection && doc.inspection.status === 'submitted');
+            const evSession = await collections.repairEvidenceSessions.findOne({ requestId: p.id });
+            logTest('59. Damage isolation: evidence lives in completion namespace', !!evSession && evSession.storageKey.includes('/completion/') && !evSession.storageKey.includes('/damage/'));
+            logTest('60. repair_completed is terminal (not an active-assignment status)', !ACTIVE_STATUSES.includes(REPAIR_COMPLETED) && ACTIVE_STATUSES.includes(REPAIR_IN_PROGRESS));
+        }
+        logTest('61. Canonical BDT count remains 16', (await collections.serviceDefinitions.countDocuments({ $or: SERVICE_DEFINITION_SEED.map((r) => ({ productCategorySlug: r.productCategorySlug, repairCategorySlug: r.repairCategorySlug })) })) === 16);
+        {
+            const legacy = await createParcel({ schemaVersion: undefined, quote: undefined, payment: undefined, cost: 40 });
+            logTest('62. Legacy behavior unchanged: repair read rejected', (await getRep(legacy.id, ownerEmail)).body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
+        }
+        logTest('64. No production storage contact (all objects in the fake bucket)', fakeBucket._objects.size > 0 && [...fakeBucket._objects.keys()].every((k) => k.startsWith('repair-requests/')));
+    } finally {
+        if (createdParcelIds.length) {
+            await collections.repairEvidenceSessions.deleteMany({ requestId: { $in: createdParcelIds.map((x) => x.toString()) } });
+            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds } });
+        }
+        if (createdRiderIds.length) await collections.riders.deleteMany({ _id: { $in: createdRiderIds } });
+        if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        if (usedTrackingIds.length) await collections.trackings.deleteMany({ trackingId: { $in: usedTrackingIds } });
+        if (recipientEmails.length) await collections.notifications.deleteMany({ recipientEmail: { $in: recipientEmails } });
+        const leftoverP = await collections.parcels.countDocuments({ trackingId: { $regex: '^TEST-REP-' } });
+        const leftoverU = await collections.users.countDocuments({ email: { $regex: '^rep-.*@test.local$' } });
+        const leftoverE = await collections.repairEvidenceSessions.countDocuments({ requestId: { $in: createdParcelIds.map((x) => x.toString()) } });
+        logTest('63. No repair fixture leakage after tests', leftoverP === 0 && leftoverU === 0 && leftoverE === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -12213,6 +12548,7 @@ async function runAllTests() {
     await testInspectionWorkflow();
     await testQuoteWorkflow();
     await testV2PaymentWorkflow();
+    await testRepairWorkflow();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

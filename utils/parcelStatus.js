@@ -33,17 +33,29 @@ const QUOTE_REJECTED = 'quote_rejected';
 // /parcels/:id/status can never reach or leave it), reached only through the
 // trusted Stripe payment-completion pipeline (services/paymentProcessor.js),
 // but IS active below - a paid-but-not-yet-repaired request still occupies its
-// technician, who stays busy until the repair workflow (a future unit) runs.
+// technician, who stays busy until the repair workflow runs.
 const PAYMENT_COMPLETED = 'payment_completed';
+
+// Repair progress + completion (Phase 6.4 Unit 7). Both are set ONLY by the
+// dedicated repair endpoints (controllers/repairController.js), never through
+// the generic PATCH /parcels/:id/status path (neither is in VALID_STATUSES).
+// repair_in_progress IS active - the technician is actively repairing and
+// stays busy. repair_completed is the TERMINAL state for an active assignment:
+// the repair is done and the technician has been released, so it is
+// deliberately NOT active (it must not keep the technician occupied, and the
+// generic PATCH must not be able to leave it).
+const REPAIR_IN_PROGRESS = 'repair_in_progress';
+const REPAIR_COMPLETED = 'repair_completed';
 
 // The subset of statuses that represent a technician actively holding a
 // repair request - i.e. every status between assignment and completion,
-// including inspection_completed, the quote states, and payment_completed.
+// including inspection_completed, the quote states, payment_completed, and
+// repair_in_progress. repair_completed is intentionally excluded (terminal).
 // Used by assignRiderToParcel (Phase 6.2 Unit 2) and technicianEligibilityService
 // to find any request still occupying a technician's single active-assignment slot.
 const ACTIVE_STATUSES = [
     ...VALID_STATUSES.filter((status) => status !== 'parcel_delivered'),
-    INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, PAYMENT_COMPLETED
+    INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, PAYMENT_COMPLETED, REPAIR_IN_PROGRESS
 ];
 
 // Maps a parcel's current deliveryStatus to the statuses it may move to next.
@@ -59,4 +71,4 @@ function isValidTransition(currentStatus, nextStatus) {
     return Array.isArray(allowedNext) && allowedNext.includes(nextStatus);
 }
 
-module.exports = { VALID_STATUSES, ACTIVE_STATUSES, INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, PAYMENT_COMPLETED, isValidTransition };
+module.exports = { VALID_STATUSES, ACTIVE_STATUSES, INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, PAYMENT_COMPLETED, REPAIR_IN_PROGRESS, REPAIR_COMPLETED, isValidTransition };

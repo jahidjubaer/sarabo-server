@@ -6,6 +6,7 @@ const TrackingModel = require('./Tracking');
 const NotificationModel = require('./Notification');
 const { ServiceDefinitionModel } = require('./ServiceDefinition');
 const DamageUploadSessionModel = require('./DamageUploadSession');
+const RepairEvidenceSessionModel = require('./RepairEvidenceSession');
 
 function initializeModels(collections) {
     return {
@@ -16,7 +17,8 @@ function initializeModels(collections) {
         Tracking: new TrackingModel(collections.trackings),
         Notification: new NotificationModel(collections.notifications),
         ServiceDefinition: new ServiceDefinitionModel(collections.serviceDefinitions),
-        DamageUploadSession: new DamageUploadSessionModel(collections.damageUploadSessions)
+        DamageUploadSession: new DamageUploadSessionModel(collections.damageUploadSessions),
+        RepairEvidenceSession: new RepairEvidenceSessionModel(collections.repairEvidenceSessions)
     };
 }
 

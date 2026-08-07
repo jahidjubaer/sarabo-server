@@ -34,6 +34,7 @@ const collections = {
     notifications: db.collection("notifications"),
     serviceDefinitions: db.collection("serviceDefinitions"),
     damageUploadSessions: db.collection("damageUploadSessions"),
+    repairEvidenceSessions: db.collection("repairEvidenceSessions"),
 };
 
 let connectionPromise = null;
@@ -181,6 +182,23 @@ async function connectDatabase() {
                 await collections.damageUploadSessions.createIndex(
                     { expiresAt: 1 },
                     { name: 'damageUploadSessions_expiresAt' }
+                );
+                // Repair completion evidence sessions (Phase 6.4 Unit 7) -
+                // same design as damageUploadSessions above: a server-owned,
+                // per-request-scoped storage key is unique at the database
+                // level, sessions are looked up by request+status, and expiry
+                // is a plain (non-TTL) index enforced at read/finalize time.
+                await collections.repairEvidenceSessions.createIndex(
+                    { storageKey: 1 },
+                    { unique: true, name: 'repairEvidenceSessions_storageKey_unique' }
+                );
+                await collections.repairEvidenceSessions.createIndex(
+                    { requestId: 1, status: 1 },
+                    { name: 'repairEvidenceSessions_requestId_status' }
+                );
+                await collections.repairEvidenceSessions.createIndex(
+                    { expiresAt: 1 },
+                    { name: 'repairEvidenceSessions_expiresAt' }
                 );
                 return { db, collections };
             })

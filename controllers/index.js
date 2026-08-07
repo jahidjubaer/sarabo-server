@@ -9,6 +9,7 @@ const ServiceDefinitionController = require('./serviceDefinitionController');
 const DamageUploadController = require('./damageUploadController');
 const InspectionController = require('./inspectionController');
 const QuoteController = require('./quoteController');
+const RepairController = require('./repairController');
 
 function initializeControllers(models, collections) {
     return {
@@ -22,7 +23,8 @@ function initializeControllers(models, collections) {
         serviceDefinition: new ServiceDefinitionController(models),
         damageUpload: new DamageUploadController(models, collections),
         inspection: new InspectionController(models, collections),
-        quote: new QuoteController(models, collections)
+        quote: new QuoteController(models, collections),
+        repair: new RepairController(models, collections)
     };
 }
 
