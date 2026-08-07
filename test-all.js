@@ -7792,7 +7792,7 @@ async function testServiceDefinitions() {
             label: 'TEST-SERVICE-LABEL',
             description: 'TEST-SERVICE-DESCRIPTION for automated testing.',
             isActive: true,
-            pricingRule: { currency: 'usd', baseMin: 20, baseMax: 50, inspectionFee: 5, version: 1 },
+            pricingRule: { currency: 'BDT', baseMin: 20, baseMax: 50, inspectionFee: 5, version: 1 },
             requiredExpertiseLevel: 'intermediate',
             estimatedDurationMinutes: 45,
             inspectionRequired: false,
@@ -7838,24 +7838,24 @@ async function testServiceDefinitions() {
         );
         logTest(
             '10. Negative baseMin rejected',
-            validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'usd', baseMin: -5, baseMax: 50, inspectionFee: 5, version: 1 } })).code === 'INVALID_BASE_MIN'
+            validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'BDT', baseMin: -5, baseMax: 50, inspectionFee: 5, version: 1 } })).code === 'INVALID_BASE_MIN'
         );
         logTest(
             '11. baseMin greater than baseMax rejected',
-            validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'usd', baseMin: 90, baseMax: 50, inspectionFee: 5, version: 1 } })).code === 'BASE_MIN_EXCEEDS_BASE_MAX'
+            validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'BDT', baseMin: 90, baseMax: 50, inspectionFee: 5, version: 1 } })).code === 'BASE_MIN_EXCEEDS_BASE_MAX'
         );
 
-        const nanResult = validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'usd', baseMin: NaN, baseMax: 50, inspectionFee: 5, version: 1 } }));
-        const infResult = validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'usd', baseMin: 20, baseMax: Infinity, inspectionFee: 5, version: 1 } }));
+        const nanResult = validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'BDT', baseMin: NaN, baseMax: 50, inspectionFee: 5, version: 1 } }));
+        const infResult = validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'BDT', baseMin: 20, baseMax: Infinity, inspectionFee: 5, version: 1 } }));
         logTest('12. NaN/Infinity rejected', nanResult.code === 'INVALID_BASE_MIN' && infResult.code === 'INVALID_BASE_MAX');
 
         logTest(
             '13. Negative inspectionFee rejected',
-            validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'usd', baseMin: 20, baseMax: 50, inspectionFee: -1, version: 1 } })).code === 'INVALID_INSPECTION_FEE'
+            validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'BDT', baseMin: 20, baseMax: 50, inspectionFee: -1, version: 1 } })).code === 'INVALID_INSPECTION_FEE'
         );
         logTest(
             '14. Invalid pricing version rejected',
-            validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'usd', baseMin: 20, baseMax: 50, inspectionFee: 5, version: 0 } })).code === 'INVALID_PRICING_VERSION'
+            validateServiceDefinitionInput(validBaseInput({ pricingRule: { currency: 'BDT', baseMin: 20, baseMax: 50, inspectionFee: 5, version: 0 } })).code === 'INVALID_PRICING_VERSION'
         );
         logTest('15. Invalid expertise level rejected', validateServiceDefinitionInput(validBaseInput({ requiredExpertiseLevel: 'wizard' })).code === 'INVALID_EXPERTISE_LEVEL');
         logTest('16. Invalid duration rejected', validateServiceDefinitionInput(validBaseInput({ estimatedDurationMinutes: 0 })).code === 'INVALID_DURATION');
@@ -7866,7 +7866,7 @@ async function testServiceDefinitions() {
         logTest(
             '17b. Unexpected nested pricingRule field rejected',
             validateServiceDefinitionInput(validBaseInput({
-                pricingRule: { currency: 'usd', baseMin: 20, baseMax: 50, inspectionFee: 5, version: 1, clientSuppliedFinalAmount: 999999 }
+                pricingRule: { currency: 'BDT', baseMin: 20, baseMax: 50, inspectionFee: 5, version: 1, clientSuppliedFinalAmount: 999999 }
             })).code === 'UNEXPECTED_PRICING_RULE_FIELD'
         );
 
@@ -7879,7 +7879,7 @@ async function testServiceDefinitions() {
         // object wholesale, so even a caller that bypassed validation could
         // never persist a stray nested pricingRule field.
         const builtDocWithNestedExtra = buildDocumentFromInput(validBaseInput({
-            pricingRule: { currency: 'usd', baseMin: 20, baseMax: 50, inspectionFee: 5, version: 1, quotedAmount: 12345 }
+            pricingRule: { currency: 'BDT', baseMin: 20, baseMax: 50, inspectionFee: 5, version: 1, quotedAmount: 12345 }
         }), now);
         logTest('18b. Nested pricingRule extra field stripped by document builder', !('quotedAmount' in builtDocWithNestedExtra.pricingRule));
 
@@ -7918,7 +7918,7 @@ async function testServiceDefinitions() {
                 label: `TEST-SERVICE-SEED-${pair.repairCategorySlug}`,
                 description: 'Synthetic seed row for automated seed-logic testing.',
                 isActive: true,
-                pricingRule: { currency: 'usd', baseMin: 10, baseMax: 20, inspectionFee: 0, version: 1 },
+                pricingRule: { currency: 'BDT', baseMin: 10, baseMax: 20, inspectionFee: 0, version: 1 },
                 requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30,
                 inspectionRequired: false, imageRequirements: { min: 0, max: 0, recommended: false },
                 ...overrides
@@ -7936,7 +7936,7 @@ async function testServiceDefinitions() {
         const secondSeedResult = await runSeed({ model, seedRows: seedTestRows, dryRun: false });
         logTest('22. Second identical seed creates zero duplicates', secondSeedResult.created === 0 && secondSeedResult.skippedIdentical === 2 && secondSeedResult.conflicted === 0);
 
-        const changedSeedRows = seedTestPairs.map((pair) => buildSeedTestRow(pair, { pricingRule: { currency: 'usd', baseMin: 999, baseMax: 1000, inspectionFee: 0, version: 1 } }));
+        const changedSeedRows = seedTestPairs.map((pair) => buildSeedTestRow(pair, { pricingRule: { currency: 'BDT', baseMin: 999, baseMax: 1000, inspectionFee: 0, version: 1 } }));
         const conflictSeedResult = await runSeed({ model, seedRows: changedSeedRows, dryRun: false });
         const afterConflictDocs = await collections.serviceDefinitions.find({ $or: seedTestPairs }).toArray();
         const pricingUnchangedAfterConflict = afterConflictDocs.every((doc) => doc.pricingRule.baseMin === 10 && doc.pricingRule.baseMax === 20);
@@ -10881,6 +10881,249 @@ async function testAuthorizedDamageImageAccess() {
     console.log('');
 }
 
+// Phase 6.4 Unit 3C - BDT Pricing Migration.
+// Test-database safety (Phase P): uses only the local development database,
+// the exact canonical IDs, and clearly-marked synthetic (TEST-BDT-*) fixtures
+// on non-canonical taxonomy pairs, each deleted in `finally`. Running the
+// canonical migration here mutates the real canonical serviceDefinitions rows
+// to BDT - that is the migration's intended, idempotent effect, and it never
+// touches parcels/payments/quotes or any non-canonical definition.
+async function testBdtPricingMigration() {
+    console.log('37. Testing BDT Pricing Migration (Phase 6.4 Unit 3C)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { ObjectId } = require('mongodb');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { validateServiceDefinitionInput } = require('./models/ServiceDefinition');
+    const { getPricingEstimate } = require('./services/pricingService');
+    const { SERVICE_DEFINITION_SEED } = require('./data/serviceDefinitionSeed');
+    const { runMigration } = require('./scripts/migrate-service-definitions-to-bdt');
+    const { isValidProductCategorySlug, isActiveProductCategory } = require('./utils/productCategory');
+    const { validateProductRepairPair } = require('./utils/serviceTaxonomy');
+
+    // The 16 canonical (product/repair) pairs and their locked expertise
+    // levels - hard-coded here so this test proves the migration changed
+    // neither the taxonomy nor the expertise requirements, independent of the
+    // seed file it is validating.
+    const EXPECTED_CANONICAL = [
+        ['smartphone', 'diagnosis', 'beginner'],
+        ['smartphone', 'display-screen', 'intermediate'],
+        ['laptop-computer', 'diagnosis', 'beginner'],
+        ['laptop-computer', 'battery-power', 'intermediate'],
+        ['television', 'diagnosis', 'beginner'],
+        ['television', 'display-screen', 'advanced'],
+        ['refrigerator', 'diagnosis', 'beginner'],
+        ['refrigerator', 'compressor-cooling', 'advanced'],
+        ['washing-machine', 'diagnosis', 'beginner'],
+        ['washing-machine', 'mechanical-parts', 'intermediate'],
+        ['air-conditioner', 'diagnosis', 'beginner'],
+        ['air-conditioner', 'cooling-overheating', 'advanced'],
+        ['microwave-oven', 'diagnosis', 'beginner'],
+        ['microwave-oven', 'electrical-power', 'advanced'],
+        ['other-electronics', 'diagnosis', 'beginner'],
+        ['other-electronics', 'other', 'beginner'],
+    ];
+
+    function fakeRes() {
+        return {
+            statusCode: 200, body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+    function validLocation() {
+        return { region: 'Dhaka', district: 'Dhaka', address: '10 Test Road, Banani' };
+    }
+
+    const runId = Date.now();
+    const createdDefIds = [];
+    const createdParcelIds = [];
+    const createdPaymentIds = [];
+
+    try {
+        await connectDatabase();
+        const sd = collections.serviceDefinitions;
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const parcelController = controllers.parcel;
+        const paymentController = controllers.payment;
+
+        // ================= Canonical seed integrity (1-14) =================
+        logTest('1. Exactly 16 canonical definitions in the seed', SERVICE_DEFINITION_SEED.length === 16);
+        logTest('2. Every canonical currency is BDT', SERVICE_DEFINITION_SEED.every((r) => r.pricingRule.currency === 'BDT'));
+        logTest('3. Every canonical minimum is a positive integer', SERVICE_DEFINITION_SEED.every((r) => Number.isInteger(r.pricingRule.baseMin) && r.pricingRule.baseMin > 0));
+        logTest('4. Every canonical maximum is a positive integer', SERVICE_DEFINITION_SEED.every((r) => Number.isInteger(r.pricingRule.baseMax) && r.pricingRule.baseMax > 0));
+        logTest('5. Every canonical minimum <= maximum', SERVICE_DEFINITION_SEED.every((r) => r.pricingRule.baseMin <= r.pricingRule.baseMax));
+        logTest(
+            '6. Every canonical amount follows the rounding policy (multiple of 100)',
+            SERVICE_DEFINITION_SEED.every((r) => r.pricingRule.baseMin % 100 === 0 && r.pricingRule.baseMax % 100 === 0 && Number.isInteger(r.pricingRule.inspectionFee) && r.pricingRule.inspectionFee >= 0 && r.pricingRule.inspectionFee % 100 === 0)
+        );
+        logTest('7. Every canonical pricingVersion is 2', SERVICE_DEFINITION_SEED.every((r) => r.pricingRule.version === 2));
+        logTest('8. No canonical definition remains USD', SERVICE_DEFINITION_SEED.every((r) => r.pricingRule.currency !== 'usd' && r.pricingRule.currency !== 'USD'));
+        const seedPairs = SERVICE_DEFINITION_SEED.map((r) => `${r.productCategorySlug}/${r.repairCategorySlug}`).sort();
+        const expectedPairs = EXPECTED_CANONICAL.map(([p, rr]) => `${p}/${rr}`).sort();
+        logTest('9. Canonical IDs/slugs (product/repair pairs) unchanged', JSON.stringify(seedPairs) === JSON.stringify(expectedPairs));
+        logTest('10. Product taxonomy unchanged (every slug valid + active)', SERVICE_DEFINITION_SEED.every((r) => isValidProductCategorySlug(r.productCategorySlug) && isActiveProductCategory(r.productCategorySlug)));
+        logTest('11. Repair taxonomy unchanged (every pair valid)', SERVICE_DEFINITION_SEED.every((r) => validateProductRepairPair(r.productCategorySlug, r.repairCategorySlug).valid === true));
+        const expertiseMap = new Map(EXPECTED_CANONICAL.map(([p, rr, lvl]) => [`${p}/${rr}`, lvl]));
+        logTest('12. Expertise requirements unchanged', SERVICE_DEFINITION_SEED.every((r) => r.requiredExpertiseLevel === expertiseMap.get(`${r.productCategorySlug}/${r.repairCategorySlug}`)));
+        logTest('13. Active states unchanged (all active)', SERVICE_DEFINITION_SEED.every((r) => r.isActive === true));
+        logTest('14. Every canonical seed row passes model validation (BDT accepted)', SERVICE_DEFINITION_SEED.every((r) => validateServiceDefinitionInput(r).valid === true));
+
+        // ================= Migration idempotency + in-place (15-23) =================
+        const canonicalKeyFilter = { $or: SERVICE_DEFINITION_SEED.map((r) => ({ productCategorySlug: r.productCategorySlug, repairCategorySlug: r.repairCategorySlug })) };
+        const beforeDocs = await sd.find(canonicalKeyFilter).toArray();
+        const beforeIdByKey = new Map(beforeDocs.map((d) => [`${d.productCategorySlug}/${d.repairCategorySlug}`, d._id.toString()]));
+
+        const dryRun = await runMigration({ collection: sd, seedRows: SERVICE_DEFINITION_SEED, dryRun: true, expectedCount: 16 });
+        logTest('15. Migration dry-run matches all 16 canonical rows and is ok', dryRun.ok === true && dryRun.matched === 16 && dryRun.missing === 0 && dryRun.duplicated === 0 && dryRun.invalid === 0);
+        const afterDryRunUsdCount = await sd.countDocuments({ ...canonicalKeyFilter, 'pricingRule.currency': { $in: ['usd', 'USD'] } });
+        logTest('16. Dry-run wrote nothing (canonical currency state unchanged by dry-run)', afterDryRunUsdCount === beforeDocs.filter((d) => d.pricingRule.currency === 'usd' || d.pricingRule.currency === 'USD').length);
+
+        const applyFirst = await runMigration({ collection: sd, seedRows: SERVICE_DEFINITION_SEED, dryRun: false, expectedCount: 16 });
+        logTest('17. Migration apply is ok and matched 16', applyFirst.ok === true && applyFirst.matched === 16 && applyFirst.missing === 0 && applyFirst.duplicated === 0);
+
+        const applySecond = await runMigration({ collection: sd, seedRows: SERVICE_DEFINITION_SEED, dryRun: false, expectedCount: 16 });
+        logTest('18. Migration rerun is idempotent (0 modified, 16 unchanged)', applySecond.ok === true && applySecond.modified === 0 && applySecond.unchanged === 16);
+
+        const afterDocs = await sd.find(canonicalKeyFilter).toArray();
+        logTest('19. Canonical count remains exactly 16 after migration', afterDocs.length === 16);
+        logTest('20. Every canonical row is BDT after migration', afterDocs.every((d) => d.pricingRule.currency === 'BDT'));
+        logTest('21. No canonical row remains USD after migration', afterDocs.every((d) => d.pricingRule.currency !== 'usd' && d.pricingRule.currency !== 'USD'));
+        logTest('22. Every canonical pricingVersion is 2 after migration', afterDocs.every((d) => d.pricingRule.version === 2));
+        const idsPreserved = afterDocs.every((d) => beforeIdByKey.get(`${d.productCategorySlug}/${d.repairCategorySlug}`) === d._id.toString());
+        logTest('23. Canonical document _ids preserved (in-place update, never delete/reinsert)', idsPreserved && beforeIdByKey.size === 16);
+
+        // ================= Custom / unknown definition untouched (24) =================
+        const customDef = {
+            productCategorySlug: 'smartphone', repairCategorySlug: 'camera-audio',
+            label: `TEST-BDT-CUSTOM-${runId}`, description: 'Synthetic non-canonical definition for BDT-migration isolation testing.',
+            isActive: false,
+            pricingRule: { currency: 'usd', baseMin: 12, baseMax: 34, inspectionFee: 3, version: 1 },
+            requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30,
+            inspectionRequired: false, imageRequirements: { min: 0, max: 0, recommended: false },
+            createdAt: new Date(), updatedAt: new Date()
+        };
+        const customInsert = await sd.insertOne(customDef);
+        createdDefIds.push(customInsert.insertedId);
+        await runMigration({ collection: sd, seedRows: SERVICE_DEFINITION_SEED, dryRun: false, expectedCount: 16 });
+        const customAfter = await sd.findOne({ _id: customInsert.insertedId });
+        logTest('24. Custom/non-canonical definition untouched by migration', customAfter.pricingRule.currency === 'usd' && customAfter.pricingRule.baseMin === 12 && customAfter.pricingRule.version === 1);
+
+        // ================= New BDT request snapshot (25-30, Phase H) =================
+        const bdtDef = {
+            productCategorySlug: 'smartphone', repairCategorySlug: 'charging-port',
+            label: `TEST-BDT-NEWREQ-${runId}`, description: 'Synthetic BDT definition for new-request snapshot testing.',
+            isActive: true,
+            pricingRule: { currency: 'BDT', baseMin: 1200, baseMax: 4500, inspectionFee: 300, version: 2 },
+            requiredExpertiseLevel: 'intermediate', estimatedDurationMinutes: 45,
+            inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true },
+            createdAt: new Date(), updatedAt: new Date()
+        };
+        const bdtInsert = await sd.insertOne(bdtDef);
+        createdDefIds.push(bdtInsert.insertedId);
+        const bdtDefId = bdtInsert.insertedId.toString();
+
+        function bdtV2Body(overrides = {}) {
+            return {
+                schemaVersion: 2,
+                product: { categorySlug: 'smartphone', brand: 'TestBrand', model: 'TestModel' },
+                service: { definitionId: bdtDefId },
+                damage: { description: 'The charging port is loose and will not hold a cable during charging.' },
+                serviceLocation: validLocation(),
+                ...overrides
+            };
+        }
+        const ownerEmail = `test-bdt-customer-${runId}@test.local`;
+        const createRes = await (async () => { const res = fakeRes(); await parcelController.createParcel({ body: bdtV2Body(), decoded_email: ownerEmail }, res); return res; })();
+        logTest('25. New V2 request created against a BDT definition', createRes.statusCode === 200 && !!createRes.body.insertedId);
+        const bdtParcelId = createRes.body.insertedId.toString();
+        createdParcelIds.push(bdtParcelId);
+        const bdtParcel = await collections.parcels.findOne({ _id: new ObjectId(bdtParcelId) });
+        logTest('26. New request snapshots currency BDT', bdtParcel.pricing.currency === 'BDT');
+        logTest('27. Snapshot minimum matches the selected definition', bdtParcel.pricing.estimateMin === 1200);
+        logTest('28. Snapshot maximum matches the selected definition', bdtParcel.pricing.estimateMax === 4500);
+        logTest('29. Snapshot pricingVersion matches the definition (calculationVersion 2)', bdtParcel.pricing.calculationVersion === 2);
+        const clientPriceRes = await (async () => { const res = fakeRes(); await parcelController.createParcel({ body: bdtV2Body({ pricing: { estimateMin: 1, estimateMax: 2 } }), decoded_email: ownerEmail }, res); return res; })();
+        const clientCurrencyRes = await (async () => { const res = fakeRes(); await parcelController.createParcel({ body: bdtV2Body({ currency: 'usd' }), decoded_email: ownerEmail }, res); return res; })();
+        logTest('30. Client-supplied price/currency rejected (server pricing authority)', clientPriceRes.statusCode === 400 && clientPriceRes.body.code === 'CLIENT_PRICING_NOT_ALLOWED' && clientCurrencyRes.statusCode === 400 && clientCurrencyRes.body.code === 'CLIENT_PRICING_NOT_ALLOWED');
+
+        // ================= Snapshot immutability (31-32, Phase H) =================
+        await sd.updateOne({ _id: bdtInsert.insertedId }, { $set: { 'pricingRule.baseMin': 9999, 'pricingRule.baseMax': 99999, updatedAt: new Date() } });
+        const bdtParcelReread = await collections.parcels.findOne({ _id: new ObjectId(bdtParcelId) });
+        logTest('31. Existing request snapshot unaffected by a later definition change', bdtParcelReread.pricing.estimateMin === 1200 && bdtParcelReread.pricing.estimateMax === 4500 && bdtParcelReread.pricing.calculationVersion === 2);
+        const estimateFromChangedDef = getPricingEstimate(await sd.findOne({ _id: bdtInsert.insertedId }));
+        logTest('32. Definition itself did change (control) - proving immutability is real, not a no-op', estimateFromChangedDef.estimateMin === 9999);
+
+        // ================= Historical USD preservation (33-37, Phase G) =================
+        const usdDef = {
+            productCategorySlug: 'laptop-computer', repairCategorySlug: 'motherboard',
+            label: `TEST-BDT-USDHIST-${runId}`, description: 'Synthetic legacy USD definition for historical-preservation testing.',
+            isActive: true,
+            pricingRule: { currency: 'usd', baseMin: 40, baseMax: 120, inspectionFee: 10, version: 1 },
+            requiredExpertiseLevel: 'advanced', estimatedDurationMinutes: 90,
+            inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true },
+            createdAt: new Date(), updatedAt: new Date()
+        };
+        const usdInsert = await sd.insertOne(usdDef);
+        createdDefIds.push(usdInsert.insertedId);
+        const usdV2Res = await (async () => { const res = fakeRes(); await parcelController.createParcel({ body: { schemaVersion: 2, product: { categorySlug: 'laptop-computer', brand: 'B', model: 'M' }, service: { definitionId: usdInsert.insertedId.toString() }, damage: { description: 'Laptop will not power on after a liquid spill on the keyboard.' }, serviceLocation: validLocation() }, decoded_email: ownerEmail }, res); return res; })();
+        const usdParcelId = usdV2Res.body.insertedId.toString();
+        createdParcelIds.push(usdParcelId);
+        const usdParcelBefore = await collections.parcels.findOne({ _id: new ObjectId(usdParcelId) });
+        const legacyRes = await (async () => { const res = fakeRes(); await parcelController.createParcel({ body: { parcelName: `TEST-BDT-LEGACY-${runId}`, cost: 55 }, decoded_email: ownerEmail }, res); return res; })();
+        const legacyParcelId = legacyRes.body.insertedId.toString();
+        createdParcelIds.push(legacyParcelId);
+        const paymentDoc = { sessionId: `cs_test_bdt_${runId}`, parcelId: usdParcelId, ownerEmail, amount: 55, currency: 'usd', status: 'paid', createdAt: new Date() };
+        const paymentInsert = await collections.payments.insertOne(paymentDoc);
+        createdPaymentIds.push(paymentInsert.insertedId);
+
+        // Run the canonical migration again with all historical fixtures in place.
+        await runMigration({ collection: sd, seedRows: SERVICE_DEFINITION_SEED, dryRun: false, expectedCount: 16 });
+
+        const usdParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(usdParcelId) });
+        logTest('33. Historical USD V2 request still displays USD', usdParcelAfter.pricing.currency === 'usd');
+        logTest('34. Historical USD amounts + version unchanged by migration', usdParcelAfter.pricing.estimateMin === usdParcelBefore.pricing.estimateMin && usdParcelAfter.pricing.estimateMax === usdParcelBefore.pricing.estimateMax && usdParcelAfter.pricing.calculationVersion === 1);
+        logTest('35. Historical quote fields unchanged (quotedAmount still null)', usdParcelAfter.pricing.quotedAmount === null && usdParcelAfter.pricing.quoteStatus === usdParcelBefore.pricing.quoteStatus);
+        const legacyAfter = await collections.parcels.findOne({ _id: new ObjectId(legacyParcelId) });
+        logTest('36. Legacy parcel cost unchanged by migration', legacyAfter.cost === 55 && legacyAfter.schemaVersion === undefined);
+        const paymentAfter = await collections.payments.findOne({ _id: paymentInsert.insertedId });
+        logTest('37. Payment record unchanged by migration', paymentAfter.amount === 55 && paymentAfter.currency === 'usd' && paymentAfter.status === 'paid');
+
+        // ================= V2 payment still blocked (38-39, Phase M) =================
+        const stripeCallsBefore = capturedStripeSessionParams.length;
+        const payRes = await (async () => { const res = fakeRes(); await paymentController.createCheckoutSession({ body: { parcelId: bdtParcelId }, decoded_email: ownerEmail }, res); return res; })();
+        logTest('38. V2 request payment remains blocked (PAYMENT_NOT_AVAILABLE)', payRes.statusCode === 409 && payRes.body.code === 'PAYMENT_NOT_AVAILABLE');
+        logTest('39. No Stripe call occurs for a V2 payment attempt', capturedStripeSessionParams.length === stripeCallsBefore);
+
+        // ================= Public API returns BDT (40-42, Phase J) =================
+        const listResult = await makeRequest({ hostname: 'localhost', port: 3000, path: '/service-definitions', method: 'GET' }, 200, '40. GET /service-definitions responds 200');
+        let listParsed = { serviceDefinitions: [] };
+        try { listParsed = JSON.parse(listResult.data); } catch { /* asserted below */ }
+        const canonicalLabels = new Set(SERVICE_DEFINITION_SEED.map((r) => r.label));
+        const canonicalReturned = listParsed.serviceDefinitions.filter((d) => canonicalLabels.has(d.label));
+        logTest('41. API returns all 16 canonical definitions with uppercase BDT', canonicalReturned.length === 16 && canonicalReturned.every((d) => d.pricingEstimate.currency === 'BDT'));
+        logTest('42. API canonical estimates are the migrated integer BDT ranges', canonicalReturned.every((d) => Number.isInteger(d.pricingEstimate.min) && Number.isInteger(d.pricingEstimate.max) && d.pricingEstimate.min <= d.pricingEstimate.max));
+    } finally {
+        if (createdParcelIds.length) {
+            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
+        }
+        if (createdPaymentIds.length) {
+            await collections.payments.deleteMany({ _id: { $in: createdPaymentIds } });
+        }
+        if (createdDefIds.length) {
+            await collections.serviceDefinitions.deleteMany({ _id: { $in: createdDefIds } });
+        }
+        const leftover = await collections.serviceDefinitions.countDocuments({ label: { $regex: '^TEST-BDT-' } });
+        const canonicalCount = await collections.serviceDefinitions.countDocuments({ $or: SERVICE_DEFINITION_SEED.map((r) => ({ productCategorySlug: r.productCategorySlug, repairCategorySlug: r.repairCategorySlug })) });
+        logTest('43. No BDT-test fixture leakage, canonical count still 16', leftover === 0 && canonicalCount === 16);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -11093,6 +11336,7 @@ async function runAllTests() {
     await testAssignmentExpertiseRevalidation();
     await testDamageUploadFoundation();
     await testAuthorizedDamageImageAccess();
+    await testBdtPricingMigration();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

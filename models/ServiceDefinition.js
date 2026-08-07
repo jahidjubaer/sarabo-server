@@ -4,10 +4,13 @@ const { validateProductRepairPair } = require('../utils/serviceTaxonomy');
 // charge boundary (see controllers/paymentController.js) - this module never
 // modifies config/paymentConfig.js or the legacy checkout flow. Money
 // representation decision (Phase 6.3 Unit 2 / Phase D): every price field on
-// a service definition (baseMin, baseMax, inspectionFee) is stored as a
-// decimal USD number, exactly like the legacy parcels.cost field already is
-// - not integer cents. Conversion to Stripe's integer smallest-unit only
-// happens at the eventual charge boundary via toSmallestUnit(), reusing the
+// a service definition (baseMin, baseMax, inspectionFee) is stored as a plain
+// numeric amount in the canonical currency (BDT as of Phase 6.4 Unit 3C -
+// whole-taka integers, no poisha), not integer cents. Service-definition BDT
+// amounts are never charged through Stripe (v2 requests are not payable), so
+// toSmallestUnit() is reused here purely as the shared, already-trusted
+// at-most-2-decimal-places guard. Conversion to Stripe's integer smallest-
+// unit only happens at the eventual legacy USD charge boundary via the
 // one canonical conversion function the rest of the codebase already trusts,
 // rather than introducing a second, parallel cents representation. To avoid
 // the floating-point ambiguity that boundary conversion could otherwise
@@ -18,7 +21,17 @@ const { validateProductRepairPair } = require('../utils/serviceTaxonomy');
 // meaningfully ambiguous input value.
 const { toSmallestUnit } = require('../config/paymentConfig');
 
-const CANONICAL_CURRENCY = 'usd';
+// Canonical estimate currency for service definitions (Phase 6.4 Unit 3C):
+// Bangladesh Taka, stored and validated uppercase ("BDT"). This is the
+// currency of the *service-definition catalogue and every new request's
+// pricing snapshot* - it is deliberately distinct from the Stripe payment
+// currency in config/paymentConfig.js (still USD), which this module never
+// touches. Only 'BDT' is accepted here; any other value (including 'usd' or
+// lowercase 'bdt') is rejected, so no new canonical definition can drift back
+// to USD. Historical parcel pricing snapshots are read directly from their
+// own documents and never pass through this validator, so pre-existing USD
+// snapshots are unaffected by this change.
+const CANONICAL_CURRENCY = 'BDT';
 
 const EXPERTISE_LEVELS = Object.freeze(['beginner', 'intermediate', 'advanced', 'expert']);
 
@@ -35,6 +48,9 @@ const PRICING_RULE_FIELDS = ['currency', 'baseMin', 'baseMax', 'inspectionFee', 
 // Sanity ceilings, not business pricing decisions - large enough to never
 // constrain a real repair-service price, small enough to catch an obvious
 // typo/overflow (e.g. a stray extra digit) before it reaches the database.
+// The _USD suffixes are historical; these are currency-neutral upper bounds
+// and every canonical BDT amount (Phase 6.4 Unit 3C) sits comfortably within
+// them (highest base 18000, highest inspection fee 800).
 const MAX_BASE_PRICE_USD = 100000;
 const MAX_INSPECTION_FEE_USD = 1000;
 // A single repair estimate is expected to resolve within a few days; longer
