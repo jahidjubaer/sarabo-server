@@ -7,6 +7,7 @@ const NotificationController = require('./NotificationController');
 const HealthController = require('./healthController');
 const ServiceDefinitionController = require('./serviceDefinitionController');
 const DamageUploadController = require('./damageUploadController');
+const InspectionController = require('./inspectionController');
 
 function initializeControllers(models, collections) {
     return {
@@ -18,7 +19,8 @@ function initializeControllers(models, collections) {
         notification: new NotificationController(models),
         health: new HealthController(),
         serviceDefinition: new ServiceDefinitionController(models),
-        damageUpload: new DamageUploadController(models, collections)
+        damageUpload: new DamageUploadController(models, collections),
+        inspection: new InspectionController(models, collections)
     };
 }
 

@@ -108,8 +108,18 @@ class ParcelController {
             if (!isOwner && !isAssignedRider && !isAdmin) {
                 return res.status(403).send({ message: 'forbidden access' });
             }
-            
-            res.send(parcel);
+
+            // The inspection sub-document (Phase 6.4 Unit 4) is never served
+            // through this raw-parcel endpoint - it carries technician
+            // internalNotes and submitter identity that must never reach the
+            // customer here. All inspection reads go through the dedicated,
+            // role-projected GET /parcels/:id/inspection (see
+            // controllers/inspectionController.js), exactly as damage images
+            // are served only through their own authorized endpoint. Only the
+            // inspection field is stripped; deliveryStatus (which may be
+            // inspection_completed) is preserved.
+            const { inspection, ...safeParcel } = parcel;
+            res.send(safeParcel);
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair request', error: error.message });
         }

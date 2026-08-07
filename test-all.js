@@ -4458,10 +4458,11 @@ async function testNotificationFoundation() {
         const expectedTypes = [
             'technician_application_submitted', 'technician_application_approved', 'technician_application_rejected',
             'technician_assigned', 'new_repair_assignment', 'technician_on_the_way',
-            'repair_in_progress', 'repair_completed', 'payment_confirmed'
+            'repair_in_progress', 'repair_completed', 'payment_confirmed',
+            'inspection_completed'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 9 event types exist', actualTypes.length === 9 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 10 event types exist', actualTypes.length === 10 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -4877,7 +4878,7 @@ async function testNotificationFoundation() {
         logTest('57. Each lifecycle event accepts recipientRole admin', allLifecycleAcceptAdmin);
         logTest('58. Each lifecycle event rejects an unsupported role', allLifecycleRejectUnsupported);
 
-        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed'];
+        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -11124,6 +11125,364 @@ async function testBdtPricingMigration() {
     console.log('');
 }
 
+// Phase 6.4 Unit 4 - Technician Inspection Workflow.
+// Test-database safety (Phase U): every identity is synthetic
+// (inspection-*@test.local / TEST-INSPECTION-* names), each created document
+// (user, rider, parcel, tracking, notification) is tracked by exact id/email/
+// trackingId and removed in `finally`, no real/shared account is ever used,
+// no canonical service definition is mutated, and the shared local dev DB is
+// the only target.
+async function testInspectionWorkflow() {
+    console.log('38. Testing Technician Inspection Workflow (Phase 6.4 Unit 4)');
+    console.log('-'.repeat(60));
+
+    const { connectDatabase, collections } = require('./config/database');
+    const { ObjectId } = require('mongodb');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ACTIVE_STATUSES, INSPECTION_COMPLETED } = require('./utils/parcelStatus');
+    const { getPaymentEligibility } = require('./services/paymentEligibility');
+    const { SERVICE_DEFINITION_SEED } = require('./data/serviceDefinitionSeed');
+
+    function fakeRes() {
+        return {
+            statusCode: 200, body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; }
+        };
+    }
+
+    const runId = Date.now();
+    const createdParcelIds = [];
+    const createdUserEmails = [];
+    const createdRiderIds = [];
+    const usedTrackingIds = [];
+    const ownerEmails = [];
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const inspectionController = controllers.inspection;
+        const parcelController = controllers.parcel;
+
+        // ---- synthetic identities ----
+        const ownerEmail = `inspection-owner-${runId}@test.local`;
+        const techEmail = `inspection-tech-${runId}@test.local`;
+        const otherTechEmail = `inspection-othertech-${runId}@test.local`;
+        const adminEmail = `inspection-admin-${runId}@test.local`;
+        ownerEmails.push(ownerEmail);
+        createdUserEmails.push(ownerEmail, techEmail, otherTechEmail, adminEmail);
+
+        await collections.users.insertMany([
+            { email: ownerEmail, role: 'user', createdAt: new Date() },
+            { email: techEmail, role: 'rider', createdAt: new Date() },
+            { email: otherTechEmail, role: 'rider', createdAt: new Date() },
+            { email: adminEmail, role: 'admin', createdAt: new Date() }
+        ]);
+
+        const techRider = { name: `TEST-INSPECTION-TECH-${runId}`, email: techEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() };
+        const otherRider = { name: `TEST-INSPECTION-OTHERTECH-${runId}`, email: otherTechEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() };
+        const techInsert = await collections.riders.insertOne(techRider);
+        const otherInsert = await collections.riders.insertOne(otherRider);
+        createdRiderIds.push(techInsert.insertedId, otherInsert.insertedId);
+        const techRiderId = techInsert.insertedId.toString();
+        const otherRiderId = otherInsert.insertedId.toString();
+
+        let parcelSeq = 0;
+        function makeTrackingId() {
+            const t = `TEST-INSP-${runId}-${parcelSeq++}`;
+            usedTrackingIds.push(t);
+            return t;
+        }
+
+        // Inserts a fresh, isolated v2 request. Defaults: picked up, assigned
+        // to techRider, no inspection yet, with a real BDT pricing snapshot.
+        async function createParcel(overrides = {}) {
+            const now = new Date();
+            const doc = {
+                schemaVersion: 2,
+                trackingId: makeTrackingId(),
+                senderEmail: ownerEmail,
+                product: { categorySlug: 'smartphone', brand: 'TestBrand', model: 'TestModel' },
+                service: { definitionId: new ObjectId().toString(), repairCategorySlug: 'display-screen' },
+                damage: { description: 'Screen cracked and unresponsive in the corner after a fall.', images: [] },
+                serviceLocation: { region: 'Dhaka', district: 'Dhaka', address: '10 Test Road' },
+                pricing: { currency: 'BDT', estimateMin: 1500, estimateMax: 6000, inspectionFee: 0, calculationVersion: 2, quotedAmount: null, quoteStatus: 'awaiting_quote', customerApprovedAt: null, finalAmount: null },
+                deliveryStatus: 'parcel_picked_up',
+                riderId: techRiderId,
+                riderName: techRider.name,
+                riderEmail: techEmail,
+                createdAt: now,
+                updatedAt: now,
+                ...overrides
+            };
+            const result = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(result.insertedId);
+            return { id: result.insertedId.toString(), _id: result.insertedId, ...doc };
+        }
+
+        function validPayload(overrides = {}) {
+            return {
+                diagnosis: {
+                    summary: 'No display output after a reported power surge; backlight and panel both test dead on the bench.',
+                    detectedIssues: [
+                        { label: 'Cracked display panel', severity: 'major', notes: 'Visible cracks across the lower third of the screen.' }
+                    ]
+                },
+                repairability: { decision: 'repairable_with_parts', reason: 'Panel replacement required; the mainboard is functional after testing.' },
+                estimate: { laborEstimate: 800, partsEstimate: 3500 },
+                internalNotes: 'INTERNAL-ONLY: customer unsure of surge cause; consider recommending a surge protector.',
+                ...overrides
+            };
+        }
+
+        function callSubmit(parcelId, email, body) {
+            const res = fakeRes();
+            return inspectionController.submitInspection({ params: { id: parcelId }, body, decoded_email: email }, res).then(() => res);
+        }
+        function callGet(parcelId, email) {
+            const res = fakeRes();
+            return inspectionController.getInspection({ params: { id: parcelId }, decoded_email: email }, res).then(() => res);
+        }
+
+        // ================= Authorization (1-9) =================
+        {
+            const p = await createParcel();
+            const noRole = await callSubmit(p.id, `inspection-nobody-${runId}@test.local`, validPayload());
+            logTest('1. Non-owner/non-tech (unknown) submit is not-found (existence-oracle safe)', noRole.statusCode === 404 && noRole.body.code === 'REQUEST_NOT_FOUND');
+
+            const asCustomer = await callSubmit(p.id, ownerEmail, validPayload());
+            logTest('2. Customer cannot submit', asCustomer.statusCode === 403 && asCustomer.body.code === 'TECHNICIAN_ROLE_REQUIRED');
+
+            const asAdmin = await callSubmit(p.id, adminEmail, validPayload());
+            logTest('3. Admin cannot submit as technician', asAdmin.statusCode === 403 && asAdmin.body.code === 'TECHNICIAN_ROLE_REQUIRED');
+
+            const asOtherTech = await callSubmit(p.id, otherTechEmail, validPayload());
+            logTest('4/5. Unassigned/wrong technician cannot submit (existence-oracle safe)', asOtherTech.statusCode === 404 && asOtherTech.body.code === 'REQUEST_NOT_FOUND');
+
+            const missing = await callSubmit(new ObjectId().toString(), otherTechEmail, validPayload());
+            logTest('8. Missing/non-owned request avoids existence leak (identical 404)', missing.statusCode === 404 && missing.body.code === 'REQUEST_NOT_FOUND');
+        }
+        {
+            // 6. role removed between assignment and submission.
+            const p = await createParcel();
+            await collections.users.updateOne({ email: techEmail }, { $set: { role: 'user' } });
+            const roleRemoved = await callSubmit(p.id, techEmail, validPayload());
+            await collections.users.updateOne({ email: techEmail }, { $set: { role: 'rider' } });
+            logTest('6. Rider with linked role removed cannot submit', roleRemoved.statusCode === 403 && roleRemoved.body.code === 'TECHNICIAN_ROLE_REQUIRED');
+        }
+        let happyInspection = null;
+        {
+            // 7. assigned rider can submit (the canonical happy path).
+            const p = await createParcel();
+            const ok = await callSubmit(p.id, techEmail, validPayload());
+            happyInspection = ok;
+            logTest('7. Assigned rider can submit', ok.statusCode === 201 && ok.body.code === undefined && ok.body.deliveryStatus === INSPECTION_COMPLETED);
+        }
+
+        // ================= Lifecycle (10-16) =================
+        for (const [label, status, num] of [['pending-pickup', 'pending-pickup', 10], ['driver_assigned', 'driver_assigned', 11], ['rider_arriving', 'rider_arriving', 12], ['parcel_delivered', 'parcel_delivered', 14], ['cancelled', 'cancelled', 15]]) {
+            const p = await createParcel({ deliveryStatus: status });
+            const r = await callSubmit(p.id, techEmail, validPayload());
+            logTest(`${num}. Status '${label}' rejected for inspection`, r.statusCode === 409 && r.body.code === 'INSPECTION_NOT_ALLOWED');
+        }
+        {
+            const p = await createParcel(); // parcel_picked_up
+            const r = await callSubmit(p.id, techEmail, validPayload());
+            logTest('13. parcel_picked_up accepted', r.statusCode === 201);
+            const again = await callSubmit(p.id, techEmail, validPayload());
+            logTest('16. inspection_completed cannot submit again', again.statusCode === 409 && again.body.code === 'INSPECTION_ALREADY_SUBMITTED');
+        }
+        {
+            // 9. legacy request rejected.
+            const legacy = await createParcel({ schemaVersion: undefined, product: undefined, service: undefined, pricing: undefined, parcelName: `TEST-INSPECTION-LEGACY-${runId}`, cost: 50 });
+            const r = await callSubmit(legacy.id, techEmail, validPayload());
+            logTest('9. Legacy request rejected', r.statusCode === 400 && r.body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
+        }
+
+        // ================= Validation (17-32) =================
+        async function expectInvalid(num, name, payload, expectedCode) {
+            const p = await createParcel();
+            const r = await callSubmit(p.id, techEmail, payload);
+            logTest(`${num}. ${name}`, r.statusCode === 400 && r.body.code === expectedCode);
+        }
+        await expectInvalid(17, 'missing diagnosis rejected', validPayload({ diagnosis: undefined }), 'INVALID_DIAGNOSIS');
+        await expectInvalid(18, 'short diagnosis rejected', validPayload({ diagnosis: { summary: 'too short', detectedIssues: validPayload().diagnosis.detectedIssues } }), 'INVALID_DIAGNOSIS');
+        await expectInvalid(19, 'too-long diagnosis rejected', validPayload({ diagnosis: { summary: 'x'.repeat(2001), detectedIssues: validPayload().diagnosis.detectedIssues } }), 'INVALID_DIAGNOSIS');
+        await expectInvalid(20, 'no detected issues rejected', validPayload({ diagnosis: { summary: validPayload().diagnosis.summary, detectedIssues: [] } }), 'INVALID_DETECTED_ISSUES');
+        await expectInvalid(21, '>10 issues rejected', validPayload({ diagnosis: { summary: validPayload().diagnosis.summary, detectedIssues: Array.from({ length: 11 }, () => ({ label: 'Issue label', severity: 'minor' })) } }), 'INVALID_DETECTED_ISSUES');
+        await expectInvalid(22, 'malformed issue rejected', validPayload({ diagnosis: { summary: validPayload().diagnosis.summary, detectedIssues: [{ label: 'x', severity: 'minor' }] } }), 'INVALID_DETECTED_ISSUES');
+        await expectInvalid(23, 'invalid severity rejected', validPayload({ diagnosis: { summary: validPayload().diagnosis.summary, detectedIssues: [{ label: 'Valid label', severity: 'catastrophic' }] } }), 'INVALID_DETECTED_ISSUES');
+        await expectInvalid(24, 'invalid repairability rejected', validPayload({ repairability: { decision: 'maybe', reason: 'a sufficiently long reason here' } }), 'INVALID_REPAIRABILITY');
+        await expectInvalid(25, 'missing repairability reason rejected', validPayload({ repairability: { decision: 'repairable', reason: 'short' } }), 'INVALID_REPAIRABILITY');
+        await expectInvalid(26, 'negative labor estimate rejected', validPayload({ estimate: { laborEstimate: -1, partsEstimate: 100 } }), 'INVALID_INSPECTION_ESTIMATE');
+        await expectInvalid(27, 'negative parts estimate rejected', validPayload({ estimate: { laborEstimate: 100, partsEstimate: -5 } }), 'INVALID_INSPECTION_ESTIMATE');
+        await expectInvalid(28, 'decimal estimate rejected', validPayload({ estimate: { laborEstimate: 100.5, partsEstimate: 100 } }), 'INVALID_INSPECTION_ESTIMATE');
+        await expectInvalid(29, 'excessive estimate rejected', validPayload({ estimate: { laborEstimate: 999999, partsEstimate: 0 } }), 'INVALID_INSPECTION_ESTIMATE');
+        await expectInvalid(30, 'internal notes limit enforced', validPayload({ internalNotes: 'x'.repeat(2001) }), 'INVALID_INSPECTION');
+        await expectInvalid(31, 'Mongo-style operator in numeric field rejected', validPayload({ estimate: { laborEstimate: { $gt: 0 }, partsEstimate: 100 } }), 'INVALID_INSPECTION_ESTIMATE');
+        await expectInvalid('31b', 'Mongo-style operator in label rejected', validPayload({ diagnosis: { summary: validPayload().diagnosis.summary, detectedIssues: [{ label: { $ne: '' }, severity: 'minor' }] } }), 'INVALID_DETECTED_ISSUES');
+        {
+            // 32. unknown authority fields ignored safely (accepted, never persisted).
+            const p = await createParcel();
+            const r = await callSubmit(p.id, techEmail, validPayload({ status: 'not_started', submittedByEmail: 'attacker@evil.com', version: 999, approvedAmount: 10, payableAmount: 20, quoteStatus: 'approved' }));
+            const doc = await collections.parcels.findOne({ _id: p._id });
+            const insp = doc.inspection;
+            logTest('32. Unknown authority fields ignored/rejected safely (server-owned values win)',
+                r.statusCode === 201 && insp.status === 'submitted' && insp.submittedByEmail === techEmail && insp.version === 1 && insp.approvedAmount === undefined && insp.payableAmount === undefined && insp.quoteStatus === undefined);
+        }
+
+        // ================= Persistence (33-40) =================
+        {
+            const p = await createParcel();
+            const beforePricing = JSON.parse(JSON.stringify(p.pricing));
+            const stripeBefore = capturedStripeSessionParams.length;
+            const r = await callSubmit(p.id, techEmail, validPayload());
+            const doc = await collections.parcels.findOne({ _id: p._id });
+            const insp = doc.inspection;
+            logTest('33. Inspection stored correctly', insp && insp.diagnosis.summary.startsWith('No display output') && insp.diagnosis.detectedIssues.length === 1 && insp.repairability.decision === 'repairable_with_parts');
+            logTest('34. Submitted rider id correct', insp.submittedByRiderId && insp.submittedByRiderId.toString() === techRiderId);
+            logTest('35. submittedAt is server-owned Date', insp.submittedAt instanceof Date);
+            logTest('36. version is 1', insp.version === 1);
+            logTest('37. BDT currency server-owned', insp.estimate.currency === 'BDT' && insp.estimate.laborEstimate === 800 && insp.estimate.partsEstimate === 3500);
+            logTest('38b. Canonical pricing snapshot unchanged', JSON.stringify(doc.pricing) === JSON.stringify(beforePricing));
+            logTest('39. Damage metadata unchanged', Array.isArray(doc.damage.images) && doc.damage.images.length === 0 && doc.damage.description === p.damage.description);
+            logTest('40. Assignment unchanged (rider fields + rider workStatus)', doc.riderId === techRiderId && doc.riderEmail === techEmail);
+            const riderAfter = await collections.riders.findOne({ _id: techInsert.insertedId });
+            logTest('47. Rider remains busy after inspection', riderAfter.workStatus === 'in_delivery');
+            logTest('68. No Stripe call during inspection', capturedStripeSessionParams.length === stripeBefore);
+            logTest('41. Status atomically becomes inspection_completed', doc.deliveryStatus === INSPECTION_COMPLETED);
+            logTest('48. inspection_completed keeps technician active (in ACTIVE_STATUSES)', ACTIVE_STATUSES.includes(INSPECTION_COMPLETED) && ACTIVE_STATUSES.includes(doc.deliveryStatus));
+            logTest('67. V2 payment still blocked after inspection', getPaymentEligibility(doc).eligible === false && getPaymentEligibility(doc).code === 'PAYMENT_NOT_AVAILABLE');
+            logTest('64/65. Inspection estimate stored separately; request.pricing untouched', doc.pricing.estimateMin === 1500 && doc.pricing.estimateMax === 6000 && doc.inspection.estimate.laborEstimate === 800);
+            logTest('66. No quote object created', doc.quote === undefined && doc.pricing.quotedAmount === null && doc.pricing.finalAmount === null);
+        }
+        {
+            // 42. no partial persistence on a failed submit.
+            const p = await createParcel();
+            const r = await callSubmit(p.id, techEmail, validPayload({ repairability: { decision: 'bad', reason: 'long enough reason text here' } }));
+            const doc = await collections.parcels.findOne({ _id: p._id });
+            logTest('42. Failed submit persists neither inspection nor status change', r.statusCode === 400 && doc.inspection === undefined && doc.deliveryStatus === 'parcel_picked_up');
+        }
+
+        // ================= Concurrency (43-46) =================
+        {
+            // 43. genuine double-submit race - exactly one winner.
+            const p = await createParcel();
+            const [a, b] = await Promise.all([callSubmit(p.id, techEmail, validPayload()), callSubmit(p.id, techEmail, validPayload())]);
+            const statuses = [a.statusCode, b.statusCode].sort();
+            const inspCount = await collections.parcels.countDocuments({ _id: p._id, 'inspection.status': 'submitted' });
+            const trackCount = await collections.trackings.countDocuments({ trackingId: p.trackingId, status: INSPECTION_COMPLETED });
+            const loser = a.statusCode === 409 ? a : b;
+            logTest('43. Double-submit race yields exactly one winner (201) + one 409', JSON.stringify(statuses) === JSON.stringify([201, 409]) && loser.body.code === 'INSPECTION_ALREADY_SUBMITTED' && inspCount === 1 && trackCount === 1);
+        }
+        {
+            // 44. reassignment blocks the stale technician.
+            const p = await createParcel();
+            await collections.parcels.updateOne({ _id: p._id }, { $set: { riderId: otherRiderId, riderEmail: otherTechEmail } });
+            const r = await callSubmit(p.id, techEmail, validPayload());
+            logTest('44. Reassignment blocks stale technician', r.statusCode === 404 && r.body.code === 'REQUEST_NOT_FOUND');
+        }
+        {
+            // 45. status change blocks stale submission.
+            const p = await createParcel();
+            await collections.parcels.updateOne({ _id: p._id }, { $set: { deliveryStatus: 'parcel_delivered' } });
+            const r = await callSubmit(p.id, techEmail, validPayload());
+            logTest('45. Status-change blocks stale submission', r.statusCode === 409 && r.body.code === 'INSPECTION_NOT_ALLOWED');
+        }
+        {
+            // 46. role removal blocks (covered by test 6; re-assert distinctly).
+            const p = await createParcel();
+            await collections.users.updateOne({ email: techEmail }, { $set: { role: 'user' } });
+            const r = await callSubmit(p.id, techEmail, validPayload());
+            await collections.users.updateOne({ email: techEmail }, { $set: { role: 'rider' } });
+            logTest('46. Role-removal blocks stale submission', r.statusCode === 403 && r.body.code === 'TECHNICIAN_ROLE_REQUIRED');
+        }
+
+        // ================= Tracking / Notification (49-54) =================
+        {
+            const p = await createParcel();
+            await callSubmit(p.id, techEmail, validPayload());
+            const events = await collections.trackings.find({ trackingId: p.trackingId, status: INSPECTION_COMPLETED }).toArray();
+            logTest('49. Exactly one tracking event written', events.length === 1);
+            logTest('51. No duplicate tracking event on retry', (await callSubmit(p.id, techEmail, validPayload())).statusCode === 409 && (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: INSPECTION_COMPLETED })) === 1);
+            const notif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:inspection_completed` }).toArray();
+            logTest('52. Customer notification created exactly once', notif.length === 1 && notif[0].recipientEmail === ownerEmail);
+            const serialized = JSON.stringify(notif[0]);
+            const notifMetaKeys = Object.keys(notif[0].metadata || {});
+            logTest('54. Notification contains no internal notes / technician email / estimate',
+                !serialized.includes('INTERNAL-ONLY') &&
+                !serialized.includes(techEmail) &&
+                !('estimate' in notif[0]) && !('inspection' in notif[0]) &&
+                notifMetaKeys.every((k) => k === 'trackingId') &&
+                notif[0].title === 'Inspection completed' &&
+                notif[0].message === 'Your repair request has been inspected. A repair quote will be prepared next.');
+        }
+        {
+            // 50/53. failed submit creates no tracking event and no notification.
+            const p = await createParcel();
+            await callSubmit(p.id, techEmail, validPayload({ diagnosis: undefined }));
+            const trk = await collections.trackings.countDocuments({ trackingId: p.trackingId, status: INSPECTION_COMPLETED });
+            const ntf = await collections.notifications.countDocuments({ deduplicationKey: `repair:${p.id}:inspection_completed` });
+            logTest('50/53. Failed submit creates no tracking event and no notification', trk === 0 && ntf === 0);
+        }
+
+        // ================= Read endpoint (55-63) =================
+        {
+            const p = await createParcel();
+            await callSubmit(p.id, techEmail, validPayload());
+            const asOwner = await callGet(p.id, ownerEmail);
+            logTest('55. Owner may read inspection', asOwner.statusCode === 200 && asOwner.body.inspection.status === 'submitted' && asOwner.body.inspection.diagnosis.summary.length > 0);
+            logTest('59/62. Customer response excludes internalNotes and submittedByEmail', asOwner.body.inspection.internalNotes === undefined && asOwner.body.inspection.submittedByEmail === undefined && asOwner.body.inspection.submittedByRiderId === undefined);
+            const asAdmin = await callGet(p.id, adminEmail);
+            logTest('56/60. Admin may read and sees internalNotes', asAdmin.statusCode === 200 && asAdmin.body.inspection.internalNotes && asAdmin.body.inspection.internalNotes.includes('INTERNAL-ONLY'));
+            const asTech = await callGet(p.id, techEmail);
+            logTest('57/61. Assigned technician may read and sees internalNotes', asTech.statusCode === 200 && asTech.body.inspection.internalNotes && asTech.body.inspection.internalNotes.includes('INTERNAL-ONLY'));
+            const asOther = await callGet(p.id, otherTechEmail);
+            logTest('58. Unrelated technician denied (existence-oracle safe)', asOther.statusCode === 404 && asOther.body.code === 'REQUEST_NOT_FOUND');
+            // even admin/owner never receive the raw submitter identity
+            logTest('62b. submittedByEmail never in any read view', asAdmin.body.inspection.submittedByEmail === undefined && asTech.body.inspection.submittedByEmail === undefined);
+        }
+        {
+            // 63. legacy read controlled.
+            const legacy = await createParcel({ schemaVersion: undefined, product: undefined, pricing: undefined, parcelName: `TEST-INSPECTION-LEGACY-READ-${runId}`, cost: 40 });
+            const r = await callGet(legacy.id, ownerEmail);
+            logTest('63. Legacy read controlled', r.statusCode === 400 && r.body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
+            const notStarted = await callGet((await createParcel()).id, ownerEmail);
+            logTest('63b. Not-yet-inspected v2 request reads status not_started', notStarted.statusCode === 200 && notStarted.body.inspection.status === 'not_started');
+        }
+
+        // ================= Regression (69-76) =================
+        {
+            const canonicalCount = await collections.serviceDefinitions.countDocuments({ $or: SERVICE_DEFINITION_SEED.map((r) => ({ productCategorySlug: r.productCategorySlug, repairCategorySlug: r.repairCategorySlug })) });
+            logTest('69. Canonical BDT service-definition count remains 16', canonicalCount === 16);
+            const created = await (async () => {
+                const res = fakeRes();
+                await parcelController.createParcel({ body: { schemaVersion: 2, product: { categorySlug: 'smartphone', brand: 'B', model: 'M' }, service: { definitionId: new ObjectId().toString() }, damage: { description: 'A brand new v2 request created during the inspection regression check.' }, serviceLocation: { region: 'Dhaka', district: 'Dhaka', address: '5 Rd' } }, decoded_email: ownerEmail }, res);
+                return res;
+            })();
+            // Non-existent definitionId -> controlled validation error, but the
+            // dispatch/creation path itself is exercised and never 500s.
+            logTest('70. V2 creation path still works (controlled response, no crash)', [200, 400, 404].includes(created.statusCode));
+            if (created.body && created.body.insertedId) createdParcelIds.push(new ObjectId(created.body.insertedId));
+        }
+    } finally {
+        if (createdParcelIds.length) await collections.parcels.deleteMany({ _id: { $in: createdParcelIds } });
+        if (createdRiderIds.length) await collections.riders.deleteMany({ _id: { $in: createdRiderIds } });
+        if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        if (usedTrackingIds.length) await collections.trackings.deleteMany({ trackingId: { $in: usedTrackingIds } });
+        if (ownerEmails.length) await collections.notifications.deleteMany({ recipientEmail: { $in: ownerEmails } });
+
+        const leftoverParcels = await collections.parcels.countDocuments({ trackingId: { $regex: '^TEST-INSP-' } });
+        const leftoverRiders = await collections.riders.countDocuments({ name: { $regex: '^TEST-INSPECTION-' } });
+        const leftoverUsers = await collections.users.countDocuments({ email: { $regex: '^inspection-.*@test.local$' } });
+        logTest('75/76. No inspection fixture leakage after tests', leftoverParcels === 0 && leftoverRiders === 0 && leftoverUsers === 0);
+    }
+
+    console.log('');
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
@@ -11337,6 +11696,7 @@ async function runAllTests() {
     await testDamageUploadFoundation();
     await testAuthorizedDamageImageAccess();
     await testBdtPricingMigration();
+    await testInspectionWorkflow();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

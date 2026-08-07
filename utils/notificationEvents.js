@@ -141,6 +141,23 @@ const NOTIFICATION_EVENTS = {
         actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
         deduplicationKey: ({ entityId }) => `repair:${entityId}:completed`,
     },
+    inspection_completed: {
+        entityType: 'parcel',
+        // Same reasoning as technician_assigned - the repair owner's real role
+        // is not fixed to a single value (POST /parcels only requires
+        // authentication), so a fixed recipientRoles allowlist is used.
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        // trackingId is accepted for consistency but not required - this
+        // message deliberately interpolates nothing, and must never carry the
+        // technician's diagnosis, internal notes, estimate amounts, or PII.
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: [],
+        title: () => 'Inspection completed',
+        message: () => 'Your repair request has been inspected. A repair quote will be prepared next.',
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:inspection_completed`,
+    },
     payment_confirmed: {
         entityType: 'parcel',
         // Same reasoning as technician_assigned/technician_on_the_way/

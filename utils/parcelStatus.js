@@ -4,11 +4,23 @@
 // status value, which is what needed validating.
 const VALID_STATUSES = ['driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered'];
 
-// The subset of VALID_STATUSES that represent a technician actively holding a
-// repair request - i.e. every status between assignment and completion.
-// Used by assignRiderToParcel (Phase 6.2 Unit 2) to find any other request
-// still occupying a technician's single active-assignment slot.
-const ACTIVE_STATUSES = VALID_STATUSES.filter((status) => status !== 'parcel_delivered');
+// Technician inspection completion (Phase 6.4 Unit 4). Deliberately NOT part
+// of VALID_STATUSES: that list is the set of client-settable transition
+// targets updateParcelStatus accepts, and inspection_completed must never be
+// reachable through the generic PATCH /parcels/:id/status path - it is set
+// only by the dedicated, atomic inspection-submission endpoint (see
+// controllers/inspectionController.js). It is, however, an ACTIVE status
+// below: a technician who has completed an inspection is still holding the
+// request (the repair itself has not happened yet), so they must remain
+// occupied and un-recommendable/un-assignable for any other request.
+const INSPECTION_COMPLETED = 'inspection_completed';
+
+// The subset of statuses that represent a technician actively holding a
+// repair request - i.e. every status between assignment and completion,
+// including inspection_completed. Used by assignRiderToParcel (Phase 6.2
+// Unit 2) and technicianEligibilityService to find any request still
+// occupying a technician's single active-assignment slot.
+const ACTIVE_STATUSES = [...VALID_STATUSES.filter((status) => status !== 'parcel_delivered'), INSPECTION_COMPLETED];
 
 // Maps a parcel's current deliveryStatus to the statuses it may move to next.
 const ALLOWED_TRANSITIONS = {
@@ -23,4 +35,4 @@ function isValidTransition(currentStatus, nextStatus) {
     return Array.isArray(allowedNext) && allowedNext.includes(nextStatus);
 }
 
-module.exports = { VALID_STATUSES, ACTIVE_STATUSES, isValidTransition };
+module.exports = { VALID_STATUSES, ACTIVE_STATUSES, INSPECTION_COMPLETED, isValidTransition };
