@@ -1,4 +1,4 @@
-const { verifyFBToken } = require('../middleware/auth');
+const { verifyFBToken, verifyEmailVerified } = require('../middleware/auth');
 const { ensureDatabaseReady } = require('../middleware/database');
 
 // Repair-quote routes (Phase 6.4 Unit 5). Route-level auth is only
@@ -10,7 +10,11 @@ function quoteRoutes(app, controllers) {
     const quoteController = controllers.quote;
 
     app.post('/parcels/:id/quote', verifyFBToken, ensureDatabaseReady, (req, res) => quoteController.submitQuote(req, res));
-    app.post('/parcels/:id/quote/decision', verifyFBToken, ensureDatabaseReady, (req, res) => quoteController.decideQuote(req, res));
+    // Customer-exclusive quote decision (approve/decline) - gated by
+    // verifyEmailVerified (Phase 8.1). Quote submission above stays technician-
+    // side and is intentionally NOT gated here. The controller still enforces
+    // owner authority + quote/payment state.
+    app.post('/parcels/:id/quote/decision', verifyFBToken, ensureDatabaseReady, verifyEmailVerified, (req, res) => quoteController.decideQuote(req, res));
     app.get('/parcels/:id/quote', verifyFBToken, ensureDatabaseReady, (req, res) => quoteController.getQuote(req, res));
 }
 

@@ -2233,9 +2233,9 @@ async function testRequestCancellation() {
             return { id: result.insertedId.toString(), ...doc };
         }
 
-        function cancelReq(id, decoded_email) {
+        function cancelReq(id, decoded_email, decoded_email_verified = true) {
             const res = fakeRes();
-            return parcelController.cancelParcel({ params: { id }, decoded_email }, res).then(() => res);
+            return parcelController.cancelParcel({ params: { id }, decoded_email, decoded_email_verified }, res).then(() => res);
         }
 
         function assignReq(id, body) {
@@ -2273,6 +2273,18 @@ async function testRequestCancellation() {
         const p1 = await createTestParcel(`TEST-CANCEL-NONOWNER-${Date.now()}`);
         res = await cancelReq(p1.id, RIDER_EMAIL);
         logTest('Non-owner rejected (403)', res.statusCode === 403 && res.body.code === 'NOT_REQUEST_OWNER');
+
+        // --- Phase 8.1A: customer-owner email verification on cancellation. ---
+        // Ownership is checked first (the rider above got NOT_REQUEST_OWNER), so
+        // verification only ever gates the request's own owner and never leaks
+        // ownership. An unverified owner is blocked and the request is NOT
+        // cancelled; verifying then lets the same owner cancel.
+        const pVerCancel = await createTestParcel(`TEST-CANCEL-UNVERIFIED-${Date.now()}`, { deliveryStatus: 'pending-pickup' });
+        res = await cancelReq(pVerCancel.id, CUSTOMER_EMAIL, false);
+        const pVerAfter = await models.Parcel.findById(pVerCancel.id);
+        logTest('8.1A cancel: unverified owner blocked (403 EMAIL_NOT_VERIFIED), request not cancelled', res.statusCode === 403 && res.body.code === 'EMAIL_NOT_VERIFIED' && pVerAfter.deliveryStatus !== 'cancelled');
+        res = await cancelReq(pVerCancel.id, CUSTOMER_EMAIL, true);
+        logTest('8.1A cancel: verified owner succeeds', res.statusCode === 200 && res.body.status === 'cancelled');
 
         // --- 6. Owner cancels a pending, unassigned, unpaid request - success. ---
         const p2 = await createTestParcel(`TEST-CANCEL-SUCCESS-${Date.now()}`, { deliveryStatus: 'pending-pickup' });
@@ -2560,9 +2572,9 @@ async function testTechnicianAssignment() {
             return parcelController.assignRiderToParcel({ params: { id: parcelId }, body }, res).then(() => res);
         }
 
-        function cancelReq(id, decoded_email) {
+        function cancelReq(id, decoded_email, decoded_email_verified = true) {
             const res = fakeRes();
-            return parcelController.cancelParcel({ params: { id }, decoded_email }, res).then(() => res);
+            return parcelController.cancelParcel({ params: { id }, decoded_email, decoded_email_verified }, res).then(() => res);
         }
 
         function publicTrackReq(trackingCode) {
@@ -12425,8 +12437,8 @@ async function testSafeRepairDeletion() {
             return { id: r.insertedId.toString(), _id: r.insertedId, ...doc };
         }
 
-        const delReq = (id, email) => { const res = fakeRes(); return parcelController.deleteParcel({ params: { id }, decoded_email: email }, res).then(() => res); };
-        const cancelReq = (id, email) => { const res = fakeRes(); return parcelController.cancelParcel({ params: { id }, decoded_email: email }, res).then(() => res); };
+        const delReq = (id, email, emailVerified = true) => { const res = fakeRes(); return parcelController.deleteParcel({ params: { id }, decoded_email: email, decoded_email_verified: emailVerified }, res).then(() => res); };
+        const cancelReq = (id, email, emailVerified = true) => { const res = fakeRes(); return parcelController.cancelParcel({ params: { id }, decoded_email: email, decoded_email_verified: emailVerified }, res).then(() => res); };
         const exists = async (id) => !!(await models.Parcel.findById(id));
 
         // --- 3, 4. Invalid ObjectId / unknown id. ---
@@ -12454,6 +12466,28 @@ async function testSafeRepairDeletion() {
         logTest('8. Unrelated user gets 404 (existence-oracle) and the request survives', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND' && JSON.stringify(res.body) === unknownIdBody && (await exists(oracleParcel.id)));
         res = await delReq(oracleParcel.id, techEmail);
         logTest('9. Technician (non-owner/non-admin) gets 404 and the request survives', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND' && (await exists(oracleParcel.id)));
+
+        // --- Phase 8.1A: customer-owner email-verification on shared delete. ---
+        // Unverified owner is blocked (403 EMAIL_NOT_VERIFIED) and the request
+        // survives; verifying then lets the SAME owner delete it.
+        const verParcel = await createParcel();
+        res = await delReq(verParcel.id, ownerEmail, false);
+        logTest('8.1A-a. Unverified owner cannot delete (403 EMAIL_NOT_VERIFIED) and request survives', res.statusCode === 403 && res.body.code === 'EMAIL_NOT_VERIFIED' && (await exists(verParcel.id)));
+        res = await delReq(verParcel.id, ownerEmail, true);
+        logTest('8.1A-b. Verified owner deletes the same request (200)', res.statusCode === 200 && res.body.success === true && !(await exists(verParcel.id)));
+
+        // Admin keeps delete authority even with an unverified email (policy
+        // does not impose customer email-verification on admin authority).
+        const adminUnverParcel = await createParcel();
+        res = await delReq(adminUnverParcel.id, adminEmail, false);
+        logTest('8.1A-c. Admin with unverified email keeps delete authority (200, admin exempt)', res.statusCode === 200 && res.body.success === true && !(await exists(adminUnverParcel.id)));
+
+        // Existence/verification oracle safety: an UNRELATED unverified caller
+        // still gets the exact same 404 as an unknown id - never a 403 that
+        // would reveal the request exists or that verification is the blocker.
+        const oracleUnverParcel = await createParcel();
+        res = await delReq(oracleUnverParcel.id, otherEmail, false);
+        logTest('8.1A-d. Unrelated UNVERIFIED user still gets 404 (no verification/existence oracle) and request survives', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND' && JSON.stringify(res.body) === unknownIdBody && (await exists(oracleUnverParcel.id)));
 
         // --- 10. Legacy (no schemaVersion) request is never deletable through this path. ---
         const legacy = await createParcel({ schemaVersion: undefined });
@@ -12556,7 +12590,7 @@ async function testSafeRepairDeletion() {
         const pcThrow = new ParcelController(models, collections, throwingStorage);
         const bestEffortParcel = await createParcel({ damage: { images: [{ storageKey: `repair-requests/${runId}-be/damage/x.jpg`, url: 'z' }] } });
         const beRes = fakeRes();
-        await pcThrow.deleteParcel({ params: { id: bestEffortParcel.id }, decoded_email: ownerEmail }, beRes);
+        await pcThrow.deleteParcel({ params: { id: bestEffortParcel.id }, decoded_email: ownerEmail, decoded_email_verified: true }, beRes);
         logTest('30. A Storage failure is non-fatal: delete still succeeds and the request is gone', beRes.statusCode === 200 && beRes.body.success === true && !(await exists(bestEffortParcel.id)));
 
         // --- 31. Deleting an already-deleted request returns 404 (idempotent, no oracle). ---
@@ -12636,7 +12670,7 @@ async function testSafeRepairDeletion() {
         const kF2 = `repair-requests/${runId}-f/damage/${runId}-f2.jpg`;
         const failParcel = await createParcel({ damage: { images: [{ storageKey: kF1, url: 'a' }, { storageKey: kF2, url: 'b' }] } });
         const failRes = fakeRes();
-        await pcThrow.deleteParcel({ params: { id: failParcel.id }, decoded_email: ownerEmail }, failRes);
+        await pcThrow.deleteParcel({ params: { id: failParcel.id }, decoded_email: ownerEmail, decoded_email_verified: true }, failRes);
         const failRecord = await collections.deletionCleanups.findOne({ _id: failParcel.id });
         logTest('51. A Storage failure leaves a retained (pending) cleanup record while the delete still succeeds', failRes.statusCode === 200 && failRes.body.success === true && !!failRecord && failRecord.status === 'pending');
         logTest('52. Cleanup record holds exactly the trusted keys (collected server-side, no more/less)', !!failRecord && failRecord.storageKeys.slice().sort().join('|') === [kF1, kF2].sort().join('|'));
@@ -12665,8 +12699,8 @@ async function testSafeRepairDeletion() {
         const kDup = `repair-requests/${runId}-dup/damage/${runId}-dup.jpg`;
         const dupParcel = await createParcel({ damage: { images: [{ storageKey: kDup, url: 'd' }] } });
         const [du1, du2] = await Promise.all([
-            (async () => { const r = fakeRes(); await pcThrow.deleteParcel({ params: { id: dupParcel.id }, decoded_email: ownerEmail }, r); return r; })(),
-            (async () => { const r = fakeRes(); await pcThrow.deleteParcel({ params: { id: dupParcel.id }, decoded_email: ownerEmail }, r); return r; })()
+            (async () => { const r = fakeRes(); await pcThrow.deleteParcel({ params: { id: dupParcel.id }, decoded_email: ownerEmail, decoded_email_verified: true }, r); return r; })(),
+            (async () => { const r = fakeRes(); await pcThrow.deleteParcel({ params: { id: dupParcel.id }, decoded_email: ownerEmail, decoded_email_verified: true }, r); return r; })()
         ]);
         const dupRecordCount = await collections.deletionCleanups.countDocuments({ _id: dupParcel.id });
         const dupWinners = [du1.statusCode, du2.statusCode].filter((s) => s === 200).length;
@@ -12913,6 +12947,7 @@ async function runAllTests() {
     await testV2PaymentWorkflow();
     await testRepairWorkflow();
     await testSafeRepairDeletion();
+    await testEmailVerificationMiddleware();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
@@ -12936,6 +12971,91 @@ async function runAllTests() {
     } else {
         console.log('⚠️  Some tests failed. Please review the output above.');
         process.exit(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Email-verification middleware (Phase 8.1)
+//
+// verifyEmailVerified gates sensitive customer mutations. It reads the strict
+// boolean req.decoded_email_verified that verifyFBToken derives from the
+// authoritative decoded Firebase token (decoded.email_verified === true). These
+// tests exercise the middleware directly (no DB, no live Firebase) with a
+// minimal fake req/res/next - the same direct-call convention the rest of this
+// file uses to test authenticated logic without minting real tokens.
+// ---------------------------------------------------------------------------
+async function testEmailVerificationMiddleware() {
+    console.log('\n=== Email Verification Middleware (Phase 8.1) ===');
+    const { verifyEmailVerified } = require('./middleware/auth');
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; },
+        };
+    }
+
+    // 1. Authenticated + email_verified true -> allowed (next called, no response).
+    {
+        const req = { decoded_email: 'verified@test.local', decoded_email_verified: true };
+        const res = fakeRes();
+        let nextCalled = false;
+        verifyEmailVerified(req, res, () => { nextCalled = true; });
+        logTest('verifyEmailVerified allows a verified user (next called, no response)',
+            nextCalled === true && res.statusCode === 200 && res.body === undefined);
+    }
+
+    // 2. Authenticated + email_verified false -> 403 EMAIL_NOT_VERIFIED, next NOT called.
+    {
+        const req = { decoded_email: 'unverified@test.local', decoded_email_verified: false };
+        const res = fakeRes();
+        let nextCalled = false;
+        verifyEmailVerified(req, res, () => { nextCalled = true; });
+        logTest('verifyEmailVerified rejects an unverified user with 403 EMAIL_NOT_VERIFIED',
+            nextCalled === false && res.statusCode === 403 && res.body && res.body.code === 'EMAIL_NOT_VERIFIED');
+    }
+
+    // 3. Missing claim (undefined) -> rejected (explicit true required), 403.
+    {
+        const req = { decoded_email: 'noclaim@test.local' };
+        const res = fakeRes();
+        let nextCalled = false;
+        verifyEmailVerified(req, res, () => { nextCalled = true; });
+        logTest('verifyEmailVerified rejects a missing verification claim (explicit true required)',
+            nextCalled === false && res.statusCode === 403 && res.body && res.body.code === 'EMAIL_NOT_VERIFIED');
+    }
+
+    // 4. A truthy-but-not-true value (e.g. the string "true") must NOT pass -
+    //    only a strict boolean true is accepted, so a spoofed claim shape fails.
+    {
+        const req = { decoded_email_verified: 'true' };
+        const res = fakeRes();
+        let nextCalled = false;
+        verifyEmailVerified(req, res, () => { nextCalled = true; });
+        logTest('verifyEmailVerified rejects a non-strict-true claim value',
+            nextCalled === false && res.statusCode === 403 && res.body && res.body.code === 'EMAIL_NOT_VERIFIED');
+    }
+
+    // 5. Uses 403 (not 401): an authenticated-but-unverified user must never be
+    //    treated as an invalid session (which would log the client out).
+    {
+        const req = { decoded_email_verified: false };
+        const res = fakeRes();
+        verifyEmailVerified(req, res, () => {});
+        logTest('verifyEmailVerified uses 403 (authenticated-but-forbidden), never 401',
+            res.statusCode === 403);
+    }
+
+    // 6. Does not mutate role/identity fields on the request (no side effects
+    //    beyond calling next for a verified user).
+    {
+        const req = { decoded_email: 'verified@test.local', decoded_email_verified: true, role: 'user' };
+        const res = fakeRes();
+        verifyEmailVerified(req, res, () => {});
+        logTest('verifyEmailVerified performs no role/identity mutation',
+            req.decoded_email === 'verified@test.local' && req.role === 'user');
     }
 }
 

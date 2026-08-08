@@ -1,4 +1,4 @@
-const { verifyFBToken } = require('../middleware/auth');
+const { verifyFBToken, verifyEmailVerified } = require('../middleware/auth');
 const { ensureDatabaseReady } = require('../middleware/database');
 
 // Damage-evidence upload routes (Phase 6.4 Unit 1). Deliberately a separate
@@ -21,21 +21,26 @@ function damageUploadRoutes(app, controllers) {
         (req, res) => damageUploadController.listImages(req, res)
     );
 
+    // Damage-image upload/finalize/remove are owner-only customer mutations
+    // (ownership enforced inside the controller). Gated by verifyEmailVerified
+    // (Phase 8.1) so an unverified email/password user cannot upload, finalize,
+    // or delete evidence. The read (GET listImages) above serves owner/admin/
+    // assigned-technician and is intentionally NOT gated.
     app.post(
         '/parcels/:id/damage-images/upload-session',
-        verifyFBToken, ensureDatabaseReady,
+        verifyFBToken, ensureDatabaseReady, verifyEmailVerified,
         (req, res) => damageUploadController.createUploadSession(req, res)
     );
 
     app.post(
         '/parcels/:id/damage-images/finalize',
-        verifyFBToken, ensureDatabaseReady,
+        verifyFBToken, ensureDatabaseReady, verifyEmailVerified,
         (req, res) => damageUploadController.finalizeUpload(req, res)
     );
 
     app.delete(
         '/parcels/:id/damage-images/:imageId',
-        verifyFBToken, ensureDatabaseReady,
+        verifyFBToken, ensureDatabaseReady, verifyEmailVerified,
         (req, res) => damageUploadController.removeImage(req, res)
     );
 }

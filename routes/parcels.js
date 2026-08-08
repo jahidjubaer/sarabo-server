@@ -1,4 +1,4 @@
-const { verifyFBToken, verifyAdmin, verifyRider } = require('../middleware/auth');
+const { verifyFBToken, verifyAdmin, verifyRider, verifyEmailVerified } = require('../middleware/auth');
 const { ensureDatabaseReady } = require('../middleware/database');
 
 function parcelRoutes(app, controllers) {
@@ -29,8 +29,12 @@ function parcelRoutes(app, controllers) {
     // AssignTechnicians and is not changed by this route).
     app.get('/admin/parcels', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.getAdminParcels(req, res));
 
-    // Create new repair request
-    app.post('/parcels', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.createParcel(req, res));
+    // Create new repair request. Customer-exclusive business mutation - gated
+    // by verifyEmailVerified (Phase 8.1) so an unverified email/password user
+    // cannot create a request; server token is authoritative (client guard is
+    // UX only). verifyEmailVerified runs after verifyFBToken and before the
+    // controller.
+    app.post('/parcels', verifyFBToken, ensureDatabaseReady, verifyEmailVerified, (req, res) => parcelController.createParcel(req, res));
 
     // Update repair request status
     app.patch('/parcels/:id/status', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.updateParcelStatus(req, res));

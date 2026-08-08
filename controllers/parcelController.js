@@ -1228,6 +1228,19 @@ class ParcelController {
             return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
         }
 
+        // Phase 8.1A: a customer-owner (acting as owner, not admin) must have a
+        // verified email to delete their own request. This is checked ONLY
+        // after owner/admin authority is established - the unrelated-caller 404
+        // above has already run - so it can never become a role/verification/
+        // existence oracle for an unauthorized caller. Admins are exempt (this
+        // route is the shared owner-or-admin path and current policy imposes no
+        // customer email-verification on admin authority); an admin who also
+        // owns the request is likewise exempt. Uses the authoritative token
+        // claim set by verifyFBToken - never a client-supplied flag.
+        if (isOwner && !isAdmin && req.decoded_email_verified !== true) {
+            return res.status(403).send({ message: 'email verification required', code: 'EMAIL_NOT_VERIFIED' });
+        }
+
         // Safe deletion is scoped to newer (v2) repair requests only - legacy
         // courier-era records are never removed through this path.
         if (!isV2RepairRequest(parcel)) {
@@ -1373,6 +1386,22 @@ class ParcelController {
             const callerEmail = normalize(req.decoded_email);
             if (ownerEmail !== callerEmail) {
                 return res.status(403).send({ message: 'forbidden access', code: 'NOT_REQUEST_OWNER' });
+            }
+
+            // Phase 8.1A: cancellation is owner-only (a non-owner already got
+            // NOT_REQUEST_OWNER above), so this gate only ever applies to the
+            // request's own owner. A customer-owner must have a verified email;
+            // an admin acting on their own request keeps existing authority
+            // without the new verification requirement. The role lookup runs
+            // ONLY in the unverified branch (the common verified path pays no
+            // extra query). Uses the authoritative token claim from
+            // verifyFBToken, never a client-supplied flag.
+            if (req.decoded_email_verified !== true) {
+                const caller = await this.User.findByEmail(req.decoded_email);
+                const isAdmin = !!caller && caller.role === 'admin';
+                if (!isAdmin) {
+                    return res.status(403).send({ message: 'email verification required', code: 'EMAIL_NOT_VERIFIED' });
+                }
             }
 
             // A completed payment record is authoritative even if
