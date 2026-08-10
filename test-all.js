@@ -13432,25 +13432,64 @@ async function testTechnicianAssignmentDecisions() {
         await reject(pReasonBad.id, techEmail, 'Cleaning up this pending offer with a valid reason.');
 
         // --- CONCURRENCY ---
+        // A concurrent decision race must resolve to EXACTLY ONE winner (200)
+        // and ONE controlled loser, leaving a single coherent final decision and
+        // consistent rider state. The loser's exact code is purely timing-
+        // dependent - the guarded single-document write (accept) / guarded
+        // transaction (reject) is the race-resolver, and depending on how far the
+        // loser read before the winner committed it correctly returns one of
+        // THREE controlled, mapped (never raw 500 / WriteConflict) responses:
+        //   - 409 ASSIGNMENT_ALREADY_DECIDED : read before the winner committed,
+        //     then lost the guarded write (matchedCount 0),
+        //   - 409 ASSIGNMENT_NOT_PENDING     : read after the winner flipped
+        //     deliveryStatus off assignment_pending,
+        //   - 403 NOT_ASSIGNED_TECHNICIAN    : read after a REJECT winner cleared
+        //     the rider fields (accept-vs-reject only).
+        // Asserting one specific loser code is what made the original tests
+        // flaky; the real invariant is order- and code-independent, so these
+        // assertions verify the invariant AND the final DB state (Phase 8.6).
+        const isControlledLoser = (r) =>
+            (r.statusCode === 409 && r.body && (r.body.code === 'ASSIGNMENT_ALREADY_DECIDED' || r.body.code === 'ASSIGNMENT_NOT_PENDING'))
+            || (r.statusCode === 403 && r.body && r.body.code === 'NOT_ASSIGNED_TECHNICIAN');
+        const raceResolvedCleanly = async (responses, parcelId) => {
+            const successes = responses.filter((r) => r.statusCode === 200);
+            const losers = responses.filter((r) => r.statusCode !== 200);
+            if (successes.length !== 1 || losers.length !== 1 || !isControlledLoser(losers[0])) return false;
+            const p = await models.Parcel.findById(parcelId);
+            const decided = (p.assignmentHistory || []).filter((h) => h.decision !== 'pending');
+            const pending = (p.assignmentHistory || []).filter((h) => h.decision === 'pending');
+            // exactly one decided entry, none left pending, no duplicate decisions
+            if (decided.length !== 1 || pending.length !== 0 || !decided[0].decidedAt) return false;
+            const rider = await collections.riders.findOne({ _id: techRiderId });
+            if (p.deliveryStatus === 'driver_assigned') {
+                // accept winner: active rider preserved, technician stays reserved
+                return decided[0].decision === 'accepted' && p.riderEmail === techEmail && rider.workStatus === 'in_delivery';
+            }
+            if (p.deliveryStatus === 'pending-pickup') {
+                // reject winner: rider fields cleared, technician released, and the
+                // winning technician's rejection reason retained for the admin audit
+                return decided[0].decision === 'rejected' && !!decided[0].rejectionReason && p.riderEmail === undefined && rider.workStatus === 'available';
+            }
+            return false;
+        };
+
         // accept vs reject
         await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
         const pAR = await makePendingParcel();
-        const [arA, arB] = await Promise.all([accept(pAR.id, techEmail), reject(pAR.id, techEmail, 'Concurrent reject racing the accept.')]);
-        const arWinners = [arA.statusCode, arB.statusCode].filter((s) => s === 200).length;
-        const arConflicts = [arA, arB].filter((r) => r.statusCode === 409 && r.body.code === 'ASSIGNMENT_ALREADY_DECIDED').length;
-        logTest('19. Accept vs reject: exactly one wins, the loser gets ASSIGNMENT_ALREADY_DECIDED', arWinners === 1 && arConflicts === 1);
+        const arResponses = await Promise.all([accept(pAR.id, techEmail), reject(pAR.id, techEmail, 'Concurrent reject racing the accept.')]);
+        logTest('19. Accept vs reject: exactly one wins, loser gets a controlled conflict, final state coherent', await raceResolvedCleanly(arResponses, pAR._id));
 
         // accept vs accept
         await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
         const pAA = await makePendingParcel();
-        const [aaA, aaB] = await Promise.all([accept(pAA.id, techEmail), accept(pAA.id, techEmail)]);
-        logTest('20. Accept vs accept: exactly one wins', [aaA.statusCode, aaB.statusCode].filter((s) => s === 200).length === 1 && [aaA, aaB].some((r) => r.statusCode === 409 && r.body.code === 'ASSIGNMENT_ALREADY_DECIDED'));
+        const aaResponses = await Promise.all([accept(pAA.id, techEmail), accept(pAA.id, techEmail)]);
+        logTest('20. Accept vs accept: exactly one wins, loser gets a controlled conflict, final state coherent', await raceResolvedCleanly(aaResponses, pAA._id));
 
         // reject vs reject
         await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
         const pRR = await makePendingParcel();
-        const [rrA, rrB] = await Promise.all([reject(pRR.id, techEmail, 'First concurrent reject reason.'), reject(pRR.id, techEmail, 'Second concurrent reject reason.')]);
-        logTest('21. Reject vs reject: exactly one wins', [rrA.statusCode, rrB.statusCode].filter((s) => s === 200).length === 1 && [rrA, rrB].some((r) => r.statusCode === 409 && r.body.code === 'ASSIGNMENT_ALREADY_DECIDED'));
+        const rrResponses = await Promise.all([reject(pRR.id, techEmail, 'First concurrent reject reason.'), reject(pRR.id, techEmail, 'Second concurrent reject reason.')]);
+        logTest('21. Reject vs reject: exactly one wins, loser gets a controlled conflict, final state coherent', await raceResolvedCleanly(rrResponses, pRR._id));
 
         // --- REASSIGNMENT lock: admin cannot reassign the same offered request while pending ---
         await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
@@ -13479,6 +13518,22 @@ async function testTechnicianAssignmentDecisions() {
 
         // --- pure reason validator bounds ---
         logTest('27. validateRejectionReason accepts a valid reason and rejects too-short/empty', validateRejectionReason('A valid reason here').valid === true && validateRejectionReason('no').valid === false && validateRejectionReason('').valid === false);
+
+        // --- generic status-update guard: assignment_pending is decided ONLY by the
+        // dedicated accept/reject endpoints, never by the generic PATCH path. It is
+        // not a settable status (not in VALID_STATUSES) and has no allowed generic
+        // transition out (empty ALLOWED_TRANSITIONS), so the generic path can neither
+        // enter nor leave it. ---
+        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        const pGuard = await makePendingParcel();
+        const enterRes = fakeRes();
+        await parcelController.updateParcelStatus({ params: { id: pGuard.id }, body: { deliveryStatus: 'assignment_pending' }, decoded_email: adminEmail }, enterRes);
+        logTest('28. Generic PATCH cannot ENTER assignment_pending (not a settable status)', enterRes.statusCode === 400 && enterRes.body.code === 'INVALID_REPAIR_STATUS');
+        const leaveRes = fakeRes();
+        await parcelController.updateParcelStatus({ params: { id: pGuard.id }, body: { deliveryStatus: 'driver_assigned' }, decoded_email: techEmail }, leaveRes);
+        logTest('29. Generic PATCH cannot LEAVE assignment_pending (no allowed generic transition)', leaveRes.statusCode === 409 && leaveRes.body.code === 'STATUS_TRANSITION_NOT_ALLOWED');
+        const guardAfter = await models.Parcel.findById(pGuard.id);
+        logTest('30. The request stays assignment_pending after both blocked generic updates', guardAfter.deliveryStatus === 'assignment_pending');
     } finally {
         if (createdParcelIds.length) await collections.parcels.deleteMany({ _id: { $in: createdParcelIds } });
         if (createdRiderIds.length) await collections.riders.deleteMany({ _id: { $in: createdRiderIds } });
