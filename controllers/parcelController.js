@@ -147,7 +147,11 @@ class ParcelController {
             // Phase 8.3 / BL-032: damage.images (raw storageKey/url/mimeType) is
             // reduced to a safe { description, imageCount } aggregate here -
             // images are served only through GET /parcels/:id/damage-images.
-            const { inspection, quote, repair, assignmentHistory, ...safeParcel } = parcel;
+            // Phase 8.5: the payment sub-document (Stripe paymentIntentId +
+            // provider) is a payment-provider internal never read by any client -
+            // the UI reads only the top-level paymentStatus - so it is stripped
+            // here too, alongside the inspection/quote/repair detail documents.
+            const { inspection, quote, repair, assignmentHistory, payment, ...safeParcel } = parcel;
             res.send(stripDamageImages(safeParcel));
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair request', error: error.message });

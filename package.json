@@ -7,7 +7,8 @@
     "test": "node test-all.js",
     "start": "node index.js",
     "dev": "node index.js",
-    "seed:service-definitions": "node scripts/seed-service-definitions.js"
+    "seed:service-definitions": "node scripts/seed-service-definitions.js",
+    "seed:qa-parcels": "node scripts/seed-qa-parcels.js"
   },
   "keywords": [],
   "author": "",

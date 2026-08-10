@@ -24,21 +24,61 @@ function stripDamageImages(parcel) {
     };
 }
 
-// Safe projection for a GENERAL parcel LIST item (GET /parcels, GET
-// /parcels/rider): strips raw damage images (BL-032) AND assignmentHistory
-// (Phase 8.2 - it carries rider/admin identities + rejection reasons and is
-// read only through the role-projected GET /parcels/:id/assignment). Current
-// active-assignment fields (riderName/riderEmail) and the inspection/quote/
-// repair existence markers the client's deletion-eligibility check relies on
-// are preserved. Pure: does not mutate its input.
-function projectSafeListParcel(parcel) {
-    const safe = stripDamageImages(parcel);
-    if (safe && typeof safe === 'object' && 'assignmentHistory' in safe) {
-        // eslint-disable-next-line no-unused-vars
-        const { assignmentHistory, ...rest } = safe;
-        return rest;
-    }
-    return safe;
+// The only quote fields a general list is allowed to carry: the customer's
+// request list (getAgreedPrice in customerRequestPresentation.js) renders the
+// AGREED price of an approved quote from exactly these three fields. Everything
+// else on the stored quote - the labor/parts/additional breakdown, free-text
+// notes, the submitting technician's id, the customer's decision reason, and
+// submission timestamps - is internal and never belongs on a general list. The
+// full quote is read only through the dedicated, role-projected
+// GET /parcels/:id/quote. Pure: builds a fresh object.
+function summarizeQuoteForList(quote) {
+    return {
+        status: quote.status ?? null,
+        totalAmount: quote.totalAmount ?? null,
+        currency: quote.currency ?? null,
+    };
 }
 
-module.exports = { stripDamageImages, projectSafeListParcel };
+// Safe projection for a GENERAL parcel LIST item (GET /parcels, GET
+// /parcels/rider). Beyond the BL-032 damage-image strip and the Phase 8.2
+// assignmentHistory strip, this removes the detail sub-documents that carried
+// technician-only and provider-internal data onto general lists (Phase 8.4
+// MEDIUM debt / Phase 8.5):
+//
+//   - inspection: internalNotes (explicitly customer-private), the submitting
+//     technician's email/id, the diagnosis, and the estimate. Read only through
+//     the role-projected GET /parcels/:id/inspection.
+//   - repair:     completion evidence storage metadata (imageId/mimeType/size),
+//     progress-update ids, and rider identifiers. Read only through
+//     GET /parcels/:id/repair.
+//   - quote:      the full pricing breakdown, notes, submitter identity, and
+//     decision reason - reduced to the agreed-price summary above.
+//   - payment:    the Stripe paymentIntentId and provider name. The top-level
+//     `paymentStatus` (the only field any list renders) is preserved.
+//
+// The three sub-documents are replaced with boolean existence markers
+// (hasInspection / hasQuote / hasRepair) so the client's deletion-eligibility
+// heuristic keeps the same information it always relied on without receiving any
+// sub-document body. Active-assignment fields (riderName/riderEmail) and every
+// top-level status/cost field are untouched. Pure: does not mutate its input.
+function projectSafeListParcel(parcel) {
+    const safe = stripDamageImages(parcel);
+    if (!safe || typeof safe !== 'object') {
+        return safe;
+    }
+    // eslint-disable-next-line no-unused-vars
+    const { assignmentHistory, inspection, repair, quote, payment, ...rest } = safe;
+    const projected = {
+        ...rest,
+        hasInspection: Boolean(inspection),
+        hasQuote: Boolean(quote),
+        hasRepair: Boolean(repair),
+    };
+    if (quote && typeof quote === 'object') {
+        projected.quote = summarizeQuoteForList(quote);
+    }
+    return projected;
+}
+
+module.exports = { stripDamageImages, projectSafeListParcel, summarizeQuoteForList };

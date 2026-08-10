@@ -12961,6 +12961,7 @@ async function runAllTests() {
     await testEmailVerificationMiddleware();
     await testTechnicianAssignmentDecisions();
     await testDamageProjectionHardening();
+    await testInspectionListProjectionTightening();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
@@ -13108,6 +13109,184 @@ async function testDamageProjectionHardening() {
         const techList = await getRider(techEmail);
         const techHist = (techList.body || []).find((p) => p.trackingId === `TEST-DP-HIST-${runId}`);
         logTest('11. Technician list never exposes assignmentHistory', !!techHist && !('assignmentHistory' in techHist));
+    } finally {
+        if (createdIds.length) await collections.parcels.deleteMany({ _id: { $in: createdIds } });
+        if (emails.length) await collections.users.deleteMany({ email: { $in: emails } });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inspection / Quote / Repair List Projection Tightening (Phase 8.5)
+//
+// The Phase 8.4 audit flagged that general LIST reads (GET /parcels, GET
+// /parcels/rider) still carried the full inspection/quote/repair sub-documents -
+// including inspection.internalNotes (customer-private), the submitting
+// technician's identity, the quote's full pricing breakdown + decision reason,
+// repair completion-evidence storage metadata, and the payment paymentIntentId.
+// projectSafeListParcel now strips all of those, replacing the sub-documents
+// with boolean existence markers (hasInspection/hasQuote/hasRepair) and reducing
+// the quote to the agreed-price summary the customer list actually renders.
+// These tests assert the strip AND that enough safe summary survives for the UI,
+// with no regression to the existing damage/assignmentHistory projections and no
+// change to the dedicated single-request read contract.
+// ---------------------------------------------------------------------------
+async function testInspectionListProjectionTightening() {
+    console.log('\n=== Inspection/Quote/Repair List Projection Tightening (Phase 8.5) ===');
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { projectSafeListParcel } = require('./utils/parcelProjection');
+
+    function fakeRes() {
+        return { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; } };
+    }
+
+    await connectDatabase();
+    const models = initializeModels(collections);
+    const controllers = initializeControllers(models, collections);
+    const parcelController = controllers.parcel;
+
+    const runId = Date.now();
+    const customerEmail = `ilp-customer-${runId}@test.local`;
+    const techEmail = `ilp-tech-${runId}@test.local`;
+    const adminEmail = `ilp-admin-${runId}@test.local`;
+    const createdIds = [];
+    const emails = [customerEmail, techEmail, adminEmail];
+
+    // Distinctive secret strings so a leak is detectable by a raw JSON scan.
+    // These are chosen NOT to collide with any legitimately-kept list field -
+    // in particular the technician email is deliberately NOT used as a marker,
+    // because riderEmail (which lists legitimately carry) equals that email.
+    // inspection.submittedByEmail is instead proven stripped by the absence of
+    // the whole `inspection` sub-document plus the internalNotes/diagnosis
+    // markers below.
+    const SECRETS = [
+        'INTERNAL-NOTES-SECRET',      // inspection.internalNotes
+        'QUOTE-NOTES-SECRET',         // quote.notes
+        'DECISION-REASON-SECRET',     // quote.decisionReason
+        'pi_SECRET_paymentintent',    // payment.paymentIntentId
+        'repair-evidence/SECRET',     // repair completion evidence storageKey
+        'DIAGNOSIS-SECRET',           // inspection.diagnosis
+    ];
+    function leaks(obj) {
+        const s = JSON.stringify(obj || {});
+        return SECRETS.some((k) => s.includes(k));
+    }
+
+    try {
+        await collections.users.insertMany([
+            { email: customerEmail, role: 'user', createdAt: new Date() },
+            { email: techEmail, role: 'rider', createdAt: new Date() },
+            { email: adminEmail, role: 'admin', createdAt: new Date() },
+        ]);
+
+        // A fully-progressed request carrying every sensitive sub-document.
+        const richDoc = {
+            schemaVersion: 2,
+            trackingId: `TEST-ILP-${runId}`,
+            senderEmail: customerEmail,
+            senderName: 'ILP Customer',
+            parcelName: 'Laptop',
+            product: { categorySlug: 'laptop', brand: 'Acme', model: 'X1' },
+            riderEmail: techEmail,
+            riderName: 'ILP Tech',
+            deliveryStatus: 'repair_in_progress',
+            paymentStatus: 'paid',
+            cost: 4500,
+            damage: { description: 'Cracked screen.', images: [{ storageKey: 'repair-requests/x/dmg.jpg', url: 'https://s/u', mimeType: 'image/jpeg', size: 1 }] },
+            inspection: {
+                status: 'submitted',
+                diagnosis: { summary: 'DIAGNOSIS-SECRET screen assembly', detectedIssues: [] },
+                repairability: { decision: 'repairable', reason: 'ok' },
+                estimate: { laborEstimate: 2000, partsEstimate: 2000, currency: 'BDT' },
+                internalNotes: 'INTERNAL-NOTES-SECRET do not show customer',
+                submittedAt: new Date(), submittedByRiderId: null, submittedByEmail: techEmail, version: 1,
+            },
+            quote: {
+                status: 'approved', laborAmount: 2000, partsAmount: 2000, additionalCharges: 500,
+                totalAmount: 4500, currency: 'BDT', notes: 'QUOTE-NOTES-SECRET internal',
+                submittedAt: new Date(), submittedByRiderId: null,
+                decidedAt: new Date(), decisionReason: 'DECISION-REASON-SECRET', version: 1,
+            },
+            repair: {
+                status: 'in_progress', startedAt: new Date(), progressUpdates: [{ id: 'p1', message: 'started', createdAt: new Date() }],
+                completion: { evidenceImages: [{ imageId: 'e1', storageKey: 'repair-evidence/SECRET/1.jpg', mimeType: 'image/jpeg', size: 2 }] }, version: 1,
+            },
+            payment: { status: 'completed', provider: 'stripe', paymentIntentId: 'pi_SECRET_paymentintent', amount: 4500, currency: 'BDT', quoteVersion: 1, completedAt: new Date() },
+            createdAt: new Date(),
+        };
+        const ins = await collections.parcels.insertOne(richDoc);
+        createdIds.push(ins.insertedId);
+        const id = ins.insertedId.toString();
+
+        const getAll = (email) => { const res = fakeRes(); return parcelController.getAllParcels({ query: {}, decoded_email: email }, res).then(() => res); };
+        const getRider = (email) => { const res = fakeRes(); return parcelController.getRiderParcels({ query: {}, decoded_email: email }, res).then(() => res); };
+        const getById = (email) => { const res = fakeRes(); return parcelController.getParcelById({ params: { id }, decoded_email: email }, res).then(() => res); };
+        const getAdmin = (email, query = {}) => { const res = fakeRes(); return parcelController.getAdminParcels({ query, decoded_email: email }, res).then(() => res); };
+
+        function itemSafe(item) {
+            return !!item
+                && !('inspection' in item)
+                && !('repair' in item)
+                && !('payment' in item)
+                && !('assignmentHistory' in item)
+                && !leaks(item);
+        }
+
+        // --- 1. Customer list: no inspection.internalNotes / detail sub-docs ---
+        let res = await getAll(customerEmail);
+        const custItem = (res.body || []).find((p) => p.trackingId === `TEST-ILP-${runId}`);
+        logTest('1. Customer GET /parcels list carries no inspection sub-document or internalNotes', res.statusCode === 200 && !!custItem && !('inspection' in custItem) && !JSON.stringify(custItem).includes('INTERNAL-NOTES-SECRET'));
+
+        // --- 2. Technician list: no internalNotes (dedicated endpoint is the only path) ---
+        res = await getRider(techEmail);
+        const techItem = (res.body || []).find((p) => p.trackingId === `TEST-ILP-${runId}`);
+        logTest('2. Technician GET /parcels/rider list carries no internalNotes/inspection sub-document', res.statusCode === 200 && !!techItem && !('inspection' in techItem) && !JSON.stringify(techItem).includes('INTERNAL-NOTES-SECRET'));
+
+        // --- 3. No storage/payment/quote internals leak on any general list item ---
+        logTest('3a. Customer list item leaks no storage/payment/quote/diagnosis internals', itemSafe(custItem));
+        logTest('3b. Technician list item leaks no storage/payment/quote/diagnosis internals', itemSafe(techItem));
+        logTest('3c. Repair completion-evidence storage metadata never appears on a list', !('repair' in custItem) && !JSON.stringify(custItem).includes('repair-evidence/SECRET'));
+        logTest('3d. payment.paymentIntentId (provider internal) never appears on a list', !('payment' in custItem) && !JSON.stringify(custItem).includes('pi_SECRET_paymentintent'));
+
+        // --- 4. Existence flags reflect reality (drives client deletion heuristic) ---
+        logTest('4a. Existence markers hasInspection/hasQuote/hasRepair are true when the stages exist', custItem.hasInspection === true && custItem.hasQuote === true && custItem.hasRepair === true);
+        // A brand-new pending-pickup request has none of the sub-documents.
+        const freshDoc = { schemaVersion: 2, trackingId: `TEST-ILP-FRESH-${runId}`, senderEmail: customerEmail, deliveryStatus: 'pending-pickup', damage: { description: 'x', images: [] }, createdAt: new Date() };
+        const freshIns = await collections.parcels.insertOne(freshDoc);
+        createdIds.push(freshIns.insertedId);
+        const freshList = await getAll(customerEmail);
+        const freshItem = (freshList.body || []).find((p) => p.trackingId === `TEST-ILP-FRESH-${runId}`);
+        logTest('4b. Existence markers are false for a brand-new pending-pickup request (still deletable client-side)', !!freshItem && freshItem.hasInspection === false && freshItem.hasQuote === false && freshItem.hasRepair === false && !('quote' in freshItem));
+
+        // --- 5. Enough safe summary survives for the UI (agreed-price + status) ---
+        logTest('5. Customer list keeps the agreed-price summary (quote status/totalAmount/currency) and top-level status/cost/paymentStatus', custItem.quote && custItem.quote.status === 'approved' && custItem.quote.totalAmount === 4500 && custItem.quote.currency === 'BDT' && !('laborAmount' in custItem.quote) && !('notes' in custItem.quote) && !('decisionReason' in custItem.quote) && custItem.deliveryStatus === 'repair_in_progress' && custItem.cost === 4500 && custItem.paymentStatus === 'paid');
+
+        // --- 6. Dedicated single-request read: sub-documents stripped, contract intact ---
+        res = await getById(customerEmail);
+        logTest('6a. GET /parcels/:id (owner) strips inspection/quote/repair/payment sub-documents', res.statusCode === 200 && !('inspection' in res.body) && !('quote' in res.body) && !('repair' in res.body) && !('payment' in res.body) && !leaks(res.body));
+        const otherRes = fakeRes();
+        await parcelController.getParcelById({ params: { id }, decoded_email: 'ilp-nobody@test.local' }, otherRes);
+        logTest('6b. GET /parcels/:id authorization unchanged (unauthorized caller still 403)', otherRes.statusCode === 403);
+        // The stored document itself is never mutated - dedicated endpoints still read the full data.
+        const stored = await collections.parcels.findOne({ _id: ins.insertedId });
+        logTest('6c. Projection does not mutate the stored document (dedicated endpoints unaffected)', stored.inspection.internalNotes === 'INTERNAL-NOTES-SECRET do not show customer' && stored.quote.laborAmount === 2000 && stored.payment.paymentIntentId === 'pi_SECRET_paymentintent');
+
+        // --- 7. No damage/assignment projection regression ---
+        logTest('7a. Damage images still reduced to a safe { description, imageCount } on the list', custItem.damage && !('images' in custItem.damage) && custItem.damage.imageCount === 1 && custItem.damage.description === 'Cracked screen.');
+        logTest('7b. assignmentHistory still absent from general list items', !('assignmentHistory' in custItem));
+
+        // --- Admin paginated management list stays tightly projected (safe by construction) ---
+        // Search by the unique trackingId so this lookup is deterministic
+        // regardless of how many other parcels the dev database holds (the list
+        // is paginated to ADMIN_LIST_DEFAULT_LIMIT, newest-first).
+        res = await getAdmin(adminEmail, { search: `TEST-ILP-${runId}` });
+        const adminItem = ((res.body && res.body.data) || []).find((p) => p.trackingId === `TEST-ILP-${runId}`);
+        logTest('8. Admin /admin/parcels list exposes only allow-listed fields (no inspection/quote/repair/payment internals)', res.statusCode === 200 && !!adminItem && !('inspection' in adminItem) && !('quote' in adminItem) && !('repair' in adminItem) && !('payment' in adminItem) && !leaks(adminItem));
+
+        // --- pure helper: existence markers + summary, no mutation ---
+        const pure = projectSafeListParcel(richDoc);
+        logTest('9. projectSafeListParcel is pure (input keeps its inspection/quote/repair/payment sub-documents)', richDoc.inspection && richDoc.quote && richDoc.repair && richDoc.payment && !('inspection' in pure) && pure.hasInspection === true);
     } finally {
         if (createdIds.length) await collections.parcels.deleteMany({ _id: { $in: createdIds } });
         if (emails.length) await collections.users.deleteMany({ email: { $in: emails } });
