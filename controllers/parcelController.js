@@ -5,6 +5,7 @@ const { generateSecureTrackingId } = require('../utils/trackingId');
 const { logTracking } = require('../middleware/logging');
 const { VALID_STATUSES, ACTIVE_STATUSES, ASSIGNMENT_PENDING, isValidTransition } = require('../utils/parcelStatus');
 const { validateRejectionReason, buildPendingAssignmentEntry, projectAssignmentForRole } = require('../utils/assignmentDecision');
+const { stripDamageImages, projectSafeListParcel } = require('../utils/parcelProjection');
 const { normalize } = require('../services/paymentProcessor');
 const { createNotificationService } = require('../services/notificationService');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
@@ -76,8 +77,11 @@ class ParcelController {
                 query.deliveryStatus = deliveryStatus;
             }
 
+            // BL-032: reduce damage.images to a safe { description, imageCount }
+            // aggregate on the list too - a general list must never carry raw
+            // storageKey/url metadata for any request it returns.
             const result = await this.Parcel.findAll(query);
-            res.send(result);
+            res.send(result.map(projectSafeListParcel));
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair requests', error: error.message });
         }
@@ -94,8 +98,9 @@ class ParcelController {
                 query.deliveryStatus = deliveryStatus;
             }
 
+            // BL-032: same damage-image strip for the technician assigned-jobs list.
             const result = await this.Parcel.findAll(query);
-            res.send(result);
+            res.send(result.map(projectSafeListParcel));
         } catch (error) {
             res.status(500).send({ message: 'Error fetching technician repair requests', error: error.message });
         }
@@ -139,8 +144,11 @@ class ParcelController {
             // rejection reasons - never served here. It is read only through the
             // dedicated, role-projected GET /parcels/:id/assignment. Current
             // active-assignment fields (riderName/riderEmail) remain as before.
+            // Phase 8.3 / BL-032: damage.images (raw storageKey/url/mimeType) is
+            // reduced to a safe { description, imageCount } aggregate here -
+            // images are served only through GET /parcels/:id/damage-images.
             const { inspection, quote, repair, assignmentHistory, ...safeParcel } = parcel;
-            res.send(safeParcel);
+            res.send(stripDamageImages(safeParcel));
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair request', error: error.message });
         }

@@ -11681,8 +11681,17 @@ async function testQuoteWorkflow() {
             logTest('37. quote_approved tracking event once', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: QUOTE_APPROVED })) === 1);
             const subNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:quote_submitted` }).toArray();
             logTest('40. Customer quote_submitted notification once', subNotif.length === 1 && subNotif[0].recipientEmail === ownerEmail);
-            const ser = JSON.stringify(subNotif[0]);
-            logTest('41. Notification carries no line-item/total/internal data', subNotif[0].message === 'Your repair quote is ready for review.' && !ser.includes('4500') && !('totalAmount' in subNotif[0]) && Object.keys(subNotif[0].metadata || {}).every((k) => k === 'trackingId'));
+            // Phase 8.3: assert the exact business invariant structurally rather
+            // than scanning the whole serialized document for the substring
+            // "4500" - a serialized Date/ObjectId could coincidentally contain
+            // those digits, producing a false failure. The real guarantee is
+            // that the notification's only content-bearing fields (message +
+            // metadata) carry no total/line-item/internal data, and no amount
+            // field exists on the record.
+            const notif = subNotif[0];
+            const metadataKeys = Object.keys(notif.metadata || {});
+            const noAmountFields = !('totalAmount' in notif) && !('amount' in notif) && !('laborAmount' in notif) && !('partsAmount' in notif) && !('additionalAmount' in notif);
+            logTest('41. Notification carries no line-item/total/internal data', notif.message === 'Your repair quote is ready for review.' && noAmountFields && metadataKeys.length === 1 && metadataKeys[0] === 'trackingId');
             const apprNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:quote_approved` }).toArray();
             logTest('37b. Technician quote_approved notification once', apprNotif.length === 1 && apprNotif[0].recipientEmail === techEmail && apprNotif[0].recipientRole === 'rider');
         }
@@ -12951,6 +12960,7 @@ async function runAllTests() {
     await testSafeRepairDeletion();
     await testEmailVerificationMiddleware();
     await testTechnicianAssignmentDecisions();
+    await testDamageProjectionHardening();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
@@ -12974,6 +12984,133 @@ async function runAllTests() {
     } else {
         console.log('⚠️  Some tests failed. Please review the output above.');
         process.exit(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Damage Projection Hardening (Phase 8.3 / BL-032)
+//
+// Proves the general parcel reads (GET /parcels/:id, GET /parcels, GET
+// /parcels/rider) never leak raw damage-image Storage metadata (storageKey,
+// url, mimeType) - only a safe { description, imageCount } aggregate. Images
+// stay available exclusively through the dedicated GET /parcels/:id/damage-images
+// endpoint (unchanged). Self-contained via direct inserts.
+// ---------------------------------------------------------------------------
+async function testDamageProjectionHardening() {
+    console.log('\n=== Damage Projection Hardening (Phase 8.3 / BL-032) ===');
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+    const { stripDamageImages } = require('./utils/parcelProjection');
+
+    function fakeRes() {
+        return { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; } };
+    }
+
+    await connectDatabase();
+    const models = initializeModels(collections);
+    const controllers = initializeControllers(models, collections);
+    const parcelController = controllers.parcel;
+
+    const runId = Date.now();
+    const customerEmail = `dp-customer-${runId}@test.local`;
+    const techEmail = `dp-tech-${runId}@test.local`;
+    const adminEmail = `dp-admin-${runId}@test.local`;
+    const otherEmail = `dp-other-${runId}@test.local`;
+    const createdIds = [];
+    const emails = [customerEmail, techEmail, adminEmail, otherEmail];
+
+    // Fields that must NEVER appear on a general-read damage projection.
+    const SECRET_KEYS = ['storageKey', 'url', 'mimeType', 'size', 'uploadedByRole', 'width', 'height', 'uploadedAt'];
+    function leaksSecret(obj) {
+        const s = JSON.stringify(obj || {});
+        return s.includes('repair-requests/') || s.includes('storageKey') || s.includes('signed-url') || SECRET_KEYS.some((k) => (obj && typeof obj === 'object' && k in obj));
+    }
+    function damageIsSafe(damage) {
+        if (!damage || typeof damage !== 'object') return false;
+        if ('images' in damage) return false;
+        if (typeof damage.imageCount !== 'number') return false;
+        return !leaksSecret(damage);
+    }
+
+    try {
+        await collections.users.insertMany([
+            { email: customerEmail, role: 'user', createdAt: new Date() },
+            { email: techEmail, role: 'rider', createdAt: new Date() },
+            { email: adminEmail, role: 'admin', createdAt: new Date() },
+            { email: otherEmail, role: 'user', createdAt: new Date() },
+        ]);
+        const rawImage = {
+            url: 'https://storage.example/signed-url?x=1',
+            storageKey: `repair-requests/${runId}/damage/${runId}.jpg`,
+            mimeType: 'image/jpeg', size: 12345, width: 800, height: 600,
+            uploadedAt: new Date(), uploadedByRole: 'owner',
+        };
+        const doc = {
+            schemaVersion: 2,
+            trackingId: `TEST-DP-${runId}`,
+            senderEmail: customerEmail,
+            riderEmail: techEmail,
+            deliveryStatus: 'parcel_picked_up',
+            damage: { description: 'Cracked screen after a drop.', images: [rawImage, { ...rawImage, storageKey: `${rawImage.storageKey}.2` }] },
+            createdAt: new Date(),
+        };
+        const ins = await collections.parcels.insertOne(doc);
+        createdIds.push(ins.insertedId);
+        const id = ins.insertedId.toString();
+
+        const getById = (email) => { const res = fakeRes(); return parcelController.getParcelById({ params: { id }, decoded_email: email }, res).then(() => res); };
+        const getAll = (email) => { const res = fakeRes(); return parcelController.getAllParcels({ query: {}, decoded_email: email }, res).then(() => res); };
+        const getRider = (email) => { const res = fakeRes(); return parcelController.getRiderParcels({ query: {}, decoded_email: email }, res).then(() => res); };
+
+        // --- pure helper ---
+        const stripped = stripDamageImages(doc);
+        logTest('1. stripDamageImages replaces images[] with a safe { description, imageCount }', damageIsSafe(stripped.damage) && stripped.damage.description === 'Cracked screen after a drop.' && stripped.damage.imageCount === 2);
+        logTest('2. stripDamageImages does not mutate the input', Array.isArray(doc.damage.images) && doc.damage.images.length === 2);
+
+        // --- getParcelById (owner / technician / admin) ---
+        let res = await getById(customerEmail);
+        logTest('3. Customer GET /parcels/:id exposes no raw damage image metadata', res.statusCode === 200 && damageIsSafe(res.body.damage) && res.body.damage.imageCount === 2);
+        res = await getById(techEmail);
+        logTest('4. Technician GET /parcels/:id exposes no raw damage image metadata', res.statusCode === 200 && damageIsSafe(res.body.damage));
+        res = await getById(adminEmail);
+        logTest('5. Admin GET /parcels/:id exposes no raw damage image metadata', res.statusCode === 200 && damageIsSafe(res.body.damage));
+        res = await getById(otherEmail);
+        logTest('6. Unauthorized caller still gets 403 (behavior preserved)', res.statusCode === 403);
+
+        // --- getAllParcels (customer list) ---
+        res = await getAll(customerEmail);
+        const mine = (res.body || []).find((p) => p.trackingId === `TEST-DP-${runId}`);
+        logTest('7. Customer GET /parcels list exposes no raw damage image metadata', res.statusCode === 200 && !!mine && damageIsSafe(mine.damage));
+
+        // --- getRiderParcels (technician list) ---
+        res = await getRider(techEmail);
+        const job = (res.body || []).find((p) => p.trackingId === `TEST-DP-${runId}`);
+        logTest('8. Technician GET /parcels/rider list exposes no raw damage image metadata', res.statusCode === 200 && !!job && damageIsSafe(job.damage));
+
+        // --- overall: no storageKey/url anywhere in any general read body ---
+        logTest('9. No storageKey/url string leaks in any general read body', !leaksSecret(await getById(customerEmail).then((r) => r.body)) && !JSON.stringify(mine).includes('storageKey') && !JSON.stringify(job).includes('repair-requests/'));
+
+        // --- assignmentHistory (Phase 8.2) never leaks through general lists ---
+        const histParcel = {
+            schemaVersion: 2, trackingId: `TEST-DP-HIST-${runId}`, senderEmail: customerEmail, riderEmail: techEmail,
+            deliveryStatus: 'assignment_pending',
+            damage: { description: 'x', images: [] },
+            assignmentHistory: [{ assignmentId: 'a1', riderEmail: techEmail, assignedBy: adminEmail, decision: 'rejected', rejectionReason: 'Private rejection note', decidedAt: new Date() }],
+            createdAt: new Date(),
+        };
+        const histIns = await collections.parcels.insertOne(histParcel);
+        createdIds.push(histIns.insertedId);
+        const custList = await getAll(customerEmail);
+        const custHist = (custList.body || []).find((p) => p.trackingId === `TEST-DP-HIST-${runId}`);
+        logTest('10. Customer list never exposes assignmentHistory (identities/rejection reasons)', !!custHist && !('assignmentHistory' in custHist) && !JSON.stringify(custHist).includes('Private rejection note'));
+        const techList = await getRider(techEmail);
+        const techHist = (techList.body || []).find((p) => p.trackingId === `TEST-DP-HIST-${runId}`);
+        logTest('11. Technician list never exposes assignmentHistory', !!techHist && !('assignmentHistory' in techHist));
+    } finally {
+        if (createdIds.length) await collections.parcels.deleteMany({ _id: { $in: createdIds } });
+        if (emails.length) await collections.users.deleteMany({ email: { $in: emails } });
     }
 }
 
