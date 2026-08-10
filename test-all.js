@@ -3172,7 +3172,10 @@ async function testP0AuthorizationFixes() {
         const ridersRes = await callGetAllRiders(ADMIN_EMAIL, {});
         const ALLOWED_RIDER_FIELDS = new Set([
             '_id', 'name', 'email', 'region', 'district', 'address',
-            'license', 'nid', 'bike', 'status', 'workStatus', 'createdAt'
+            'license', 'nid', 'bike', 'status', 'workStatus', 'createdAt',
+            // expertise is part of the Rider.findAll projection (Phase 6.3) and
+            // is rendered by ApproveTechnicians; it is a first-class allowed field.
+            'expertise'
         ]);
         const allFieldsAllowed = ridersRes.body.every(r => Object.keys(r).every(k => ALLOWED_RIDER_FIELDS.has(k)));
         logTest(
@@ -3327,7 +3330,11 @@ async function testTechnicianApprovalTransaction() {
             return parcelController.updateParcelStatus({ params: { id: parcelId }, body: { deliveryStatus: 'parcel_delivered' }, decoded_email: ADMIN_EMAIL }, r).then(() => r);
         }
 
-        async function createTestRider(marker, { status = 'pending', email, workStatus = 'available' } = {}) {
+        // Phase 8.7A: a matchable technician needs a valid, non-empty canonical
+        // expertise array (approval now gates on it). Default to one so existing
+        // approval-flow fixtures stay approvable; pass expertise: null to
+        // simulate a legacy/incomplete application that approval must block.
+        async function createTestRider(marker, { status = 'pending', email, workStatus = 'available', expertise = [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2 }] } = {}) {
             const doc = {
                 name: marker,
                 email: email || `${marker.toLowerCase()}@test.local`,
@@ -3341,6 +3348,7 @@ async function testTechnicianApprovalTransaction() {
                 workStatus,
                 createdAt: new Date()
             };
+            if (expertise) doc.expertise = expertise;
             const result = await collections.riders.insertOne(doc);
             createdRiderIds.push(result.insertedId.toString());
             return { id: result.insertedId.toString(), ...doc };
@@ -5368,12 +5376,15 @@ async function testTechnicianNotificationIntegration() {
         const riderController = controllers.rider;
         const parcelController = controllers.parcel;
 
+        // Phase 8.7A: approval now gates on a matchable profile, so pending
+        // fixtures carry a valid canonical expertise array by default.
         async function createTestRider(marker, { status = 'pending', email } = {}) {
             const doc = {
                 name: marker,
                 email: email || `${marker.toLowerCase()}-${runId}@test.local`,
                 region: 'Test Region', district: 'Test District', address: 'Test Address',
                 license: 'Test License', nid: 'TEST-NID-0000', bike: 'Test',
+                expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2 }],
                 status, workStatus: 'available', createdAt: new Date()
             };
             const result = await collections.riders.insertOne(doc);
@@ -5428,7 +5439,8 @@ async function testTechnicianNotificationIntegration() {
         const applicantEmail1 = `test-unit3-applicant-${runId}@test.local`;
         const createRes = await callCreateRider({
             name: `TEST-UNIT3-SUBMIT-${runId}`, email: applicantEmail1, region: 'R', district: 'D', address: 'A',
-            license: 'L', nid: 'N', bike: 'B'
+            license: 'L', nid: 'N', bike: 'B',
+            expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2 }]
         });
         const createdRiderId = createRes.body.insertedId.toString();
         createdRiderIds.push(createdRiderId);
@@ -5456,7 +5468,7 @@ async function testTechnicianNotificationIntegration() {
         };
         let noAdminRes;
         try {
-            noAdminRes = await callCreateRider({ name: `TEST-UNIT3-NOADMIN-${runId}`, email: `test-unit3-noadmin-${runId}@test.local`, region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B' });
+            noAdminRes = await callCreateRider({ name: `TEST-UNIT3-NOADMIN-${runId}`, email: `test-unit3-noadmin-${runId}@test.local`, region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B', expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2 }] });
         } finally {
             collections.users.find = originalUsersFind;
         }
@@ -5472,7 +5484,7 @@ async function testTechnicianNotificationIntegration() {
         };
         let lookupFailRes;
         try {
-            lookupFailRes = await callCreateRider({ name: `TEST-UNIT3-LOOKUPFAIL-${runId}`, email: `test-unit3-lookupfail-${runId}@test.local`, region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B' });
+            lookupFailRes = await callCreateRider({ name: `TEST-UNIT3-LOOKUPFAIL-${runId}`, email: `test-unit3-lookupfail-${runId}@test.local`, region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B', expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2 }] });
         } finally {
             collections.users.find = originalUsersFind;
         }
@@ -5489,7 +5501,7 @@ async function testTechnicianNotificationIntegration() {
         };
         let notifFailRes;
         try {
-            notifFailRes = await callCreateRider({ name: `TEST-UNIT3-NOTIFFAIL-${runId}`, email: `test-unit3-notiffail-${runId}@test.local`, region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B' });
+            notifFailRes = await callCreateRider({ name: `TEST-UNIT3-NOTIFFAIL-${runId}`, email: `test-unit3-notiffail-${runId}@test.local`, region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B', expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2 }] });
         } finally {
             collections.notifications.insertOne = originalNotifInsertOne;
         }
@@ -8254,13 +8266,19 @@ async function testTechnicianExpertise() {
         );
 
         // ================= Rider application behavior (19-21) =================
+        // Phase 8.7A: a new application now REQUIRES a valid, non-empty canonical
+        // expertise array (so an approved applicant is actually matchable). An
+        // application without expertise is rejected and nothing is persisted.
         const applicantEmailNoExpertise = `test-expertise-applicant-noexp-${runId}@test.local`;
+        const noExpertiseCountBefore = await collections.riders.countDocuments({ email: applicantEmailNoExpertise });
         const createNoExpertiseRes = await callCreateRider({
             name: `TEST-EXPERTISE-APPLY-NOEXP-${runId}`, email: applicantEmailNoExpertise,
             region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B'
         });
-        createdRiderIds.push(createNoExpertiseRes.body.insertedId.toString());
-        logTest('19. New rider without expertise remains accepted', createNoExpertiseRes.body.acknowledged === true);
+        const noExpertiseCountAfter = await collections.riders.countDocuments({ email: applicantEmailNoExpertise });
+        logTest('19. New rider without expertise is rejected, nothing persisted',
+            createNoExpertiseRes.statusCode === 400 && createNoExpertiseRes.body.code === 'MISSING_EXPERTISE' &&
+            noExpertiseCountBefore === 0 && noExpertiseCountAfter === 0);
 
         const applicantEmailValidExpertise = `test-expertise-applicant-valid-${runId}@test.local`;
         const createValidExpertiseRes = await callCreateRider({
@@ -12962,6 +12980,7 @@ async function runAllTests() {
     await testTechnicianAssignmentDecisions();
     await testDamageProjectionHardening();
     await testInspectionListProjectionTightening();
+    await testTechnicianMatchingProfileFlow();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
@@ -13290,6 +13309,244 @@ async function testInspectionListProjectionTightening() {
     } finally {
         if (createdIds.length) await collections.parcels.deleteMany({ _id: { $in: createdIds } });
         if (emails.length) await collections.users.deleteMany({ email: { $in: emails } });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Technician Matching Profile Flow (Phase 8.7A)
+//
+// End-to-end coverage for the onboarding -> matching integration fix: the
+// application intake (createRider) now allow-lists the body and requires a
+// valid, non-empty canonical expertise array + service-area profile; admin
+// approval (updateRiderStatus) gates on a matchable profile and initializes
+// workStatus server-side; and an approved applicant then actually appears in the
+// eligible-technician recommendations. Exercised directly against the DB-backed
+// controllers, with its own namespaced fixtures and cleanup.
+// ---------------------------------------------------------------------------
+async function testTechnicianMatchingProfileFlow() {
+    console.log('\n=== Technician Matching Profile Flow (Phase 8.7A) ===');
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+
+    function fakeRes() {
+        return { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; } };
+    }
+
+    await connectDatabase();
+    const models = initializeModels(collections);
+    const controllers = initializeControllers(models, collections);
+    const riderController = controllers.rider;
+    const parcelController = controllers.parcel;
+
+    const runId = Date.now();
+    const customerEmail = `tmp-customer-${runId}@test.local`;
+    const adminEmail = `tmp-admin-${runId}@test.local`;
+    const createdRiderIds = [];
+    const createdUserEmails = [customerEmail, adminEmail];
+    const createdParcelIds = [];
+    const createdServiceDefinitionIds = [];
+    const createdTrackingIds = [];
+
+    // Expert level satisfies any seeded requiredExpertiseLevel, so matching does
+    // not depend on the exact level of the (seeded) service definition reused below.
+    const validExpertise = () => [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'expert', experienceYears: 7 }];
+    const baseApplication = (overrides = {}) => ({
+        name: `TMP Tech ${runId}`, email: `tmp-tech-${runId}@test.local`,
+        region: 'Dhaka', district: 'Dhaka', address: '1 Test Rd', nid: 'TMP-NID', expertise: validExpertise(),
+        ...overrides
+    });
+
+    const callCreateRider = (body) => { const res = fakeRes(); return riderController.createRider({ body }, res).then(() => res); };
+    const callUpdate = (id, body, email = adminEmail) => { const res = fakeRes(); return riderController.updateRiderStatus({ params: { id }, body, decoded_email: email }, res).then(() => res); };
+    const callCreateParcel = (body, email) => { const res = fakeRes(); return parcelController.createParcel({ body, decoded_email: email }, res).then(() => res); };
+    const callGetEligible = (id, email) => { const res = fakeRes(); return parcelController.getEligibleTechnicians({ params: { id }, query: {}, decoded_email: email }, res).then(() => res); };
+
+    try {
+        await collections.users.insertMany([
+            { email: customerEmail, role: 'user', createdAt: new Date() },
+            { email: adminEmail, role: 'admin', createdAt: new Date() },
+        ]);
+
+        const now = new Date();
+        // (productCategorySlug, repairCategorySlug) is uniquely indexed and the
+        // canonical smartphone/display-screen definition is already seeded, so
+        // reuse the seeded active definition when present, and only insert a
+        // synthetic one if this environment has none.
+        async function ensureServiceDefinition(productCategorySlug, repairCategorySlug) {
+            const existing = await collections.serviceDefinitions.findOne({ productCategorySlug, repairCategorySlug, isActive: true });
+            if (existing) return existing._id.toString();
+            const ins = await collections.serviceDefinitions.insertOne({
+                productCategorySlug, repairCategorySlug,
+                label: `TMP-SERVICE-${productCategorySlug}-${repairCategorySlug}-${runId}`, description: 'Synthetic service definition for Phase 8.7A.', isActive: true,
+                pricingRule: { currency: 'usd', baseMin: 25, baseMax: 75, inspectionFee: 10, version: 1 },
+                requiredExpertiseLevel: 'intermediate', estimatedDurationMinutes: 45,
+                inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true },
+                createdAt: now, updatedAt: now,
+            });
+            createdServiceDefinitionIds.push(ins.insertedId);
+            return ins.insertedId.toString();
+        }
+        const serviceDefId = await ensureServiceDefinition('smartphone', 'display-screen');
+
+        const trackApplicant = (res) => { if (res.body && res.body.insertedId) createdRiderIds.push(res.body.insertedId.toString()); return res; };
+
+        // ================= APPLICATION (1-10) =================
+        let res = trackApplicant(await callCreateRider(baseApplication()));
+        const app1Doc = res.body.insertedId ? await collections.riders.findOne({ _id: res.body.insertedId }) : null;
+        logTest('1. Valid canonical expertise application accepted and persisted', res.statusCode === 200 && !!app1Doc && Array.isArray(app1Doc.expertise) && app1Doc.expertise[0].productCategorySlug === 'smartphone');
+
+        res = trackApplicant(await callCreateRider(baseApplication({
+            email: `tmp-tech-multi-${runId}@test.local`,
+            expertise: [
+                { productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2 },
+                { productCategorySlug: 'laptop-computer', repairCategorySlugs: ['charging-port'], level: 'advanced', experienceYears: 5 },
+            ]
+        })));
+        const app2Doc = res.body.insertedId ? await collections.riders.findOne({ _id: res.body.insertedId }) : null;
+        logTest('2. Multiple distinct expertise entries accepted', res.statusCode === 200 && !!app2Doc && app2Doc.expertise.length === 2);
+
+        res = await callCreateRider(baseApplication({
+            email: `tmp-tech-dup-${runId}@test.local`,
+            expertise: [
+                { productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2 },
+                { productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'advanced', experienceYears: 5 },
+            ]
+        }));
+        logTest('3. Duplicate product across entries rejected (canonical validator)', res.statusCode === 400 && res.body.code === 'DUPLICATE_PRODUCT_EXPERTISE');
+
+        res = await callCreateRider(baseApplication({ email: `tmp-tech-empty-${runId}@test.local`, expertise: [] }));
+        logTest('4. Empty expertise array rejected', res.statusCode === 400 && res.body.code === 'MISSING_EXPERTISE');
+
+        res = await callCreateRider(baseApplication({ email: `tmp-tech-noexp-${runId}@test.local`, expertise: undefined }));
+        logTest('5. Missing expertise rejected', res.statusCode === 400 && res.body.code === 'MISSING_EXPERTISE');
+
+        res = await callCreateRider(baseApplication({ email: `tmp-tech-unknown-${runId}@test.local`, expertise: [{ productCategorySlug: 'not-a-real-product', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2 }] }));
+        logTest('6. Unknown product category rejected', res.statusCode === 400 && res.body.code === 'INVALID_PRODUCT_CATEGORY');
+
+        res = await callCreateRider(baseApplication({ email: `tmp-tech-malformed-${runId}@test.local`, expertise: 'not-an-array' }));
+        logTest('7. Malformed expertise (not an array) rejected', res.statusCode === 400 && res.body.code === 'MISSING_EXPERTISE');
+
+        const missingRegionCountBefore = await collections.riders.countDocuments({ email: `tmp-tech-noregion-${runId}@test.local` });
+        res = await callCreateRider(baseApplication({ email: `tmp-tech-noregion-${runId}@test.local`, region: '   ' }));
+        const missingRegionCountAfter = await collections.riders.countDocuments({ email: `tmp-tech-noregion-${runId}@test.local` });
+        logTest('8. Missing service-area field (region) rejected, nothing persisted', res.statusCode === 400 && res.body.code === 'MISSING_APPLICATION_FIELD' && missingRegionCountBefore === 0 && missingRegionCountAfter === 0);
+
+        res = trackApplicant(await callCreateRider(baseApplication({ email: `tmp-tech-wsinject-${runId}@test.local`, workStatus: 'in_delivery', status: 'approved' })));
+        const wsDoc = res.body.insertedId ? await collections.riders.findOne({ _id: res.body.insertedId }) : null;
+        logTest('9. Client workStatus/status ignored (status forced to pending, no client workStatus persisted)', res.statusCode === 200 && !!wsDoc && wsDoc.status === 'pending' && wsDoc.workStatus === undefined);
+
+        res = trackApplicant(await callCreateRider(baseApplication({ email: `tmp-tech-massassign-${runId}@test.local`, role: 'admin', approved: true, riderId: 'x', rating: 5, isAdmin: true })));
+        const maDoc = res.body.insertedId ? await collections.riders.findOne({ _id: res.body.insertedId }) : null;
+        logTest('10. Authoritative fields cannot be mass-assigned (role/approved/riderId/rating/isAdmin dropped)', res.statusCode === 200 && !!maDoc && maDoc.role === undefined && maDoc.approved === undefined && maDoc.riderId === undefined && maDoc.rating === undefined && maDoc.isAdmin === undefined);
+
+        // ================= APPROVAL (11-16) =================
+        const approveEmail = `tmp-approve-${runId}@test.local`;
+        createdUserEmails.push(approveEmail);
+        await collections.users.insertOne({ email: approveEmail, role: 'user', createdAt: new Date() });
+        const applyRes = trackApplicant(await callCreateRider(baseApplication({ email: approveEmail })));
+        const applyId = applyRes.body.insertedId.toString();
+        const approveRes = await callUpdate(applyId, { status: 'approved' });
+        const approvedDoc = await collections.riders.findOne({ _id: new ObjectId(applyId) });
+        const approvedUser = await collections.users.findOne({ email: approveEmail });
+        logTest('11. Approved technician keeps canonical expertise', approveRes.statusCode === 200 && Array.isArray(approvedDoc.expertise) && approvedDoc.expertise[0].productCategorySlug === 'smartphone');
+        logTest('12. Approved technician keeps canonical service area (region/district)', approvedDoc.region === 'Dhaka' && approvedDoc.district === 'Dhaka');
+        logTest('13. Approval initializes workStatus=available server-side and links the rider role', approvedDoc.workStatus === 'available' && approvedUser.role === 'rider');
+
+        // Existing actively-assigned rider: reapproval must NOT reset workStatus.
+        const activeEmail = `tmp-active-${runId}@test.local`;
+        createdUserEmails.push(activeEmail);
+        await collections.users.insertOne({ email: activeEmail, role: 'rider', createdAt: new Date() });
+        const activeRiderInsert = await collections.riders.insertOne({ name: `TMP-ACTIVE-${runId}`, email: activeEmail, region: 'Dhaka', district: 'Dhaka', status: 'approved', workStatus: 'in_delivery', expertise: validExpertise(), createdAt: new Date() });
+        createdRiderIds.push(activeRiderInsert.insertedId.toString());
+        const activeParcelInsert = await collections.parcels.insertOne({ schemaVersion: 2, trackingId: `TMP-ACTIVE-${runId}`, senderEmail: customerEmail, deliveryStatus: 'driver_assigned', riderId: activeRiderInsert.insertedId.toString(), createdAt: new Date() });
+        createdParcelIds.push(activeParcelInsert.insertedId.toString());
+        createdTrackingIds.push(`TMP-ACTIVE-${runId}`);
+        await callUpdate(activeRiderInsert.insertedId.toString(), { status: 'approved' });
+        const activeAfter = await collections.riders.findOne({ _id: activeRiderInsert.insertedId });
+        logTest('14. Reapproving an actively-assigned technician preserves in_delivery (not reset to available)', activeAfter.workStatus === 'in_delivery');
+
+        // Legacy incomplete application: approval blocked.
+        const legacyEmail = `tmp-legacy-${runId}@test.local`;
+        createdUserEmails.push(legacyEmail);
+        await collections.users.insertOne({ email: legacyEmail, role: 'user', createdAt: new Date() });
+        const legacyInsert = await collections.riders.insertOne({ name: `TMP-LEGACY-${runId}`, email: legacyEmail, region: 'Dhaka', district: 'Dhaka', status: 'pending', createdAt: new Date() });
+        createdRiderIds.push(legacyInsert.insertedId.toString());
+        const legacyApproveRes = await callUpdate(legacyInsert.insertedId.toString(), { status: 'approved' });
+        const legacyAfter = await collections.riders.findOne({ _id: legacyInsert.insertedId });
+        const legacyUserAfter = await collections.users.findOne({ email: legacyEmail });
+        logTest('15. Legacy incomplete application cannot be approved (409 INCOMPLETE_TECHNICIAN_PROFILE)', legacyApproveRes.statusCode === 409 && legacyApproveRes.body.code === 'INCOMPLETE_TECHNICIAN_PROFILE');
+        logTest('16. Blocked approval leaves no partial state (rider stays pending, user stays user)', legacyAfter.status === 'pending' && legacyUserAfter.role === 'user');
+
+        // ================= MATCHING (17-22) =================
+        const parcelRes = await callCreateParcel({
+            schemaVersion: 2, product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
+            service: { definitionId: serviceDefId }, damage: { description: 'Cracked display after a drop, needs replacement.' },
+            serviceLocation: { region: 'Dhaka', district: 'Dhaka', address: '9 Test Ave' }
+        }, customerEmail);
+        const matchParcelId = parcelRes.body.insertedId.toString();
+        createdParcelIds.push(matchParcelId);
+        if (parcelRes.body.trackingId) createdTrackingIds.push(parcelRes.body.trackingId);
+
+        const eligibleRes = await callGetEligible(matchParcelId, adminEmail);
+        const eligibleIds = (eligibleRes.body.technicians || []).map((t) => t.technicianId);
+        logTest('17. Application -> approval -> technician appears in eligible-technician recommendations', eligibleRes.statusCode === 200 && eligibleIds.includes(applyId));
+
+        // Nonmatching expertise: a parcel for a product the technician lacks
+        // (refrigerator; the applicant only has smartphone expertise).
+        const otherDefId = await ensureServiceDefinition('refrigerator', 'compressor-cooling');
+        const mismatchParcelRes = await callCreateParcel({
+            schemaVersion: 2, product: { categorySlug: 'refrigerator', brand: 'B', model: 'M' },
+            service: { definitionId: otherDefId }, damage: { description: 'Refrigerator is not cooling and runs constantly.' },
+            serviceLocation: { region: 'Dhaka', district: 'Dhaka', address: '9 Test Ave' }
+        }, customerEmail);
+        const mismatchParcelId = mismatchParcelRes.body.insertedId.toString();
+        createdParcelIds.push(mismatchParcelId);
+        if (mismatchParcelRes.body.trackingId) createdTrackingIds.push(mismatchParcelRes.body.trackingId);
+        const mismatchRes = await callGetEligible(mismatchParcelId, adminEmail);
+        const mismatchIds = (mismatchRes.body.technicians || []).map((t) => t.technicianId);
+        logTest('18. Non-matching expertise excludes the technician from recommendations', !mismatchIds.includes(applyId));
+
+        // Service area is a RANKING factor, never a hard gate: a complete-profile
+        // technician in a different region is still eligible (Phase 8.7A does not
+        // change assignment semantics - it only fixes onboarding -> matching).
+        const otherRegionEmail = `tmp-otherregion-${runId}@test.local`;
+        createdUserEmails.push(otherRegionEmail);
+        await collections.users.insertOne({ email: otherRegionEmail, role: 'rider', createdAt: new Date() });
+        const otherRegionInsert = await collections.riders.insertOne({ name: `TMP-OTHERREGION-${runId}`, email: otherRegionEmail, region: 'Chittagong', district: 'Chittagong', status: 'approved', workStatus: 'available', expertise: validExpertise(), createdAt: new Date() });
+        createdRiderIds.push(otherRegionInsert.insertedId.toString());
+        const areaRes = await callGetEligible(matchParcelId, adminEmail);
+        const areaIds = (areaRes.body.technicians || []).map((t) => t.technicianId);
+        logTest('19. Service area affects ranking only - a different-region complete profile stays eligible', areaIds.includes(otherRegionInsert.insertedId.toString()));
+
+        // Busy technician (workStatus in_delivery) is excluded.
+        await collections.riders.updateOne({ _id: new ObjectId(applyId) }, { $set: { workStatus: 'in_delivery' } });
+        const busyRes = await callGetEligible(matchParcelId, adminEmail);
+        const busyIds = (busyRes.body.technicians || []).map((t) => t.technicianId);
+        logTest('20. Busy technician (workStatus in_delivery) is excluded', !busyIds.includes(applyId));
+
+        // Technician holding an active assignment is excluded even if workStatus drifts to available.
+        const heldParcelInsert = await collections.parcels.insertOne({ schemaVersion: 2, trackingId: `TMP-HELD-${runId}`, senderEmail: customerEmail, deliveryStatus: 'assignment_pending', riderId: applyId, createdAt: new Date() });
+        createdParcelIds.push(heldParcelInsert.insertedId.toString());
+        createdTrackingIds.push(`TMP-HELD-${runId}`);
+        await collections.riders.updateOne({ _id: new ObjectId(applyId) }, { $set: { workStatus: 'available' } });
+        const heldRes = await callGetEligible(matchParcelId, adminEmail);
+        const heldIds = (heldRes.body.technicians || []).map((t) => t.technicianId);
+        logTest('21. Technician with an active (assignment_pending) assignment is excluded', !heldIds.includes(applyId));
+
+        // Release the assignment -> eligible again.
+        await collections.parcels.deleteOne({ _id: heldParcelInsert.insertedId });
+        const releasedRes = await callGetEligible(matchParcelId, adminEmail);
+        const releasedIds = (releasedRes.body.technicians || []).map((t) => t.technicianId);
+        logTest('22. Released technician (no active assignment, available) is eligible again', releasedIds.includes(applyId));
+    } finally {
+        if (createdRiderIds.length) await collections.riders.deleteMany({ _id: { $in: createdRiderIds.map((x) => new ObjectId(x)) } });
+        if (createdParcelIds.length) await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((x) => new ObjectId(x)) } });
+        if (createdServiceDefinitionIds.length) await collections.serviceDefinitions.deleteMany({ _id: { $in: createdServiceDefinitionIds } });
+        if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        await collections.users.deleteMany({ email: { $regex: `^tmp-tech.*-${runId}@test.local$` } });
+        if (createdTrackingIds.length) await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
     }
 }
 

@@ -6,6 +6,41 @@ const { REQUESTABLE_STATUSES, ROLE_FOR_STATUS, isValidRiderTransition } = requir
 const { ACTIVE_STATUSES } = require('../utils/parcelStatus');
 const { validateTechnicianExpertise, normalizeTechnicianExpertise } = require('../utils/technicianExpertise');
 
+// Explicit allow-list for the (unauthenticated) technician-application body
+// (Phase 8.7A mass-assignment protection). ONLY these applicant-supplied
+// profile fields are ever persisted from POST /riders. Operational and
+// authoritative fields are never taken from the client: `status` is forced to
+// 'pending' by the Rider model, `workStatus` is initialized server-side only on
+// approval, `role` lives on the users collection and changes only through the
+// admin approval transaction, and anything else a caller tries to inject
+// (approved, riderId, ratings, moderation flags, ...) is simply dropped here.
+const APPLICATION_ALLOWED_FIELDS = ['name', 'email', 'phone', 'region', 'district', 'address', 'nid', 'expertise'];
+
+// Identity + matching-critical fields a new application must provide so the
+// resulting technician can actually be matched (the eligible-technician matcher
+// requires a complete name/region/district profile AND a non-empty valid
+// expertise array - see services/technicianEligibilityService.js).
+const REQUIRED_APPLICATION_FIELDS = ['name', 'email', 'region', 'district'];
+
+function isNonEmptyString(value) {
+    return typeof value === 'string' && value.trim().length > 0;
+}
+
+// A technician record has a "matchable profile" when it carries everything the
+// eligible-technician matcher treats as a hard requirement: a complete
+// name/region/district profile and a valid, non-empty canonical expertise
+// array. Used both to validate a new application and to gate admin approval so
+// a legacy/incomplete application can never be approved into an unmatchable
+// technician.
+function hasMatchableProfile(rider) {
+    return isNonEmptyString(rider.name)
+        && isNonEmptyString(rider.region)
+        && isNonEmptyString(rider.district)
+        && Array.isArray(rider.expertise)
+        && rider.expertise.length > 0
+        && validateTechnicianExpertise(rider.expertise).valid;
+}
+
 class RiderController {
     constructor(models, collections) {
         this.Rider = models.Rider;
@@ -88,25 +123,48 @@ class RiderController {
         }
     }
 
-    // expertise is optional on application (Phase 6.3 Unit 3) - a legacy
-    // request body without it is accepted exactly as before (the field is
-    // simply omitted from the persisted document, indistinguishable from an
-    // existing legacy rider). When present, it is validated strictly and
-    // normalized before persisting; every other field in the body remains
-    // completely unvalidated, matching this route's existing behavior.
+    // Technician application intake (Phase 8.7A). This route is unauthenticated
+    // (routes/riders.js), so the body is treated as fully untrusted: it is
+    // reduced to an explicit allow-list (APPLICATION_ALLOWED_FIELDS) before
+    // anything is persisted - no client-supplied status/workStatus/role/riderId
+    // or moderation field can ride along. The application must now provide the
+    // information the eligible-technician matcher requires (name/region/district
+    // + a valid, non-empty canonical expertise array), so an approved applicant
+    // becomes matchable without any manual database edit. Legacy riders already
+    // in the collection without expertise are untouched here - approval-time
+    // gating (updateRiderStatus) handles them.
     async createRider(req, res) {
         try {
-            const rider = req.body;
+            const body = req.body || {};
 
-            if (rider.expertise !== undefined) {
-                const validation = validateTechnicianExpertise(rider.expertise);
-                if (!validation.valid) {
-                    return res.status(400).send({ message: validation.message, code: validation.code });
+            // 1. Allow-list projection (mass-assignment protection).
+            const application = {};
+            for (const field of APPLICATION_ALLOWED_FIELDS) {
+                if (body[field] !== undefined) {
+                    application[field] = typeof body[field] === 'string' ? body[field].trim() : body[field];
                 }
-                rider.expertise = normalizeTechnicianExpertise(rider.expertise);
             }
 
-            const result = await this.Rider.create(rider);
+            // 2. Required identity + matching profile fields.
+            for (const field of REQUIRED_APPLICATION_FIELDS) {
+                if (!isNonEmptyString(application[field])) {
+                    return res.status(400).send({ message: `${field} is required`, code: 'MISSING_APPLICATION_FIELD' });
+                }
+            }
+
+            // 3. Expertise is required, and must be a valid, non-empty canonical
+            //    array (an empty array passes the shape validator, so reject it
+            //    explicitly before deferring to the canonical validator).
+            if (!Array.isArray(application.expertise) || application.expertise.length === 0) {
+                return res.status(400).send({ message: 'at least one area of expertise is required', code: 'MISSING_EXPERTISE' });
+            }
+            const validation = validateTechnicianExpertise(application.expertise);
+            if (!validation.valid) {
+                return res.status(400).send({ message: validation.message, code: validation.code });
+            }
+            application.expertise = normalizeTechnicianExpertise(application.expertise);
+
+            const result = await this.Rider.create(application);
 
             // Best-effort admin fan-out - this route is unauthenticated
             // (routes/riders.js), so there is no req.decoded_email; the actor
@@ -115,7 +173,7 @@ class RiderController {
             // lookup or notification failure here must never fail
             // technician application creation, since the application itself
             // has already been durably created above.
-            await this.notifyAdminsOfNewApplication(rider, result.insertedId);
+            await this.notifyAdminsOfNewApplication(application, result.insertedId);
 
             res.send(result);
         } catch (error) {
@@ -284,6 +342,25 @@ class RiderController {
                     // technician-application action.
                     if (linkedUser.role === 'admin') {
                         outcome = { httpStatus: 409, code: 'LINKED_USER_ROLE_CONFLICT', message: 'linked user has an admin role and will not be modified' };
+                        return;
+                    }
+
+                    // Phase 8.7A: never approve an application into an
+                    // unmatchable technician. Approval requires a complete
+                    // matching profile (name/region/district + a valid,
+                    // non-empty canonical expertise array) - the exact hard
+                    // requirements the eligible-technician matcher enforces. A
+                    // legacy/incomplete application must have its expertise and
+                    // service-area completed first (via the technician/admin
+                    // expertise-update path) before it can be approved; blocking
+                    // here is strictly safer than creating a technician who can
+                    // never be matched. Only gates the approval transition -
+                    // rejection of an incomplete application is always allowed.
+                    if (requestedStatus === 'approved' && !hasMatchableProfile(technician)) {
+                        outcome = {
+                            httpStatus: 409, code: 'INCOMPLETE_TECHNICIAN_PROFILE',
+                            message: 'technician application is missing the expertise or service-area information required for matching'
+                        };
                         return;
                     }
 
