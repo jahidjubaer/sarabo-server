@@ -47,6 +47,18 @@ const PAYMENT_COMPLETED = 'payment_completed';
 const REPAIR_IN_PROGRESS = 'repair_in_progress';
 const REPAIR_COMPLETED = 'repair_completed';
 
+// Technician assignment decision (Phase 8.2). A V2 request an admin has
+// offered to a technician who has NOT yet accepted. Deliberately NOT part of
+// VALID_STATUSES: the generic PATCH /parcels/:id/status can neither set it nor
+// leave it (assignment_pending has no ALLOWED_TRANSITIONS entry below, and
+// driver_assigned has no inbound generic transition), so the ONLY authorities
+// for the assignment_pending -> driver_assigned (accept) and assignment_pending
+// -> pending-pickup (reject) transitions are the dedicated, atomic
+// accept/reject endpoints. It IS active below: the offered technician is
+// reserved (workStatus in_delivery) and must not be double-booked while the
+// decision is pending.
+const ASSIGNMENT_PENDING = 'assignment_pending';
+
 // The subset of statuses that represent a technician actively holding a
 // repair request - i.e. every status between assignment and completion,
 // including inspection_completed, the quote states, payment_completed, and
@@ -54,12 +66,18 @@ const REPAIR_COMPLETED = 'repair_completed';
 // Used by assignRiderToParcel (Phase 6.2 Unit 2) and technicianEligibilityService
 // to find any request still occupying a technician's single active-assignment slot.
 const ACTIVE_STATUSES = [
+    ASSIGNMENT_PENDING,
     ...VALID_STATUSES.filter((status) => status !== 'parcel_delivered'),
     INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, PAYMENT_COMPLETED, REPAIR_IN_PROGRESS
 ];
 
-// Maps a parcel's current deliveryStatus to the statuses it may move to next.
+// Maps a parcel's current deliveryStatus to the statuses it may move to next
+// via the GENERIC PATCH path. assignment_pending is present with an empty list
+// so the generic path can never leave it (accept/reject endpoints own that);
+// driver_assigned is never a generic target (no entry lists it as `next`), so
+// the accept endpoint is the sole authority that produces it.
 const ALLOWED_TRANSITIONS = {
+    assignment_pending: [],
     driver_assigned: ['rider_arriving'],
     rider_arriving: ['parcel_picked_up'],
     parcel_picked_up: ['parcel_delivered'],
@@ -71,4 +89,4 @@ function isValidTransition(currentStatus, nextStatus) {
     return Array.isArray(allowedNext) && allowedNext.includes(nextStatus);
 }
 
-module.exports = { VALID_STATUSES, ACTIVE_STATUSES, INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, PAYMENT_COMPLETED, REPAIR_IN_PROGRESS, REPAIR_COMPLETED, isValidTransition };
+module.exports = { VALID_STATUSES, ACTIVE_STATUSES, ASSIGNMENT_PENDING, INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, PAYMENT_COMPLETED, REPAIR_IN_PROGRESS, REPAIR_COMPLETED, isValidTransition };

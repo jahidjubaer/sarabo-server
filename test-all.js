@@ -9540,17 +9540,19 @@ async function testAssignmentExpertiseRevalidation() {
         const notifCountBefore = await collections.notifications.countDocuments({});
         const eligibleAssignRes = await callAssign(eligibleParcelId, eligibleRider.id, adminEmail);
         logTest(
-            '4. Eligible v2 technician assignment succeeds',
+            '4. Eligible v2 technician assignment succeeds (Phase 8.2: OFFERED - assignment_pending)',
             eligibleAssignRes.statusCode === 200 &&
-            JSON.stringify(eligibleAssignRes.body) === JSON.stringify({ acknowledged: true, matchedCount: 1, modifiedCount: 1, deliveryStatus: 'driver_assigned' })
+            JSON.stringify(eligibleAssignRes.body) === JSON.stringify({ acknowledged: true, matchedCount: 1, modifiedCount: 1, deliveryStatus: 'assignment_pending' })
         );
         const eligibleRiderAfter = await collections.riders.findOne({ _id: new ObjectId(eligibleRider.id) });
-        logTest('5. v2 success claims the rider exactly as before (workStatus in_delivery)', eligibleRiderAfter.workStatus === 'in_delivery');
+        logTest('5. v2 offer reserves the rider (workStatus in_delivery)', eligibleRiderAfter.workStatus === 'in_delivery');
         const eligibleParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(eligibleParcelId) });
         logTest(
-            '6. v2 success sets exactly the existing parcel fields, no more',
-            eligibleParcelAfter.deliveryStatus === 'driver_assigned' && eligibleParcelAfter.riderId === eligibleRider.id &&
-            eligibleParcelAfter.riderName === eligibleRider.name && eligibleParcelAfter.riderEmail === eligibleRider.email
+            '6. v2 offer sets assignment_pending + active rider fields, and a pending assignmentHistory entry',
+            eligibleParcelAfter.deliveryStatus === 'assignment_pending' && eligibleParcelAfter.riderId === eligibleRider.id &&
+            eligibleParcelAfter.riderName === eligibleRider.name && eligibleParcelAfter.riderEmail === eligibleRider.email &&
+            Array.isArray(eligibleParcelAfter.assignmentHistory) && eligibleParcelAfter.assignmentHistory.length === 1 &&
+            eligibleParcelAfter.assignmentHistory[0].decision === 'pending'
         );
         logTest(
             '7. No new persisted metadata on the parcel (no eligibilityVersion/recommendationScore/expertise snapshot)',
@@ -12948,6 +12950,7 @@ async function runAllTests() {
     await testRepairWorkflow();
     await testSafeRepairDeletion();
     await testEmailVerificationMiddleware();
+    await testTechnicianAssignmentDecisions();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
@@ -12971,6 +12974,200 @@ async function runAllTests() {
     } else {
         console.log('⚠️  Some tests failed. Please review the output above.');
         process.exit(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Technician Assignment Decisions (Phase 8.2)
+//
+// Exercises the accept/reject decision workflow directly against the DB-backed
+// controllers. V2 requests are OFFERED (assignment_pending) and require the
+// offered technician to explicitly accept (-> driver_assigned) or reject with a
+// reason (-> pending-pickup, rider released). Parcels are inserted directly in
+// the assignment_pending state (with a pending assignmentHistory entry + the
+// reserved rider in_delivery), so these tests are self-contained and do not
+// depend on the eligibility-gated assign path (which the expertise-revalidation
+// section already covers, now asserting assignment_pending).
+// ---------------------------------------------------------------------------
+async function testTechnicianAssignmentDecisions() {
+    console.log('\n=== Technician Assignment Decisions (Phase 8.2) ===');
+    const { connectDatabase, collections } = require('./config/database');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { ObjectId } = require('mongodb');
+    const { ACTIVE_STATUSES } = require('./utils/parcelStatus');
+    const { validateRejectionReason } = require('./utils/assignmentDecision');
+
+    function fakeRes() {
+        return { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; } };
+    }
+
+    await connectDatabase();
+    const models = initializeModels(collections);
+    const controllers = initializeControllers(models, collections);
+    const parcelController = controllers.parcel;
+
+    const runId = Date.now();
+    const customerEmail = `ad-customer-${runId}@test.local`;
+    const adminEmail = `ad-admin-${runId}@test.local`;
+    const techEmail = `ad-tech-${runId}@test.local`;
+    const otherTechEmail = `ad-othertech-${runId}@test.local`;
+    const createdParcelIds = [];
+    const createdRiderIds = [];
+    const createdUserEmails = [customerEmail, adminEmail, techEmail, otherTechEmail];
+    let seq = 0;
+
+    try {
+        await collections.users.insertMany([
+            { email: customerEmail, role: 'user', createdAt: new Date() },
+            { email: adminEmail, role: 'admin', createdAt: new Date() },
+            { email: techEmail, role: 'rider', createdAt: new Date() },
+            { email: otherTechEmail, role: 'rider', createdAt: new Date() },
+        ]);
+        const techRider = await collections.riders.insertOne({ email: techEmail, name: 'Assigned Tech', status: 'approved', workStatus: 'in_delivery', createdAt: new Date() });
+        const techRiderId = techRider.insertedId;
+        createdRiderIds.push(techRiderId);
+
+        // Inserts a fresh V2 parcel already OFFERED to the tech (assignment_pending).
+        async function makePendingParcel() {
+            const trackingId = `TEST-AD-${runId}-${seq++}`;
+            const now = new Date();
+            const doc = {
+                schemaVersion: 2,
+                trackingId,
+                senderEmail: customerEmail,
+                deliveryStatus: 'assignment_pending',
+                riderId: techRiderId.toString(),
+                riderName: 'Assigned Tech',
+                riderEmail: techEmail,
+                assignmentHistory: [{
+                    assignmentId: new ObjectId().toString(),
+                    riderId: techRiderId.toString(),
+                    riderEmail: techEmail,
+                    riderName: 'Assigned Tech',
+                    assignedBy: adminEmail,
+                    assignedAt: now,
+                    decision: 'pending',
+                    decidedAt: null,
+                    rejectionReason: null,
+                }],
+                createdAt: now,
+            };
+            const r = await collections.parcels.insertOne(doc);
+            createdParcelIds.push(r.insertedId);
+            return { id: r.insertedId.toString(), _id: r.insertedId, trackingId };
+        }
+        const accept = (id, email) => { const res = fakeRes(); return parcelController.acceptAssignment({ params: { id }, decoded_email: email }, res).then(() => res); };
+        const reject = (id, email, reason) => { const res = fakeRes(); return parcelController.rejectAssignment({ params: { id }, decoded_email: email, body: { reason } }, res).then(() => res); };
+        const getAssignment = (id, email) => { const res = fakeRes(); return parcelController.getAssignment({ params: { id }, decoded_email: email }, res).then(() => res); };
+        const getParcel = (id, email) => { const res = fakeRes(); return parcelController.getParcelById({ params: { id }, decoded_email: email }, res).then(() => res); };
+
+        // --- Double-booking mechanism: assignment_pending is an ACTIVE status. ---
+        logTest('1. assignment_pending is an ACTIVE status (reserves the technician)', ACTIVE_STATUSES.includes('assignment_pending'));
+
+        // --- ACCEPT ---
+        const pAccept = await makePendingParcel();
+        let res = await accept(pAccept.id, techEmail);
+        logTest('2. Assigned technician accepts (200, driver_assigned)', res.statusCode === 200 && res.body.success === true && res.body.deliveryStatus === 'driver_assigned');
+        let after = await models.Parcel.findById(pAccept.id);
+        logTest('3. Accept moves status to driver_assigned', after.deliveryStatus === 'driver_assigned');
+        logTest('4. Accept marks the pending history entry accepted with a timestamp', after.assignmentHistory[0].decision === 'accepted' && !!after.assignmentHistory[0].decidedAt);
+        const riderAfterAccept = await collections.riders.findOne({ _id: techRiderId });
+        logTest('5. Accept keeps the technician in_delivery', riderAfterAccept.workStatus === 'in_delivery');
+        // replay/idempotency: second accept now conflicts (already decided)
+        res = await accept(pAccept.id, techEmail);
+        logTest('6. Re-accepting an already-decided assignment is rejected (409 ASSIGNMENT_NOT_PENDING)', res.statusCode === 409 && res.body.code === 'ASSIGNMENT_NOT_PENDING');
+
+        // --- ACCEPT authorization ---
+        const pAuth = await makePendingParcel();
+        res = await accept(pAuth.id, otherTechEmail);
+        logTest('7. Unrelated technician cannot accept (403 NOT_ASSIGNED_TECHNICIAN)', res.statusCode === 403 && res.body.code === 'NOT_ASSIGNED_TECHNICIAN');
+        res = await accept(pAuth.id, adminEmail);
+        logTest('8. Admin cannot accept on the technician\'s behalf (403 NOT_ASSIGNED_TECHNICIAN)', res.statusCode === 403 && res.body.code === 'NOT_ASSIGNED_TECHNICIAN');
+        res = await accept(pAuth.id, customerEmail);
+        logTest('9. Customer cannot accept (403 NOT_ASSIGNED_TECHNICIAN)', res.statusCode === 403 && res.body.code === 'NOT_ASSIGNED_TECHNICIAN');
+
+        // --- REJECT ---
+        // Reset the reserved rider to in_delivery for the reject scenarios.
+        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        const pReject = await makePendingParcel();
+        res = await reject(pReject.id, techEmail, 'Outside my current service area for this repair.');
+        logTest('10. Assigned technician rejects with a valid reason (200, pending-pickup)', res.statusCode === 200 && res.body.success === true && res.body.deliveryStatus === 'pending-pickup');
+        after = await models.Parcel.findById(pReject.id);
+        logTest('11. Reject returns the request to pending-pickup', after.deliveryStatus === 'pending-pickup');
+        logTest('12. Reject clears the active rider fields (reassignable)', after.riderId === undefined && after.riderEmail === undefined && after.riderName === undefined);
+        logTest('13. Reject records the rejection in history with the reason retained', after.assignmentHistory[0].decision === 'rejected' && after.assignmentHistory[0].rejectionReason === 'Outside my current service area for this repair.' && !!after.assignmentHistory[0].decidedAt);
+        const riderAfterReject = await collections.riders.findOne({ _id: techRiderId });
+        logTest('14. Reject releases the technician back to available', riderAfterReject.workStatus === 'available');
+
+        // --- REJECT reason validation ---
+        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        const pReasonBad = await makePendingParcel();
+        res = await reject(pReasonBad.id, techEmail, 'x');
+        logTest('15. Too-short rejection reason rejected (400 INVALID_REJECTION_REASON)', res.statusCode === 400 && res.body.code === 'INVALID_REJECTION_REASON');
+        res = await reject(pReasonBad.id, techEmail, '');
+        logTest('16. Empty rejection reason rejected (400 INVALID_REJECTION_REASON)', res.statusCode === 400 && res.body.code === 'INVALID_REJECTION_REASON');
+        const stillPending = await models.Parcel.findById(pReasonBad.id);
+        logTest('17. Invalid reason leaves the request untouched (still assignment_pending)', stillPending.deliveryStatus === 'assignment_pending');
+        // reject authorization
+        res = await reject(pReasonBad.id, otherTechEmail, 'A perfectly valid length reason here.');
+        logTest('18. Unrelated technician cannot reject (403 NOT_ASSIGNED_TECHNICIAN)', res.statusCode === 403 && res.body.code === 'NOT_ASSIGNED_TECHNICIAN');
+        // now the assigned tech rejects it for cleanup and to reset rider
+        await reject(pReasonBad.id, techEmail, 'Cleaning up this pending offer with a valid reason.');
+
+        // --- CONCURRENCY ---
+        // accept vs reject
+        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        const pAR = await makePendingParcel();
+        const [arA, arB] = await Promise.all([accept(pAR.id, techEmail), reject(pAR.id, techEmail, 'Concurrent reject racing the accept.')]);
+        const arWinners = [arA.statusCode, arB.statusCode].filter((s) => s === 200).length;
+        const arConflicts = [arA, arB].filter((r) => r.statusCode === 409 && r.body.code === 'ASSIGNMENT_ALREADY_DECIDED').length;
+        logTest('19. Accept vs reject: exactly one wins, the loser gets ASSIGNMENT_ALREADY_DECIDED', arWinners === 1 && arConflicts === 1);
+
+        // accept vs accept
+        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        const pAA = await makePendingParcel();
+        const [aaA, aaB] = await Promise.all([accept(pAA.id, techEmail), accept(pAA.id, techEmail)]);
+        logTest('20. Accept vs accept: exactly one wins', [aaA.statusCode, aaB.statusCode].filter((s) => s === 200).length === 1 && [aaA, aaB].some((r) => r.statusCode === 409 && r.body.code === 'ASSIGNMENT_ALREADY_DECIDED'));
+
+        // reject vs reject
+        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        const pRR = await makePendingParcel();
+        const [rrA, rrB] = await Promise.all([reject(pRR.id, techEmail, 'First concurrent reject reason.'), reject(pRR.id, techEmail, 'Second concurrent reject reason.')]);
+        logTest('21. Reject vs reject: exactly one wins', [rrA.statusCode, rrB.statusCode].filter((s) => s === 200).length === 1 && [rrA, rrB].some((r) => r.statusCode === 409 && r.body.code === 'ASSIGNMENT_ALREADY_DECIDED'));
+
+        // --- REASSIGNMENT lock: admin cannot reassign the same offered request while pending ---
+        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        const pLock = await makePendingParcel();
+        const reassignRes = fakeRes();
+        await parcelController.assignRiderToParcel({ params: { id: pLock.id }, body: { riderId: techRiderId.toString() }, decoded_email: adminEmail }, reassignRes);
+        logTest('22. Admin cannot reassign a request that is still assignment_pending (409)', reassignRes.statusCode === 409);
+        // after reject it becomes reassignable (status pending-pickup, no rider)
+        await reject(pLock.id, techEmail, 'Rejecting so the request can be reassigned again.');
+        const lockAfter = await models.Parcel.findById(pLock.id);
+        logTest('23. After rejection the request is reassignable (pending-pickup, no active rider)', lockAfter.deliveryStatus === 'pending-pickup' && lockAfter.riderId === undefined);
+
+        // --- PRIVACY ---
+        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        const pPriv = await makePendingParcel();
+        await reject(pPriv.id, techEmail, 'Sensitive internal rejection reason not for customers.');
+        // general GET must not expose assignmentHistory to anyone
+        res = await getParcel(pPriv.id, customerEmail);
+        logTest('24. General GET /parcels/:id never exposes assignmentHistory', res.statusCode === 200 && res.body.assignmentHistory === undefined);
+        // getAssignment: customer projection is neutral (no reason/history)
+        res = await getAssignment(pPriv.id, customerEmail);
+        logTest('25. Customer assignment projection exposes no rejection reason or history', res.statusCode === 200 && res.body.assignmentHistory === undefined && !JSON.stringify(res.body).includes('Sensitive internal rejection reason'));
+        // getAssignment: admin sees history + reason
+        res = await getAssignment(pPriv.id, adminEmail);
+        logTest('26. Admin assignment projection includes history with the rejection reason', res.statusCode === 200 && Array.isArray(res.body.assignmentHistory) && res.body.assignmentHistory.some((h) => h.rejectionReason === 'Sensitive internal rejection reason not for customers.'));
+
+        // --- pure reason validator bounds ---
+        logTest('27. validateRejectionReason accepts a valid reason and rejects too-short/empty', validateRejectionReason('A valid reason here').valid === true && validateRejectionReason('no').valid === false && validateRejectionReason('').valid === false);
+    } finally {
+        if (createdParcelIds.length) await collections.parcels.deleteMany({ _id: { $in: createdParcelIds } });
+        if (createdRiderIds.length) await collections.riders.deleteMany({ _id: { $in: createdRiderIds } });
+        if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        await collections.trackings.deleteMany({ trackingId: { $regex: `^TEST-AD-${runId}-` } });
     }
 }
 

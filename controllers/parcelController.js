@@ -3,7 +3,8 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const { client } = require('../config/database');
 const { generateSecureTrackingId } = require('../utils/trackingId');
 const { logTracking } = require('../middleware/logging');
-const { VALID_STATUSES, ACTIVE_STATUSES, isValidTransition } = require('../utils/parcelStatus');
+const { VALID_STATUSES, ACTIVE_STATUSES, ASSIGNMENT_PENDING, isValidTransition } = require('../utils/parcelStatus');
+const { validateRejectionReason, buildPendingAssignmentEntry, projectAssignmentForRole } = require('../utils/assignmentDecision');
 const { normalize } = require('../services/paymentProcessor');
 const { createNotificationService } = require('../services/notificationService');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
@@ -134,7 +135,11 @@ class ParcelController {
             // strip internal submitter identity, storage keys, and signed URLs.
             // deliveryStatus (which may be a quote_*/payment/repair_* state) is
             // preserved.
-            const { inspection, quote, repair, ...safeParcel } = parcel;
+            // assignmentHistory (Phase 8.2) carries rider/admin identities and
+            // rejection reasons - never served here. It is read only through the
+            // dedicated, role-projected GET /parcels/:id/assignment. Current
+            // active-assignment fields (riderName/riderEmail) remain as before.
+            const { inspection, quote, repair, assignmentHistory, ...safeParcel } = parcel;
             res.send(safeParcel);
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair request', error: error.message });
@@ -1039,6 +1044,34 @@ class ParcelController {
                     // read-then-write check. Technician identity is always
                     // the server-validated document above, never trusted
                     // client-supplied name/email fields.
+                    // Phase 8.2: a V2 request is OFFERED (assignment_pending) and
+                    // requires explicit technician acceptance before it becomes
+                    // driver_assigned. Legacy requests keep the existing direct
+                    // driver_assigned semantics byte-for-byte (no accept step,
+                    // no assignmentHistory). The offered technician is reserved
+                    // (workStatus -> in_delivery below) either way, preserving
+                    // double-booking protection.
+                    const assignedAsV2 = isV2RepairRequest(parcel);
+                    const assignedStatus = assignedAsV2 ? ASSIGNMENT_PENDING : 'driver_assigned';
+                    const assignmentSet = {
+                        deliveryStatus: assignedStatus,
+                        riderId: technician._id.toString(),
+                        riderName: technician.name,
+                        riderEmail: technician.email
+                    };
+                    const assignmentUpdate = { $set: assignmentSet };
+                    if (assignedAsV2) {
+                        assignmentUpdate.$push = {
+                            assignmentHistory: buildPendingAssignmentEntry({
+                                assignmentId: new ObjectId().toString(),
+                                riderId: technician._id.toString(),
+                                riderEmail: technician.email,
+                                riderName: technician.name,
+                                assignedBy: req.decoded_email,
+                                assignedAt: new Date(),
+                            })
+                        };
+                    }
                     const parcelUpdateResult = await this.collections.parcels.updateOne(
                         {
                             _id: parcel._id,
@@ -1047,14 +1080,7 @@ class ParcelController {
                                 { deliveryStatus: 'pending-pickup' }
                             ]
                         },
-                        {
-                            $set: {
-                                deliveryStatus: 'driver_assigned',
-                                riderId: technician._id.toString(),
-                                riderName: technician.name,
-                                riderEmail: technician.email
-                            }
-                        },
+                        assignmentUpdate,
                         { session: mongoSession }
                     );
 
@@ -1098,7 +1124,7 @@ class ParcelController {
                         throw Object.assign(new Error('technician became unavailable during assignment'), { code: 'ASSIGNMENT_CONFLICT' });
                     }
 
-                    await logTracking(this.collections.trackings, parcel.trackingId, 'driver_assigned', mongoSession);
+                    await logTracking(this.collections.trackings, parcel.trackingId, assignedStatus, mongoSession);
 
                     // Both notifications join the same transaction - a
                     // failure creating either one aborts the parcel
@@ -1154,7 +1180,7 @@ class ParcelController {
                 return res.status(409).send({ message: 'this request can no longer be assigned', code: 'ASSIGNMENT_NOT_ALLOWED' });
             }
 
-            res.send({ acknowledged: true, matchedCount: 1, modifiedCount: 1, deliveryStatus: 'driver_assigned' });
+            res.send({ acknowledged: true, matchedCount: 1, modifiedCount: 1, deliveryStatus: isV2RepairRequest(parcel) ? ASSIGNMENT_PENDING : 'driver_assigned' });
         } catch (error) {
             if (error.code === 'REPAIR_OWNER_ROLE_UNRESOLVED') {
                 console.error('Assignment transaction aborted: repair request owner role could not be resolved');
@@ -1186,6 +1212,168 @@ class ParcelController {
             }
             console.error('Assignment transaction aborted:', error.message);
             res.status(500).send({ message: 'Error assigning technician to repair request', code: 'ASSIGNMENT_FAILED' });
+        }
+    }
+
+    // Technician ACCEPTS an offered assignment (Phase 8.2). Only the currently
+    // offered technician, only while assignment_pending. The guarded updateOne
+    // (deliveryStatus assignment_pending + riderEmail in the filter) is the
+    // race-resolver: exactly one concurrent accept/reject wins; a loser sees
+    // matchedCount 0 and gets ASSIGNMENT_ALREADY_DECIDED. No rider workStatus
+    // change (they stay in_delivery). Tracking is best-effort after the commit.
+    async acceptAssignment(req, res) {
+        try {
+            const id = req.params.id;
+            if (!ObjectId.isValid(id)) {
+                return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
+            }
+            const parcel = await this.Parcel.findById(id);
+            if (!parcel) {
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+            }
+            if (normalize(parcel.riderEmail) !== normalize(req.decoded_email)) {
+                return res.status(403).send({ message: 'you are not the assigned technician', code: 'NOT_ASSIGNED_TECHNICIAN' });
+            }
+            if (parcel.deliveryStatus !== ASSIGNMENT_PENDING) {
+                return res.status(409).send({ message: 'this assignment is not awaiting a decision', code: 'ASSIGNMENT_NOT_PENDING' });
+            }
+
+            const now = new Date();
+            const result = await this.collections.parcels.updateOne(
+                { _id: parcel._id, deliveryStatus: ASSIGNMENT_PENDING, riderEmail: parcel.riderEmail },
+                {
+                    $set: {
+                        deliveryStatus: 'driver_assigned',
+                        'assignmentHistory.$[cur].decision': 'accepted',
+                        'assignmentHistory.$[cur].decidedAt': now
+                    }
+                },
+                { arrayFilters: [{ 'cur.decision': 'pending' }] }
+            );
+            if (result.matchedCount === 0) {
+                return res.status(409).send({ message: 'this assignment has already been decided', code: 'ASSIGNMENT_ALREADY_DECIDED' });
+            }
+
+            logTracking(this.collections.trackings, parcel.trackingId, 'driver_assigned');
+            return res.send({ success: true, deliveryStatus: 'driver_assigned' });
+        } catch (error) {
+            console.error('Accept assignment failed:', error.message);
+            return res.status(500).send({ message: 'Error accepting assignment', code: 'ASSIGNMENT_DECISION_FAILED' });
+        }
+    }
+
+    // Technician REJECTS an offered assignment with a reason (Phase 8.2). Only
+    // the currently offered technician, only while assignment_pending, reason
+    // validated (5-500 chars). Transactionally: release the request back to
+    // pending-pickup (reassignable), clear the active rider fields, mark the
+    // pending history entry rejected (reason retained for admin audit), and
+    // release the rider back to available. The guarded parcel update is the
+    // race-resolver - exactly one concurrent decision wins. The request is
+    // never deleted or cancelled.
+    async rejectAssignment(req, res) {
+        try {
+            const id = req.params.id;
+            if (!ObjectId.isValid(id)) {
+                return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
+            }
+            const reasonCheck = validateRejectionReason(req.body && req.body.reason);
+            if (!reasonCheck.valid) {
+                return res.status(400).send({ message: reasonCheck.message, code: reasonCheck.code });
+            }
+            const parcel = await this.Parcel.findById(id);
+            if (!parcel) {
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+            }
+            if (normalize(parcel.riderEmail) !== normalize(req.decoded_email)) {
+                return res.status(403).send({ message: 'you are not the assigned technician', code: 'NOT_ASSIGNED_TECHNICIAN' });
+            }
+            if (parcel.deliveryStatus !== ASSIGNMENT_PENDING) {
+                return res.status(409).send({ message: 'this assignment is not awaiting a decision', code: 'ASSIGNMENT_NOT_PENDING' });
+            }
+
+            const riderId = parcel.riderId;
+            const now = new Date();
+            const mongoSession = client.startSession();
+            let alreadyDecided = false;
+            try {
+                await mongoSession.withTransaction(async () => {
+                    const parcelResult = await this.collections.parcels.updateOne(
+                        { _id: parcel._id, deliveryStatus: ASSIGNMENT_PENDING, riderEmail: parcel.riderEmail },
+                        {
+                            $set: {
+                                deliveryStatus: 'pending-pickup',
+                                'assignmentHistory.$[cur].decision': 'rejected',
+                                'assignmentHistory.$[cur].decidedAt': now,
+                                'assignmentHistory.$[cur].rejectionReason': reasonCheck.reason
+                            },
+                            $unset: { riderId: '', riderName: '', riderEmail: '' }
+                        },
+                        { arrayFilters: [{ 'cur.decision': 'pending' }], session: mongoSession }
+                    );
+                    if (parcelResult.matchedCount === 0) {
+                        alreadyDecided = true;
+                        return;
+                    }
+                    // Release the reserved technician back to available. Guarded
+                    // to in_delivery so a concurrent state change can't wrongly
+                    // flip them. A rejected request has no other holder (double-
+                    // booking prevention keeps a technician on one active
+                    // assignment), so this restoration is safe and atomic.
+                    if (riderId && ObjectId.isValid(riderId)) {
+                        await this.collections.riders.updateOne(
+                            { _id: new ObjectId(riderId), workStatus: 'in_delivery' },
+                            { $set: { workStatus: 'available' } },
+                            { session: mongoSession }
+                        );
+                    }
+                });
+            } finally {
+                await mongoSession.endSession();
+            }
+
+            if (alreadyDecided) {
+                return res.status(409).send({ message: 'this assignment has already been decided', code: 'ASSIGNMENT_ALREADY_DECIDED' });
+            }
+
+            // assignment_rejected is an internal tracking event - it is NOT a
+            // public timeline status, so the rejection is never exposed to the
+            // customer (who only ever sees the neutral assignment_pending state
+            // and, on reassignment, another assignment_pending).
+            logTracking(this.collections.trackings, parcel.trackingId, 'assignment_rejected');
+            return res.send({ success: true, deliveryStatus: 'pending-pickup' });
+        } catch (error) {
+            console.error('Reject assignment failed:', error.message);
+            return res.status(500).send({ message: 'Error rejecting assignment', code: 'ASSIGNMENT_DECISION_FAILED' });
+        }
+    }
+
+    // Role-aware assignment read (Phase 8.2). The general parcel GET does NOT
+    // serialize assignmentHistory to non-admins; this endpoint returns a
+    // projection scoped to the caller's role (admin: full history + reasons;
+    // assigned technician: their own decision; customer/owner: neutral current
+    // state only). Authorized to owner, assigned technician, or admin.
+    async getAssignment(req, res) {
+        try {
+            const id = req.params.id;
+            if (!ObjectId.isValid(id)) {
+                return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
+            }
+            const parcel = await this.Parcel.findById(id);
+            if (!parcel) {
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+            }
+            const caller = await this.User.findByEmail(req.decoded_email);
+            const isAdmin = !!caller && caller.role === 'admin';
+            const isAssignedTechnician = normalize(parcel.riderEmail) === normalize(req.decoded_email);
+            const isOwner = normalize(parcel.senderEmail) === normalize(req.decoded_email);
+            if (!isAdmin && !isAssignedTechnician && !isOwner) {
+                return res.status(403).send({ message: 'forbidden access', code: 'FORBIDDEN' });
+            }
+            const role = isAdmin ? 'admin' : (isAssignedTechnician ? 'assigned-technician' : 'customer');
+            return res.send(projectAssignmentForRole(parcel, role));
+        } catch (error) {
+            console.error('Get assignment failed:', error.message);
+            return res.status(500).send({ message: 'Error reading assignment', code: 'ASSIGNMENT_READ_FAILED' });
         }
     }
 

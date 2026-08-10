@@ -45,6 +45,22 @@ function parcelRoutes(app, controllers) {
     // owner can actually cancel it.
     app.patch('/parcels/:id/cancel', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.cancelParcel(req, res));
 
+    // Technician assignment decision (Phase 8.2). Accept/reject are technician
+    // operations - verifyRider gates role; the controller additionally enforces
+    // that the caller is the CURRENTLY offered technician and that the request
+    // is still assignment_pending, and resolves concurrency atomically. These
+    // (not the generic status PATCH) are the sole authority for the
+    // assignment_pending -> driver_assigned / -> pending-pickup transitions.
+    // Not gated by verifyEmailVerified (technician operation, not a customer
+    // mutation).
+    app.post('/parcels/:id/assignment/accept', verifyFBToken, ensureDatabaseReady, verifyRider, (req, res) => parcelController.acceptAssignment(req, res));
+    app.post('/parcels/:id/assignment/reject', verifyFBToken, ensureDatabaseReady, verifyRider, (req, res) => parcelController.rejectAssignment(req, res));
+
+    // Role-projected assignment read (Phase 8.2) - owner/assigned-technician/
+    // admin; the controller strips rejection reasons + identities from non-admin
+    // projections.
+    app.get('/parcels/:id/assignment', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.getAssignment(req, res));
+
     // Assign technician to repair request (admin only)
     app.patch('/parcels/:id', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.assignRiderToParcel(req, res));
 
