@@ -13,8 +13,8 @@ const client = new MongoClient(uri, {
 
 // Fails fast at module load if MONGO_DB_NAME is missing/invalid in
 // production, or lacks an explicit test marker under NODE_ENV=test - see
-// config/databaseName.js for the exact rules. Development keeps a
-// backwards-compatible fallback to the historical 'zap_shift_db' name.
+// config/databaseName.js for the exact rules. Development falls back to the
+// Sarabo development database name (sarabo-db).
 const DB_NAME = resolveDatabaseName();
 
 // Collection handles are synchronous and side-effect-free - creating them
@@ -24,18 +24,24 @@ const DB_NAME = resolveDatabaseName();
 // these collections require connectDatabase() to have resolved first, which
 // is enforced per-request by middleware/database.js.
 const db = client.db(DB_NAME);
+// Phase 8.7B: the Mongo COLLECTION names are the canonical Sarabo domain names
+// in snake_case (technicians / repair_requests / service_definitions /
+// tracking_events / ...). The JS handle keys below (e.g. `riders`, `parcels`)
+// are internal code vocabulary whose rename to `technicians`/`repairRequests`
+// is deferred to a follow-up phase - the on-disk collection contract migrates
+// here now, so nothing is ever created under the old `riders`/`parcels` names.
 const collections = {
     users: db.collection("users"),
-    parcels: db.collection("parcels"),
+    parcels: db.collection("repair_requests"),
     payments: db.collection("payments"),
-    riders: db.collection("riders"),
-    trackings: db.collection("trackings"),
-    checkoutSessions: db.collection("checkoutSessions"),
+    riders: db.collection("technicians"),
+    trackings: db.collection("tracking_events"),
+    checkoutSessions: db.collection("checkout_sessions"),
     notifications: db.collection("notifications"),
-    serviceDefinitions: db.collection("serviceDefinitions"),
-    damageUploadSessions: db.collection("damageUploadSessions"),
-    repairEvidenceSessions: db.collection("repairEvidenceSessions"),
-    deletionCleanups: db.collection("deletionCleanups"),
+    serviceDefinitions: db.collection("service_definitions"),
+    damageUploadSessions: db.collection("damage_upload_sessions"),
+    repairEvidenceSessions: db.collection("repair_evidence_sessions"),
+    deletionCleanups: db.collection("deletion_cleanups"),
 };
 
 let connectionPromise = null;

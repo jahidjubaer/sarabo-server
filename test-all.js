@@ -11,14 +11,14 @@ if (process.env.NODE_ENV !== 'test') {
     console.error(`Refusing to run: NODE_ENV must be 'test' for this suite, got '${process.env.NODE_ENV}'.`);
     process.exit(1);
 }
-// Defaults to the existing development database (Option 2 from this
-// project's test-strategy decision - see config/databaseName.js) rather than
-// a genuinely separate test database, since this suite depends on pre-seeded
-// real user/rider/role records that only exist there today. An operator can
-// still opt into a real dedicated test database once that seeding exists
-// separately, by setting MONGO_DB_NAME to a name containing "test" before
-// running this file.
-process.env.MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'zap_shift_db';
+// Phase 8.7B: this suite runs against its own dedicated, isolated test database
+// (sarabo-test-db), never the development database (sarabo-db) or production.
+// The pre-seeded baseline the suite depends on (the three role accounts + the
+// approved seeded technician + the service-definition catalogue) is now created
+// idempotently at startup by seedTestBaseline() below, so a genuinely fresh
+// test database works with no manual setup. resolveDatabaseName() fails fast if
+// this ever resolves to the development or a production database.
+process.env.MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'sarabo-test-db';
 
 const http = require('http');
 require('dotenv').config();
@@ -6750,8 +6750,8 @@ async function testProductionConfigValidation() {
 // here is inspected without ever opening a real connection, and without
 // disturbing the one real connection the rest of this suite eventually
 // opens. Every env var touched is restored to the safe test baseline this
-// file establishes at the top (NODE_ENV=test, MONGO_DB_NAME=zap_shift_db -
-// see the interim test-database note there) before returning, and the
+// file establishes at the top (NODE_ENV=test, MONGO_DB_NAME=sarabo-test-db)
+// before returning, and the
 // require cache is reset to a build of that restored baseline so later test
 // sections see the real, working module.
 async function testDatabaseNameValidation() {
@@ -6803,7 +6803,7 @@ async function testDatabaseNameValidation() {
         // 2. Development missing name uses fallback with warning.
         setEnv({ MONGO_DB_NAME: undefined });
         ({ resolveDatabaseName } = freshDatabaseName());
-        logTest('Development missing name uses fallback', resolveDatabaseName() === 'zap_shift_db');
+        logTest('Development missing name uses fallback', resolveDatabaseName() === 'sarabo-db');
 
         // 3. Production missing name rejected.
         setEnv({ NODE_ENV: 'production', MONGO_DB_NAME: undefined });
@@ -6816,7 +6816,7 @@ async function testDatabaseNameValidation() {
         logTest('Production whitespace name rejected', expectThrows(resolveDatabaseName));
 
         // 5. Production development database name rejected.
-        setEnv({ MONGO_DB_NAME: 'zap_shift_db' });
+        setEnv({ MONGO_DB_NAME: 'sarabo-db' });
         ({ resolveDatabaseName } = freshDatabaseName());
         logTest('Production development database name rejected', expectThrows(resolveDatabaseName));
 
@@ -6863,6 +6863,39 @@ async function testDatabaseNameValidation() {
             'All collections resolve from the selected database',
             expectedDbNames.every(name => name === 'sarabo_test_selection_check')
         );
+
+        // ===== Phase 8.7B database-namespace guards =====
+        // Development resolves to the Sarabo dev database.
+        setEnv({ NODE_ENV: undefined, VERCEL: undefined, VERCEL_ENV: undefined, MONGO_DB_NAME: undefined });
+        ({ resolveDatabaseName } = freshDatabaseName());
+        logTest('8.7B: development resolves to sarabo-db', resolveDatabaseName() === 'sarabo-db');
+
+        // Tests default to the isolated Sarabo test database.
+        setEnv({ NODE_ENV: 'test', MONGO_DB_NAME: undefined });
+        ({ resolveDatabaseName } = freshDatabaseName());
+        logTest('8.7B: tests default to the isolated sarabo-test-db', resolveDatabaseName() === 'sarabo-test-db');
+
+        // The suite must refuse to run against the development database.
+        setEnv({ NODE_ENV: 'test', MONGO_DB_NAME: 'sarabo-db' });
+        ({ resolveDatabaseName } = freshDatabaseName());
+        logTest('8.7B: test harness refuses the development database (sarabo-db)', expectThrows(resolveDatabaseName));
+
+        // The suite must refuse an obvious production database in test mode.
+        setEnv({ NODE_ENV: 'test', MONGO_DB_NAME: 'sarabo_production' });
+        ({ resolveDatabaseName } = freshDatabaseName());
+        logTest('8.7B: test harness refuses a production database name', expectThrows(resolveDatabaseName));
+
+        // Canonical Mongo collection names (snake_case Sarabo domain), and NO
+        // collection is ever created under the inherited riders/parcels names.
+        setEnv({ NODE_ENV: 'test', MONGO_DB_NAME: 'sarabo_test_selection_check' });
+        const { collections: nameCheck } = freshDatabaseModule();
+        const collectionNames = Object.values(nameCheck).map(c => c.collectionName);
+        logTest('8.7B: technician collection is "technicians"', nameCheck.riders.collectionName === 'technicians');
+        logTest('8.7B: repair-request collection is "repair_requests"', nameCheck.parcels.collectionName === 'repair_requests');
+        logTest('8.7B: service-definition collection is "service_definitions"', nameCheck.serviceDefinitions.collectionName === 'service_definitions');
+        logTest('8.7B: tracking collection is "tracking_events"', nameCheck.trackings.collectionName === 'tracking_events');
+        logTest('8.7B: no collection is named "riders"', !collectionNames.includes('riders'));
+        logTest('8.7B: no collection is named "parcels"', !collectionNames.includes('parcels'));
     } finally {
         setEnv(originalEnv);
         delete require.cache[databaseNamePath];
@@ -7972,9 +8005,9 @@ async function testServiceDefinitions() {
             conflictSeedResult.created === 0 && conflictSeedResult.conflicted === 2 && pricingUnchangedAfterConflict
         );
 
-        const prodEnvCheck = isSafeToSeed({ isProduction: true, resolvedDbName: 'zap_shift_db' });
+        const prodEnvCheck = isSafeToSeed({ isProduction: true, resolvedDbName: 'sarabo-db' });
         const prodNameCheck = isSafeToSeed({ isProduction: false, resolvedDbName: 'sarabo_production' });
-        const safeCheck = isSafeToSeed({ isProduction: false, resolvedDbName: 'zap_shift_db' });
+        const safeCheck = isSafeToSeed({ isProduction: false, resolvedDbName: 'sarabo-db' });
         logTest('24. Seed refuses production DB', prodEnvCheck.safe === false && prodNameCheck.safe === false && safeCheck.safe === true);
 
         // 25-32: real HTTP walkthrough against the running dev server. Uses
@@ -12758,11 +12791,58 @@ async function testSafeRepairDeletion() {
     console.log('');
 }
 
+// Phase 8.7B: idempotently create the pre-seeded baseline this suite depends on
+// so it runs against a genuinely fresh, isolated test database (sarabo-test-db)
+// with no manual setup. Creates exactly the three role accounts, the approved
+// seeded technician record (used by the assignment/transition sections via
+// RIDER_EMAIL), and the canonical service-definition catalogue. Everything is an
+// upsert, so re-running the suite never duplicates baseline data, and it only
+// ever touches the (test-only) database resolveDatabaseName() already validated.
+async function seedTestBaseline() {
+    const { connectDatabase, collections } = require('./config/database');
+    const { ServiceDefinitionModel } = require('./models/ServiceDefinition');
+    const { runSeed } = require('./scripts/seed-service-definitions');
+    const { SERVICE_DEFINITION_SEED } = require('./data/serviceDefinitionSeed');
+    await connectDatabase();
+
+    const accounts = [
+        { email: ADMIN_EMAIL, role: 'admin' },
+        { email: RIDER_EMAIL, role: 'rider' },
+        { email: CUSTOMER_EMAIL, role: 'user' },
+    ];
+    for (const { email, role } of accounts) {
+        await collections.users.updateOne({ email }, { $setOnInsert: { email, createdAt: new Date() }, $set: { role } }, { upsert: true });
+    }
+
+    // The approved, matchable seeded technician (RIDER_EMAIL) the assignment and
+    // status-transition sections assign real work to.
+    await collections.riders.updateOne(
+        { email: RIDER_EMAIL },
+        {
+            $setOnInsert: { email: RIDER_EMAIL, createdAt: new Date() },
+            $set: {
+                name: 'Jahid Hasan (Jubaer)', region: 'Sylhet', district: 'Sylhet', address: 'Sylhet',
+                status: 'approved', workStatus: 'available',
+                expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2 }],
+            },
+        },
+        { upsert: true }
+    );
+
+    // Canonical service-definition catalogue (idempotent; writes only genuinely new rows).
+    const model = new ServiceDefinitionModel(collections.serviceDefinitions);
+    await runSeed({ model, seedRows: SERVICE_DEFINITION_SEED, dryRun: false });
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
     console.log('='.repeat(60));
     console.log('');
+
+    // Phase 8.7B: create the isolated test database's baseline before any test.
+    await seedTestBaseline();
+
 
     // Test 1: Root endpoint (no auth required)
     console.log('1. Testing Root Endpoint');

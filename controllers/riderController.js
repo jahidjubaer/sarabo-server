@@ -84,7 +84,7 @@ class RiderController {
                 },
                 {
                     $lookup: {
-                        from: "trackings",
+                        from: "tracking_events",
                         localField: "trackingId",
                         foreignField: "trackingId",
                         as: "parcel_trackings"

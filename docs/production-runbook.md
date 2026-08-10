@@ -31,7 +31,7 @@ scopes only, never values.
 ## Database
 
 - Production database: `sarabo_production` (same Atlas cluster as development)
-- Development database: `zap_shift_db`
+- Development database: `sarabo-db` (tests use the isolated `sarabo-test-db`)
 - Isolation is enforced in code by `config/databaseName.js`'s
   `resolveDatabaseName()`: production must supply an explicit
   `MONGO_DB_NAME` that is not the dev database name.
@@ -116,7 +116,7 @@ scopes only, never values.
 1. Atlas -> Cluster -> Backup -> confirm a snapshot exists within the last
    24 hours.
 2. Confirm the snapshot covers the cluster hosting both `sarabo_production`
-   and `zap_shift_db` (same cluster, per this project's cutover design).
+   and `sarabo-db` (same cluster, per this project's cutover design).
 3. Do not restore/test-restore into the same cluster without an explicit,
    separate, owner-approved plan - a restore is a destructive, high-blast-
    radius operation.

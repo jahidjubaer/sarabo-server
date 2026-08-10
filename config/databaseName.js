@@ -1,11 +1,17 @@
 const { isProductionEnvironment } = require('./siteOrigin');
 
-// The database name every local development environment has always used
-// (see the git history of config/database.js). Production must never resolve
-// to this - see resolveDatabaseName() below. No override variable is
-// provided for this rejection: the safer default is none, since no existing
-// deployment recovery pattern requires one.
-const DEV_DB_NAME = 'zap_shift_db';
+// The Sarabo local-development database (Phase 8.7B; formerly the inherited
+// Zap Shift name). Production must never resolve to this - see
+// resolveDatabaseName() below. No override variable is provided for that
+// rejection: the safer default is none, since no existing deployment recovery
+// pattern requires one.
+const DEV_DB_NAME = 'sarabo-db';
+
+// The dedicated, isolated automated-test database (Phase 8.7B). The suite must
+// NEVER run against DEV_DB_NAME or any production database - see the testMode
+// branch of resolveDatabaseName(), which defaults to this name and fails fast
+// on anything that is not an explicit "test" database.
+const TEST_DB_NAME = 'sarabo-test-db';
 
 const MAX_LENGTH = 64; // MongoDB's own database-name length limit.
 // MongoDB forbids these characters in a database name on the platforms it
@@ -44,19 +50,13 @@ function hasExplicitTestMarker(name) {
     return name.toLowerCase().includes('test');
 }
 
-// Approved test-mode targets: anything with an explicit "test" marker (for a
-// genuinely separate, dedicated test database), plus the existing
-// development database itself. The latter is a deliberate, documented
-// interim allowance - Phase 5.7's test-strategy decision found that the
-// existing test suite (test-all.js) depends on pre-seeded real user/rider/
-// role records that only exist in the development database today, and
-// seeding an equivalent baseline into a genuinely separate database is a
-// broad data-migration effort explicitly out of that phase's scope. Once
-// that seeding is done separately, an operator can opt into a real dedicated
-// test database (e.g. MONGO_DB_NAME=sarabo_test) and this same check passes
-// via the "test" marker instead.
+// Approved test-mode targets (Phase 8.7B): ONLY a database with an explicit
+// "test" marker. The suite now has its own dedicated, self-seeding database
+// (TEST_DB_NAME) with a baseline created at startup, so the previous interim
+// allowance that let tests share the development database is deliberately gone:
+// tests must never touch DEV_DB_NAME or any production database.
 function isApprovedTestTarget(name) {
-    return hasExplicitTestMarker(name) || name === DEV_DB_NAME;
+    return hasExplicitTestMarker(name);
 }
 
 // Single source of truth for which database this process connects to.
@@ -81,10 +81,17 @@ function resolveDatabaseName() {
     }
 
     if (testMode) {
+        // Default to the dedicated test database; an explicit MONGO_DB_NAME may
+        // override it, but ONLY to another explicit "test" database. Running the
+        // suite against the development database or a production database is
+        // refused here, before any fixture setup/cleanup can touch real data.
         const trimmed = (rawValue ?? '').trim();
-        const name = trimmed ? validateDatabaseNameShape(rawValue) : DEV_DB_NAME;
+        const name = trimmed ? validateDatabaseNameShape(rawValue) : TEST_DB_NAME;
+        if (name === DEV_DB_NAME) {
+            throw new Error(`Tests must not run against the development database ("${DEV_DB_NAME}"); use "${TEST_DB_NAME}" (or another database whose name contains "test").`);
+        }
         if (!isApprovedTestTarget(name)) {
-            throw new Error('MONGO_DB_NAME must be an approved test target (contain "test", or be the development database) when NODE_ENV=test.');
+            throw new Error(`MONGO_DB_NAME must be an explicit test database (its name must contain "test") when NODE_ENV=test; refusing to run against "${name}".`);
         }
         return name;
     }
@@ -108,4 +115,5 @@ module.exports = {
     hasExplicitTestMarker,
     isApprovedTestTarget,
     DEV_DB_NAME,
+    TEST_DB_NAME,
 };
