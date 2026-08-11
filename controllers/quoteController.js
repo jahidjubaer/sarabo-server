@@ -88,7 +88,7 @@ class QuoteController {
                         now,
                     });
 
-                    const updateResult = await this.collections.parcels.updateOne(
+                    const updateResult = await this.collections.repairRequests.updateOne(
                         {
                             _id: parcel._id,
                             schemaVersion: 2,
@@ -102,7 +102,7 @@ class QuoteController {
                     );
 
                     if (updateResult.matchedCount === 0) {
-                        const fresh = await this.collections.parcels.findOne({ _id: parcel._id }, { session: mongoSession });
+                        const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
                         else if (fresh.quote && fresh.quote.status) conflictCode = 'QUOTE_ALREADY_SUBMITTED';
                         else if (fresh.riderEmail !== email || fresh.riderId !== parcel.riderId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
@@ -110,7 +110,7 @@ class QuoteController {
                         throw new Error('quote submission guard failed');
                     }
 
-                    await logTracking(this.collections.trackings, parcel.trackingId, QUOTE_SUBMITTED, mongoSession);
+                    await logTracking(this.collections.trackingEvents, parcel.trackingId, QUOTE_SUBMITTED, mongoSession);
                     await this.notifications.createNotification({
                         session: mongoSession,
                         recipientEmail: parcel.senderEmail,
@@ -187,7 +187,7 @@ class QuoteController {
                     const now = new Date();
                     decidedAt = now;
 
-                    const updateResult = await this.collections.parcels.updateOne(
+                    const updateResult = await this.collections.repairRequests.updateOne(
                         {
                             _id: parcel._id,
                             schemaVersion: 2,
@@ -208,14 +208,14 @@ class QuoteController {
                     );
 
                     if (updateResult.matchedCount === 0) {
-                        const fresh = await this.collections.parcels.findOne({ _id: parcel._id }, { session: mongoSession });
+                        const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
                         else if (fresh.quote && (fresh.quote.status === 'approved' || fresh.quote.status === 'rejected')) conflictCode = 'QUOTE_ALREADY_DECIDED';
                         else conflictCode = 'QUOTE_NOT_DECIDABLE';
                         throw new Error('quote decision guard failed');
                     }
 
-                    await logTracking(this.collections.trackings, parcel.trackingId, newDeliveryStatus, mongoSession);
+                    await logTracking(this.collections.trackingEvents, parcel.trackingId, newDeliveryStatus, mongoSession);
                     // Notify the assigned technician of the customer's decision.
                     await this.notifications.createNotification({
                         session: mongoSession,

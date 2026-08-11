@@ -212,7 +212,7 @@ async function testStatusTransitions() {
         // actually succeed (Phase 2.5 Unit 2 made assignment transactional
         // and validates the technician up front), so capture its workStatus
         // before this test can mutate it and restore it in `finally`.
-        const riderBeforeTest = await collections.riders.findOne({ email: RIDER_EMAIL });
+        const riderBeforeTest = await collections.technicians.findOne({ email: RIDER_EMAIL });
         originalRiderWorkStatus = riderBeforeTest?.workStatus ?? null;
 
         async function createTestParcel(marker) {
@@ -234,7 +234,7 @@ async function testStatusTransitions() {
             // looks the technician up (Phase 2.5 Unit 2) - reuses the same
             // known, persistent local-dev rider account referenced by
             // RIDER_EMAIL elsewhere in this file, rather than a fake string.
-            const realRider = await collections.riders.findOne({ email: RIDER_EMAIL });
+            const realRider = await collections.technicians.findOne({ email: RIDER_EMAIL });
             await parcelController.assignRiderToParcel(
                 {
                     params: { id },
@@ -274,9 +274,9 @@ async function testStatusTransitions() {
         // not a malformed request - see parcelController.updateParcelStatus.
         logTest('Backward transition rejected', res.statusCode === 409 && res.body.code === 'STATUS_TRANSITION_NOT_ALLOWED');
 
-        const trackingCountBefore = await collections.trackings.countDocuments({ trackingId: main.trackingId });
+        const trackingCountBefore = await collections.trackingEvents.countDocuments({ trackingId: main.trackingId });
         res = await updateStatus(main.id, 'parcel_picked_up', RIDER_EMAIL, main.trackingId);
-        const trackingCountAfter = await collections.trackings.countDocuments({ trackingId: main.trackingId });
+        const trackingCountAfter = await collections.trackingEvents.countDocuments({ trackingId: main.trackingId });
         logTest(
             'Repeated same status handled safely (no duplicate tracking log)',
             res.statusCode === 200 && trackingCountAfter === trackingCountBefore
@@ -312,10 +312,10 @@ async function testStatusTransitions() {
         // The shared Mongo connection itself is closed once, at the very end
         // of runAllTests(), after every database-backed test section is done.
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdTrackingIds.length) {
-            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+            await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
         // Phase 5.2 Unit 3 wired real notification creation into
         // assignRiderToParcel, so assignTestRider's real CUSTOMER_EMAIL/
@@ -330,9 +330,9 @@ async function testStatusTransitions() {
         // test's assignments can genuinely flip it to 'in_delivery' now that
         // assignment is transactional, and it must never be left mutated.
         if (originalRiderWorkStatus !== null) {
-            const currentRider = await collections.riders.findOne({ email: RIDER_EMAIL });
+            const currentRider = await collections.technicians.findOne({ email: RIDER_EMAIL });
             if (currentRider && currentRider.workStatus !== originalRiderWorkStatus) {
-                await collections.riders.updateOne(
+                await collections.technicians.updateOne(
                     { email: RIDER_EMAIL },
                     { $set: { workStatus: originalRiderWorkStatus } }
                 );
@@ -379,11 +379,11 @@ async function testInitialRequestStatus() {
         // This test's assignment can genuinely flip the shared RIDER_EMAIL
         // account's workStatus now that assignment is transactional -
         // capture the original value up front and restore it in `finally`.
-        const riderBeforeTest = await collections.riders.findOne({ email: RIDER_EMAIL });
+        const riderBeforeTest = await collections.technicians.findOne({ email: RIDER_EMAIL });
         originalRiderWorkStatus = riderBeforeTest?.workStatus ?? null;
 
         const marker = `TEST-INITIAL-STATUS-${Date.now()}`;
-        const countBefore = await collections.parcels.countDocuments({ parcelName: marker });
+        const countBefore = await collections.repairRequests.countDocuments({ parcelName: marker });
 
         const createRes = fakeRes();
         await parcelController.createParcel(
@@ -399,7 +399,7 @@ async function testInitialRequestStatus() {
         createdTrackingIds.push(stored.trackingId);
         logTest('New request stores deliveryStatus: pending-pickup in MongoDB', stored.deliveryStatus === 'pending-pickup');
 
-        const countAfter = await collections.parcels.countDocuments({ parcelName: marker });
+        const countAfter = await collections.repairRequests.countDocuments({ parcelName: marker });
         logTest('No duplicate request created', countAfter === countBefore + 1);
 
         // Same query the admin "Assign Technicians" page issues.
@@ -410,7 +410,7 @@ async function testInitialRequestStatus() {
         // Must be a real, approved technician document now that
         // assignRiderToParcel validates riderId as an ObjectId and looks the
         // technician up (Phase 2.5 Unit 2).
-        const realRiderForAssignment = await collections.riders.findOne({ email: RIDER_EMAIL });
+        const realRiderForAssignment = await collections.technicians.findOne({ email: RIDER_EMAIL });
         await parcelController.assignRiderToParcel(
             {
                 params: { id },
@@ -423,10 +423,10 @@ async function testInitialRequestStatus() {
     } finally {
         await new Promise(resolve => setTimeout(resolve, 300));
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdTrackingIds.length) {
-            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+            await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
         // Phase 5.2 Unit 3: the real assignment above now also creates real
         // notification documents for CUSTOMER_EMAIL/RIDER_EMAIL - scoped and
@@ -437,9 +437,9 @@ async function testInitialRequestStatus() {
 
         // Restore the real, shared RIDER_EMAIL account's workStatus.
         if (originalRiderWorkStatus !== null) {
-            const currentRider = await collections.riders.findOne({ email: RIDER_EMAIL });
+            const currentRider = await collections.technicians.findOne({ email: RIDER_EMAIL });
             if (currentRider && currentRider.workStatus !== originalRiderWorkStatus) {
-                await collections.riders.updateOne(
+                await collections.technicians.updateOne(
                     { email: RIDER_EMAIL },
                     { $set: { workStatus: originalRiderWorkStatus } }
                 );
@@ -510,7 +510,7 @@ async function testSecureCheckoutSession() {
                 trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
                 createdAt: new Date()
             };
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             return { id: result.insertedId.toString(), ...doc };
         }
@@ -582,12 +582,12 @@ async function testSecureCheckoutSession() {
 
         // --- Already-paid request rejected. ---
         const paid = await createTestParcel(`TEST-PAYMENT-PAID-${Date.now()}`, 25);
-        await collections.parcels.updateOne({ _id: new ObjectId(paid.id) }, { $set: { paymentStatus: 'paid' } });
+        await collections.repairRequests.updateOne({ _id: new ObjectId(paid.id) }, { $set: { paymentStatus: 'paid' } });
         res = await checkout(paid.id, CUSTOMER_EMAIL);
         logTest('Already-paid request rejected', res.statusCode === 409);
     } finally {
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds } });
     }
@@ -669,7 +669,7 @@ async function testSecurePaymentSuccess() {
             };
             if (deliveryStatus) doc.deliveryStatus = deliveryStatus;
             if (paymentStatus) doc.paymentStatus = paymentStatus;
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             createdTrackingIds.push(doc.trackingId);
             return { id: result.insertedId.toString(), ...doc };
@@ -898,13 +898,13 @@ async function testSecurePaymentSuccess() {
     } finally {
         await new Promise(resolve => setTimeout(resolve, 300));
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdSessionIds.length) {
             await collections.payments.deleteMany({ sessionId: { $in: createdSessionIds } });
         }
         if (createdTrackingIds.length) {
-            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+            await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
         for (const sid of createdSessionIds) {
             stripeSessionFixtures.delete(sid);
@@ -1003,7 +1003,7 @@ async function testStripeWebhook() {
             };
             if (deliveryStatus) doc.deliveryStatus = deliveryStatus;
             if (paymentStatus) doc.paymentStatus = paymentStatus;
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             createdTrackingIds.push(doc.trackingId);
             return { id: result.insertedId.toString(), ...doc };
@@ -1347,13 +1347,13 @@ async function testStripeWebhook() {
     } finally {
         await new Promise(resolve => setTimeout(resolve, 300));
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdSessionIds.length) {
             await collections.payments.deleteMany({ sessionId: { $in: createdSessionIds } });
         }
         if (createdTrackingIds.length) {
-            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+            await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
         for (const sid of createdSessionIds) {
             stripeSessionFixtures.delete(sid);
@@ -1411,7 +1411,7 @@ async function testDuplicateCheckoutPrevention() {
                 trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
                 createdAt: new Date()
             };
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             return { id: result.insertedId.toString(), ...doc };
         }
@@ -1487,7 +1487,7 @@ async function testDuplicateCheckoutPrevention() {
 
         // --- 6. Paid parcel rejected, no checkout row created. ---
         const paidParcel = await createTestParcel(`TEST-DUPCHK-PAID-${Date.now()}`, 20);
-        await collections.parcels.updateOne({ _id: new ObjectId(paidParcel.id) }, { $set: { paymentStatus: 'paid' } });
+        await collections.repairRequests.updateOne({ _id: new ObjectId(paidParcel.id) }, { $set: { paymentStatus: 'paid' } });
         res = await checkout(paidParcel.id, CUSTOMER_EMAIL);
         const paidRow = await activeRowFor(paidParcel.id);
         logTest(
@@ -1626,14 +1626,14 @@ async function testDuplicateCheckoutPrevention() {
         // cleaned up too, not just the parcel/payment/checkout rows.
         const trackingIdsToClean = [];
         for (const id of createdParcelIds) {
-            const parcel = await collections.parcels.findOne({ _id: new ObjectId(id) }, { projection: { trackingId: 1 } });
+            const parcel = await collections.repairRequests.findOne({ _id: new ObjectId(id) }, { projection: { trackingId: 1 } });
             if (parcel) trackingIdsToClean.push(parcel.trackingId);
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds } });
         await collections.payments.deleteMany({ parcelId: { $in: createdParcelIds } });
         if (trackingIdsToClean.length) {
-            await collections.trackings.deleteMany({ trackingId: { $in: trackingIdsToClean } });
+            await collections.trackingEvents.deleteMany({ trackingId: { $in: trackingIdsToClean } });
         }
         // Phase 5.2 Unit 5 wired a real payment_confirmed notification into
         // the shared processVerifiedCheckoutSession this function's
@@ -1696,7 +1696,7 @@ async function testCurrencyAndEligibility() {
             };
             if (deliveryStatus !== undefined) doc.deliveryStatus = deliveryStatus;
             if (paymentStatus) doc.paymentStatus = paymentStatus;
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             return { id: result.insertedId.toString(), ...doc };
         }
@@ -1793,7 +1793,7 @@ async function testCurrencyAndEligibility() {
 
         // --- 15, 17. Already-paid and invalid-cost rejections carry stable codes. ---
         const paidParcel = await createTestParcel(`TEST-CURR-PAID-${Date.now()}`, { cost: 40 });
-        await collections.parcels.updateOne({ _id: new ObjectId(paidParcel.id) }, { $set: { paymentStatus: 'paid' } });
+        await collections.repairRequests.updateOne({ _id: new ObjectId(paidParcel.id) }, { $set: { paymentStatus: 'paid' } });
         res = await checkout(paidParcel.id, CUSTOMER_EMAIL);
         logTest('Already-paid request rejected with ALREADY_PAID', res.statusCode === 409 && res.body.code === 'ALREADY_PAID');
 
@@ -1810,7 +1810,7 @@ async function testCurrencyAndEligibility() {
         const p6 = await createTestParcel(`TEST-CURR-REUSEELIGIBLE-${Date.now()}`, { cost: 40 });
         res = await checkout(p6.id, CUSTOMER_EMAIL);
         sessionsBefore = capturedStripeSessionParams.length;
-        await collections.parcels.updateOne({ _id: new ObjectId(p6.id) }, { $set: { deliveryStatus: 'totally_bogus_status_xyz' } });
+        await collections.repairRequests.updateOne({ _id: new ObjectId(p6.id) }, { $set: { deliveryStatus: 'totally_bogus_status_xyz' } });
         res = await checkout(p6.id, CUSTOMER_EMAIL);
         logTest(
             'An existing active session is not reused once the parcel becomes ineligible',
@@ -1823,7 +1823,7 @@ async function testCurrencyAndEligibility() {
         const p7 = await createTestParcel(`TEST-CURR-WEBHOOKAFTERLIFECYCLE-${Date.now()}`, { cost: 40, deliveryStatus: 'pending-pickup' });
         res = await checkout(p7.id, CUSTOMER_EMAIL);
         const p7Row = await activeRowFor(p7.id);
-        await collections.parcels.updateOne({ _id: new ObjectId(p7.id) }, { $set: { deliveryStatus: 'parcel_delivered' } });
+        await collections.repairRequests.updateOne({ _id: new ObjectId(p7.id) }, { $set: { deliveryStatus: 'parcel_delivered' } });
         const p7Fixture = { ...stripeSessionFixtures.get(p7Row.sessionId), payment_status: 'paid', status: 'complete', payment_intent: `pi_test_curr_${p7.id}` };
         stripeSessionFixtures.set(p7Row.sessionId, p7Fixture);
         const hookRes = fakeRes();
@@ -1851,14 +1851,14 @@ async function testCurrencyAndEligibility() {
         // before deleting it so that log gets cleaned up too.
         const trackingIdsToClean = [];
         for (const id of createdParcelIds) {
-            const parcel = await collections.parcels.findOne({ _id: new ObjectId(id) }, { projection: { trackingId: 1 } });
+            const parcel = await collections.repairRequests.findOne({ _id: new ObjectId(id) }, { projection: { trackingId: 1 } });
             if (parcel) trackingIdsToClean.push(parcel.trackingId);
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds } });
         await collections.payments.deleteMany({ parcelId: { $in: createdParcelIds } });
         if (trackingIdsToClean.length) {
-            await collections.trackings.deleteMany({ trackingId: { $in: trackingIdsToClean } });
+            await collections.trackingEvents.deleteMany({ trackingId: { $in: trackingIdsToClean } });
         }
         // Phase 5.2 Unit 5 wired a real payment_confirmed notification into
         // the shared processVerifiedCheckoutSession this function's webhook
@@ -1936,7 +1936,7 @@ async function testPublicTracking() {
             };
             if (riderEmail) doc.riderEmail = riderEmail;
             if (deliveryStatus) doc.deliveryStatus = deliveryStatus;
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             createdTrackingIds.push(doc.trackingId);
             return { id: result.insertedId.toString(), ...doc };
@@ -1944,7 +1944,7 @@ async function testPublicTracking() {
 
         async function addLog(trackingId, status, createdAt) {
             const log = { trackingId, status, details: status.split('_').join(' '), createdAt: createdAt || new Date() };
-            await collections.trackings.insertOne(log);
+            await collections.trackingEvents.insertOne(log);
         }
 
         function callPublic(trackingCode) {
@@ -2140,10 +2140,10 @@ async function testPublicTracking() {
         }
     } finally {
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdTrackingIds.length) {
-            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+            await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
     }
 
@@ -2210,7 +2210,7 @@ async function testRequestCancellation() {
         // assignRiderToParcel validates riderId as an ObjectId and looks the
         // technician up (Phase 2.5 Unit 2) - reuses the same known,
         // persistent local-dev rider account used elsewhere in this file.
-        const realRider = await collections.riders.findOne({ email: RIDER_EMAIL });
+        const realRider = await collections.technicians.findOne({ email: RIDER_EMAIL });
         // The p10 cancellation-vs-assignment race can genuinely resolve to a
         // real successful assignment, which would flip this shared account's
         // workStatus - capture the original value now and restore it below.
@@ -2227,7 +2227,7 @@ async function testRequestCancellation() {
             if (deliveryStatus !== undefined) doc.deliveryStatus = deliveryStatus;
             if (riderEmail) doc.riderEmail = riderEmail;
             if (paymentStatus) doc.paymentStatus = paymentStatus;
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             createdTrackingIds.push(doc.trackingId);
             return { id: result.insertedId.toString(), ...doc };
@@ -2259,7 +2259,7 @@ async function testRequestCancellation() {
         }
 
         function trackingLogsFor(trackingId) {
-            return collections.trackings.find({ trackingId }).toArray();
+            return collections.trackingEvents.find({ trackingId }).toArray();
         }
 
         // --- 3, 4. Invalid ObjectId / missing request. ---
@@ -2459,10 +2459,10 @@ async function testRequestCancellation() {
         );
     } finally {
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdTrackingIds.length) {
-            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+            await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
         await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds } });
         await collections.payments.deleteMany({ parcelId: { $in: createdParcelIds } });
@@ -2475,9 +2475,9 @@ async function testRequestCancellation() {
 
         // Restore the real, shared RIDER_EMAIL account's workStatus.
         if (originalRiderWorkStatus !== null) {
-            const currentRider = await collections.riders.findOne({ email: RIDER_EMAIL });
+            const currentRider = await collections.technicians.findOne({ email: RIDER_EMAIL });
             if (currentRider && currentRider.workStatus !== originalRiderWorkStatus) {
-                await collections.riders.updateOne(
+                await collections.technicians.updateOne(
                     { email: RIDER_EMAIL },
                     { $set: { workStatus: originalRiderWorkStatus } }
                 );
@@ -2536,7 +2536,7 @@ async function testTechnicianAssignment() {
         // every other scenario below uses its own throwaway rider fixture so
         // this shared account is touched as little as possible. Its
         // workStatus is still captured and restored below regardless.
-        const realRider = await collections.riders.findOne({ email: RIDER_EMAIL });
+        const realRider = await collections.technicians.findOne({ email: RIDER_EMAIL });
         originalRiderWorkStatus = realRider?.workStatus ?? null;
 
         async function createTestParcel(marker, { deliveryStatus = 'pending-pickup', omitStatus = false } = {}) {
@@ -2548,7 +2548,7 @@ async function testTechnicianAssignment() {
                 createdAt: new Date()
             };
             if (!omitStatus) doc.deliveryStatus = deliveryStatus;
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             createdTrackingIds.push(doc.trackingId);
             return { id: result.insertedId.toString(), ...doc };
@@ -2562,7 +2562,7 @@ async function testTechnicianAssignment() {
                 workStatus,
                 createdAt: new Date()
             };
-            const result = await collections.riders.insertOne(doc);
+            const result = await collections.technicians.insertOne(doc);
             createdRiderIds.push(result.insertedId.toString());
             return { id: result.insertedId.toString(), ...doc };
         }
@@ -2583,7 +2583,7 @@ async function testTechnicianAssignment() {
         }
 
         function trackingLogsFor(trackingId) {
-            return collections.trackings.find({ trackingId }).toArray();
+            return collections.trackingEvents.find({ trackingId }).toArray();
         }
 
         // --- 1-6. Pre-transaction validation ordering & error codes. ---
@@ -2641,7 +2641,7 @@ async function testTechnicianAssignment() {
             p2After.riderName === realRider.name
         );
 
-        const riderAfterP2 = await collections.riders.findOne({ _id: realRider._id });
+        const riderAfterP2 = await collections.technicians.findOne({ _id: realRider._id });
         logTest('Technician workStatus updated to in_delivery', riderAfterP2.workStatus === 'in_delivery');
 
         const p2Logs = await trackingLogsFor(p2.trackingId);
@@ -2655,12 +2655,12 @@ async function testTechnicianAssignment() {
         // --- 11. Technician-update failure mid-transaction rolls back everything. ---
         const p3 = await createTestParcel(`TEST-ASSIGN-RIDERFAIL-${Date.now()}`);
         const riderForFailure = await createTestRider(`TEST-RIDER-FAIL-${Date.now()}`);
-        const originalRiderUpdateOne = collections.riders.updateOne.bind(collections.riders);
-        collections.riders.updateOne = async () => ({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
+        const originalRiderUpdateOne = collections.technicians.updateOne.bind(collections.technicians);
+        collections.technicians.updateOne = async () => ({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
         try {
             res = await assignReq(p3.id, { riderId: riderForFailure.id });
         } finally {
-            collections.riders.updateOne = originalRiderUpdateOne;
+            collections.technicians.updateOne = originalRiderUpdateOne;
         }
         logTest(
             // Phase 6.2 Unit 2: the rider claim guard now also covers
@@ -2681,16 +2681,16 @@ async function testTechnicianAssignment() {
         // --- 12. Tracking-insert failure mid-transaction rolls back everything. ---
         const p4 = await createTestParcel(`TEST-ASSIGN-TRACKFAIL-${Date.now()}`);
         const riderForTrackFailure = await createTestRider(`TEST-RIDER-TRACKFAIL-${Date.now()}`);
-        const originalTrackingInsertOne = collections.trackings.insertOne.bind(collections.trackings);
-        collections.trackings.insertOne = async () => { throw new Error('simulated tracking insert outage'); };
+        const originalTrackingInsertOne = collections.trackingEvents.insertOne.bind(collections.trackingEvents);
+        collections.trackingEvents.insertOne = async () => { throw new Error('simulated tracking insert outage'); };
         try {
             res = await assignReq(p4.id, { riderId: riderForTrackFailure.id });
         } finally {
-            collections.trackings.insertOne = originalTrackingInsertOne;
+            collections.trackingEvents.insertOne = originalTrackingInsertOne;
         }
         logTest('Tracking-insert failure surfaces as 500 ASSIGNMENT_FAILED', res.statusCode === 500 && res.body.code === 'ASSIGNMENT_FAILED');
         const p4After = await models.Parcel.findById(p4.id);
-        const riderAfterTrackFailure = await collections.riders.findOne({ _id: new ObjectId(riderForTrackFailure.id) });
+        const riderAfterTrackFailure = await collections.technicians.findOne({ _id: new ObjectId(riderForTrackFailure.id) });
         logTest(
             'Parcel and technician both rolled back on tracking-insert failure',
             p4After.deliveryStatus === 'pending-pickup' && !p4After.riderId && riderAfterTrackFailure.workStatus === 'available'
@@ -2711,7 +2711,7 @@ async function testTechnicianAssignment() {
         logTest('Transaction commit failure surfaces as 500 ASSIGNMENT_FAILED', res.statusCode === 500 && res.body.code === 'ASSIGNMENT_FAILED');
         logTest('Session is always ended, even after a commit failure', commitFailSession.hasEnded === true);
         const p5After = await models.Parcel.findById(p5.id);
-        const riderAfterCommitFailure = await collections.riders.findOne({ _id: new ObjectId(riderForCommitFailure.id) });
+        const riderAfterCommitFailure = await collections.technicians.findOne({ _id: new ObjectId(riderForCommitFailure.id) });
         const p5Logs = await trackingLogsFor(p5.trackingId);
         logTest(
             'No partial state survives a commit failure',
@@ -2738,7 +2738,7 @@ async function testTechnicianAssignment() {
             res.statusCode === 409 && res.body.code === 'REQUEST_ALREADY_ASSIGNED'
         );
 
-        const riderBAfter = await collections.riders.findOne({ _id: new ObjectId(riderB.id) });
+        const riderBAfter = await collections.technicians.findOne({ _id: new ObjectId(riderB.id) });
         const p6Logs = await trackingLogsFor(p6.trackingId);
         logTest(
             'The rejected technician (B) is never mutated and only one tracking log exists',
@@ -2761,8 +2761,8 @@ async function testTechnicianAssignment() {
         const p7Logs = await trackingLogsFor(p7.trackingId);
         logTest('Exactly one tracking log survives the assignment race', p7Logs.filter(l => l.status === 'driver_assigned').length === 1);
 
-        const riderCAfter = await collections.riders.findOne({ _id: new ObjectId(riderC.id) });
-        const riderDAfter = await collections.riders.findOne({ _id: new ObjectId(riderD.id) });
+        const riderCAfter = await collections.technicians.findOne({ _id: new ObjectId(riderC.id) });
+        const riderDAfter = await collections.technicians.findOne({ _id: new ObjectId(riderD.id) });
         const winnerIsC = raceResC.statusCode === 200;
         logTest(
             'Only the winning technician has workStatus mutated; the loser is untouched',
@@ -2847,7 +2847,7 @@ async function testTechnicianAssignment() {
         // not reachable through the API itself under the new invariant.
         const driftedTechnician = await createTestRider(`TEST-RIDER-DRIFT-${Date.now()}`, { workStatus: 'available' });
         const pDriftExisting = await createTestParcel(`TEST-ASSIGN-DRIFT-EXISTING-${Date.now()}`, { deliveryStatus: 'rider_arriving' });
-        await collections.parcels.updateOne({ _id: new ObjectId(pDriftExisting.id) }, { $set: { riderId: driftedTechnician.id, riderEmail: driftedTechnician.email } });
+        await collections.repairRequests.updateOne({ _id: new ObjectId(pDriftExisting.id) }, { $set: { riderId: driftedTechnician.id, riderEmail: driftedTechnician.email } });
         const pDriftNew = await createTestParcel(`TEST-ASSIGN-DRIFT-NEW-${Date.now()}`);
         res = await assignReq(pDriftNew.id, { riderId: driftedTechnician.id });
         logTest(
@@ -2862,7 +2862,7 @@ async function testTechnicianAssignment() {
         const riderForCompleted = await createTestRider(`TEST-RIDER-FORCOMPLETED-${Date.now()}`);
         res = await assignReq(pCompleted.id, { riderId: riderForCompleted.id });
         logTest('Completed request rejected for assignment (409)', res.statusCode === 409 && ['REQUEST_ALREADY_ASSIGNED', 'ASSIGNMENT_NOT_ALLOWED'].includes(res.body.code));
-        const riderForCompletedAfter = await collections.riders.findOne({ _id: new ObjectId(riderForCompleted.id) });
+        const riderForCompletedAfter = await collections.technicians.findOne({ _id: new ObjectId(riderForCompleted.id) });
         logTest('Technician untouched after a rejected completed-request assignment', riderForCompletedAfter.workStatus === 'available');
 
         // 8. Cancelled parcel rejected (direct, not just via the cancellation race).
@@ -2898,7 +2898,7 @@ async function testTechnicianAssignment() {
             'Two concurrent assignments of the SAME technician to two DIFFERENT requests produce exactly one winner',
             sameRiderStatuses[0] === 200 && sameRiderStatuses[1] === 409
         );
-        const sharedTechnicianAfter = await collections.riders.findOne({ _id: new ObjectId(sharedTechnician.id) });
+        const sharedTechnicianAfter = await collections.technicians.findOne({ _id: new ObjectId(sharedTechnician.id) });
         logTest('Winning assignment leaves the shared technician busy exactly once (not double-booked)', sharedTechnicianAfter.workStatus === 'in_delivery');
 
         const pRaceXAfter = await models.Parcel.findById(pRaceX.id);
@@ -2946,10 +2946,10 @@ async function testTechnicianAssignment() {
         // are all awaited directly in this controller, so no artificial
         // delay is needed here unlike the fire-and-forget cancellation path.
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdTrackingIds.length) {
-            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+            await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
         // Phase 5.2 Unit 3 wired real notification creation into
         // assignRiderToParcel, so every successful assignment above (which
@@ -2962,14 +2962,14 @@ async function testTechnicianAssignment() {
             await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
         }
         for (const id of createdRiderIds) {
-            await collections.riders.deleteOne({ _id: new ObjectId(id) });
+            await collections.technicians.deleteOne({ _id: new ObjectId(id) });
         }
 
         // Restore the real, shared RIDER_EMAIL account's workStatus.
         if (originalRiderWorkStatus !== null) {
-            const currentRider = await collections.riders.findOne({ email: RIDER_EMAIL });
+            const currentRider = await collections.technicians.findOne({ email: RIDER_EMAIL });
             if (currentRider && currentRider.workStatus !== originalRiderWorkStatus) {
-                await collections.riders.updateOne(
+                await collections.technicians.updateOne(
                     { email: RIDER_EMAIL },
                     { $set: { workStatus: originalRiderWorkStatus } }
                 );
@@ -3315,7 +3315,7 @@ async function testTechnicianApprovalTransaction() {
                 createdAt: new Date()
             };
             if (riderId !== undefined) doc.riderId = riderId;
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             return { id: result.insertedId.toString(), ...doc };
         }
@@ -3349,7 +3349,7 @@ async function testTechnicianApprovalTransaction() {
                 createdAt: new Date()
             };
             if (expertise) doc.expertise = expertise;
-            const result = await collections.riders.insertOne(doc);
+            const result = await collections.technicians.insertOne(doc);
             createdRiderIds.push(result.insertedId.toString());
             return { id: result.insertedId.toString(), ...doc };
         }
@@ -3404,7 +3404,7 @@ async function testTechnicianApprovalTransaction() {
         const r2 = await createTestRider(`TEST-APPROVAL-NOUSER-${Date.now()}`, { email: `test-approval-nouser-${Date.now()}@test.local` });
         res = await callUpdateRiderStatus(r2.id, { status: 'approved' });
         logTest('Missing linked user rejected (404)', res.statusCode === 404 && res.body.code === 'LINKED_USER_NOT_FOUND');
-        let riderAfter = await collections.riders.findOne({ _id: new ObjectId(r2.id) });
+        let riderAfter = await collections.technicians.findOne({ _id: new ObjectId(r2.id) });
         logTest('Technician status unchanged when the linked user is missing', riderAfter.status === 'pending');
 
         // --- 7. Approval success updates technician and user atomically. ---
@@ -3413,7 +3413,7 @@ async function testTechnicianApprovalTransaction() {
         await createTestUser(email3, 'user');
         res = await callUpdateRiderStatus(r3.id, { status: 'approved' });
         logTest('Approval succeeds (200)', res.statusCode === 200 && res.body.alreadyConsistent === false);
-        riderAfter = await collections.riders.findOne({ _id: new ObjectId(r3.id) });
+        riderAfter = await collections.technicians.findOne({ _id: new ObjectId(r3.id) });
         let userAfter = await collections.users.findOne({ email: email3 });
         logTest(
             'Approval atomically sets technician status=approved and user role=rider',
@@ -3426,7 +3426,7 @@ async function testTechnicianApprovalTransaction() {
         await createTestUser(email4, 'rider');
         res = await callUpdateRiderStatus(r4.id, { status: 'rejected' });
         logTest('Rejection succeeds (200)', res.statusCode === 200 && res.body.alreadyConsistent === false);
-        riderAfter = await collections.riders.findOne({ _id: new ObjectId(r4.id) });
+        riderAfter = await collections.technicians.findOne({ _id: new ObjectId(r4.id) });
         userAfter = await collections.users.findOne({ email: email4 });
         logTest(
             'Rejection atomically sets technician status=rejected and user role=user',
@@ -3445,7 +3445,7 @@ async function testTechnicianApprovalTransaction() {
             collections.users.updateOne = originalUsersUpdateOne;
         }
         logTest('User-update failure surfaces as 500 TECHNICIAN_APPROVAL_FAILED', res.statusCode === 500 && res.body.code === 'TECHNICIAN_APPROVAL_FAILED');
-        riderAfter = await collections.riders.findOne({ _id: new ObjectId(r5.id) });
+        riderAfter = await collections.technicians.findOne({ _id: new ObjectId(r5.id) });
         userAfter = await collections.users.findOne({ email: email5 });
         logTest(
             'Technician update rolled back and user left unchanged on user-update failure',
@@ -3456,16 +3456,16 @@ async function testTechnicianApprovalTransaction() {
         const email6 = `test-riderfail-${Date.now()}@test.local`;
         const r6 = await createTestRider(`TEST-RIDERFAIL-${Date.now()}`, { email: email6 });
         await createTestUser(email6, 'user');
-        const originalRidersUpdateOne = collections.riders.updateOne.bind(collections.riders);
-        collections.riders.updateOne = async () => ({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
+        const originalRidersUpdateOne = collections.technicians.updateOne.bind(collections.technicians);
+        collections.technicians.updateOne = async () => ({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
         try {
             res = await callUpdateRiderStatus(r6.id, { status: 'approved' });
         } finally {
-            collections.riders.updateOne = originalRidersUpdateOne;
+            collections.technicians.updateOne = originalRidersUpdateOne;
         }
         logTest('Technician guarded-update failure surfaces as a controlled 409, not a false success', res.statusCode === 409 && res.body.code === 'TECHNICIAN_STATUS_CONFLICT');
         userAfter = await collections.users.findOne({ email: email6 });
-        riderAfter = await collections.riders.findOne({ _id: new ObjectId(r6.id) });
+        riderAfter = await collections.technicians.findOne({ _id: new ObjectId(r6.id) });
         logTest(
             'User and technician both remain unchanged when the technician write itself fails',
             userAfter.role === 'user' && riderAfter.status === 'pending'
@@ -3486,7 +3486,7 @@ async function testTechnicianApprovalTransaction() {
         }
         logTest('Transaction commit failure surfaces as 500 TECHNICIAN_APPROVAL_FAILED', res.statusCode === 500 && res.body.code === 'TECHNICIAN_APPROVAL_FAILED');
         logTest('Session is always ended, even after a commit failure', commitFailSession.hasEnded === true);
-        riderAfter = await collections.riders.findOne({ _id: new ObjectId(r7.id) });
+        riderAfter = await collections.technicians.findOne({ _id: new ObjectId(r7.id) });
         userAfter = await collections.users.findOne({ email: email7 });
         logTest('No partial state survives a commit failure', riderAfter.status === 'pending' && userAfter.role === 'user');
 
@@ -3508,7 +3508,7 @@ async function testTechnicianApprovalTransaction() {
         await createTestUser(email9, 'admin');
         res = await callUpdateRiderStatus(r9.id, { status: 'approved' });
         logTest('Admin-linked technician approval rejected as a controlled conflict (409)', res.statusCode === 409 && res.body.code === 'LINKED_USER_ROLE_CONFLICT');
-        riderAfter = await collections.riders.findOne({ _id: new ObjectId(r9.id) });
+        riderAfter = await collections.technicians.findOne({ _id: new ObjectId(r9.id) });
         userAfter = await collections.users.findOne({ email: email9 });
         logTest(
             'Admin role is never downgraded and the technician application is never modified',
@@ -3576,7 +3576,7 @@ async function testTechnicianApprovalTransaction() {
         const rIdle1 = await createTestRider(`TEST-APPROVE-IDLE1-${Date.now()}`, { email: emailIdle1 });
         await createTestUser(emailIdle1, 'user');
         res = await callUpdateRiderStatus(rIdle1.id, { status: 'approved' });
-        riderAfter = await collections.riders.findOne({ _id: new ObjectId(rIdle1.id) });
+        riderAfter = await collections.technicians.findOne({ _id: new ObjectId(rIdle1.id) });
         logTest(
             '1. Pending approval with no active assignment: approved + available',
             res.statusCode === 200 && riderAfter.status === 'approved' && riderAfter.workStatus === 'available'
@@ -3587,7 +3587,7 @@ async function testTechnicianApprovalTransaction() {
         const rIdle2 = await createTestRider(`TEST-APPROVE-IDLE2-${Date.now()}`, { status: 'rejected', email: emailIdle2 });
         await createTestUser(emailIdle2, 'user');
         res = await callUpdateRiderStatus(rIdle2.id, { status: 'approved' });
-        riderAfter = await collections.riders.findOne({ _id: new ObjectId(rIdle2.id) });
+        riderAfter = await collections.technicians.findOne({ _id: new ObjectId(rIdle2.id) });
         logTest(
             '2. Rejected-to-approved with no active assignment: approved + available',
             res.statusCode === 200 && riderAfter.status === 'approved' && riderAfter.workStatus === 'available'
@@ -3601,7 +3601,7 @@ async function testTechnicianApprovalTransaction() {
         await createTestUser(emailActive1, 'user');
         const pActive1 = await createTestParcel(`TEST-APPROVE-ACTIVE-${Date.now()}`, { deliveryStatus: 'driver_assigned', riderId: rActive1.id });
         res = await callUpdateRiderStatus(rActive1.id, { status: 'approved' });
-        riderAfter = await collections.riders.findOne({ _id: new ObjectId(rActive1.id) });
+        riderAfter = await collections.technicians.findOne({ _id: new ObjectId(rActive1.id) });
         logTest(
             '3. Approval with an existing active assignment: approved + in_delivery, never available',
             res.statusCode === 200 && riderAfter.status === 'approved' && riderAfter.workStatus === 'in_delivery'
@@ -3614,7 +3614,7 @@ async function testTechnicianApprovalTransaction() {
         await createTestUser(emailReapproveActive, 'rider');
         const pReapproveActive = await createTestParcel(`TEST-REAPPROVE-ACTIVE-${Date.now()}`, { deliveryStatus: 'rider_arriving', riderId: rReapproveActive.id });
         res = await callUpdateRiderStatus(rReapproveActive.id, { status: 'approved' });
-        riderAfter = await collections.riders.findOne({ _id: new ObjectId(rReapproveActive.id) });
+        riderAfter = await collections.technicians.findOne({ _id: new ObjectId(rReapproveActive.id) });
         logTest(
             '4. Reapproval of an actively-assigned technician preserves in_delivery',
             res.statusCode === 200 && res.body.alreadyConsistent === true && riderAfter.workStatus === 'in_delivery'
@@ -3627,7 +3627,7 @@ async function testTechnicianApprovalTransaction() {
         const rReapproveIdle = await createTestRider(`TEST-REAPPROVE-IDLE-${Date.now()}`, { status: 'approved', workStatus: 'in_delivery', email: emailReapproveIdle });
         await createTestUser(emailReapproveIdle, 'rider');
         res = await callUpdateRiderStatus(rReapproveIdle.id, { status: 'approved' });
-        riderAfter = await collections.riders.findOne({ _id: new ObjectId(rReapproveIdle.id) });
+        riderAfter = await collections.technicians.findOne({ _id: new ObjectId(rReapproveIdle.id) });
         logTest(
             '5. Reapproval of an idle (no active assignment) technician corrects workStatus to available',
             res.statusCode === 200 && res.body.alreadyConsistent === true && riderAfter.workStatus === 'available'
@@ -3642,7 +3642,7 @@ async function testTechnicianApprovalTransaction() {
         const notifBeforeRejectActive = await collections.notifications.countDocuments({ entityId: rRejectActive.id });
         res = await callUpdateRiderStatus(rRejectActive.id, { status: 'rejected' });
         logTest('7. Rejection of an actively-assigned technician is blocked (409 TECHNICIAN_HAS_ACTIVE_ASSIGNMENT)', res.statusCode === 409 && res.body.code === 'TECHNICIAN_HAS_ACTIVE_ASSIGNMENT');
-        riderAfter = await collections.riders.findOne({ _id: new ObjectId(rRejectActive.id) });
+        riderAfter = await collections.technicians.findOne({ _id: new ObjectId(rRejectActive.id) });
         userAfter = await collections.users.findOne({ email: emailRejectActive });
         const notifAfterRejectActive = await collections.notifications.countDocuments({ entityId: rRejectActive.id });
         logTest(
@@ -3674,7 +3674,7 @@ async function testTechnicianApprovalTransaction() {
             callUpdateRiderStatus(rRaceApprove.id, { status: 'approved' }),
             callAssign(pRaceApprove.id, rRaceApprove.id)
         ]);
-        const riderRaceApproveAfter = await collections.riders.findOne({ _id: new ObjectId(rRaceApprove.id) });
+        const riderRaceApproveAfter = await collections.technicians.findOne({ _id: new ObjectId(rRaceApprove.id) });
         const pRaceApproveAfter = await models.Parcel.findById(pRaceApprove.id);
         const raceApproveAssignmentSucceeded = pRaceApproveAfter.riderId === rRaceApprove.id && pRaceApproveAfter.deliveryStatus === 'driver_assigned';
         logTest(
@@ -3694,7 +3694,7 @@ async function testTechnicianApprovalTransaction() {
             callAssign(pRaceReject.id, rRaceReject.id),
             callUpdateRiderStatus(rRaceReject.id, { status: 'rejected' })
         ]);
-        const riderRaceRejectAfter = await collections.riders.findOne({ _id: new ObjectId(rRaceReject.id) });
+        const riderRaceRejectAfter = await collections.technicians.findOne({ _id: new ObjectId(rRaceReject.id) });
         const pRaceRejectAfter = await models.Parcel.findById(pRaceReject.id);
         const neverRejectedWithActiveAssignment = !(
             riderRaceRejectAfter.status === 'rejected' &&
@@ -3718,7 +3718,7 @@ async function testTechnicianApprovalTransaction() {
             callCompleteStatus(pRaceComplete.id),
             callUpdateRiderStatus(rRaceComplete.id, { status: 'approved' })
         ]);
-        const riderRaceCompleteAfter = await collections.riders.findOne({ _id: new ObjectId(rRaceComplete.id) });
+        const riderRaceCompleteAfter = await collections.technicians.findOne({ _id: new ObjectId(rRaceComplete.id) });
         const pRaceCompleteAfter = await models.Parcel.findById(pRaceComplete.id);
         logTest(
             '20. Concurrent completion vs. reapproval: request completes and technician converges to available',
@@ -3742,10 +3742,10 @@ async function testTechnicianApprovalTransaction() {
             await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
         }
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         for (const id of createdRiderIds) {
-            await collections.riders.deleteOne({ _id: new ObjectId(id) });
+            await collections.technicians.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdUserEmails.length) {
             await collections.users.deleteMany({ email: { $in: createdUserEmails } });
@@ -3809,7 +3809,7 @@ async function testRepairCompletionTransaction() {
                 workStatus,
                 createdAt: new Date()
             };
-            const result = await collections.riders.insertOne(doc);
+            const result = await collections.technicians.insertOne(doc);
             createdRiderIds.push(result.insertedId.toString());
             createdUserEmails.push(email);
             await collections.users.insertOne({ email, role: 'rider', createdAt: new Date() });
@@ -3828,7 +3828,7 @@ async function testRepairCompletionTransaction() {
             if (riderId !== undefined) doc.riderId = riderId;
             if (riderEmail !== undefined) doc.riderEmail = riderEmail;
             if (riderName !== undefined) doc.riderName = riderName;
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             createdTrackingIds.push(doc.trackingId);
             return { id: result.insertedId.toString(), ...doc };
@@ -3841,7 +3841,7 @@ async function testRepairCompletionTransaction() {
         }
 
         function trackingLogsFor(trackingId) {
-            return collections.trackings.find({ trackingId }).toArray();
+            return collections.trackingEvents.find({ trackingId }).toArray();
         }
 
         // --- 1. Anonymous PATCH rejected (real HTTP, real middleware chain). ---
@@ -3911,7 +3911,7 @@ async function testRepairCompletionTransaction() {
         const pMainAfter = await models.Parcel.findById(pMain.id);
         logTest('Repair request status is parcel_delivered', pMainAfter.deliveryStatus === 'parcel_delivered');
 
-        const techMainAfter = await collections.riders.findOne({ _id: new ObjectId(techMain.id) });
+        const techMainAfter = await collections.technicians.findOne({ _id: new ObjectId(techMain.id) });
         logTest('Assigned technician workStatus reset to available', techMainAfter.workStatus === 'available');
 
         const pMainLogs = await trackingLogsFor(pMain.trackingId);
@@ -3923,7 +3923,7 @@ async function testRepairCompletionTransaction() {
 
         // --- 12, 13. Spoofed body riderId is ignored; server always uses the
         // request's own riderId. ---
-        const techOtherAfter = await collections.riders.findOne({ _id: new ObjectId(techOther.id) });
+        const techOtherAfter = await collections.technicians.findOne({ _id: new ObjectId(techOther.id) });
         logTest(
             'Body-supplied riderId is ignored - the spoofed (unrelated) technician is never mutated',
             techOtherAfter.workStatus === 'in_delivery'
@@ -3938,12 +3938,12 @@ async function testRepairCompletionTransaction() {
         const pRiderFail = await createTestParcel(`TEST-COMPLETE-RIDERFAIL-${Date.now()}`, {
             riderId: techRiderFail.id, riderEmail: techRiderFail.email
         });
-        const originalRidersUpdateOne = collections.riders.updateOne.bind(collections.riders);
-        collections.riders.updateOne = async () => ({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
+        const originalRidersUpdateOne = collections.technicians.updateOne.bind(collections.technicians);
+        collections.technicians.updateOne = async () => ({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
         try {
             res = await callUpdateStatus(pRiderFail.id, 'parcel_delivered', techRiderFail.email);
         } finally {
-            collections.riders.updateOne = originalRidersUpdateOne;
+            collections.technicians.updateOne = originalRidersUpdateOne;
         }
         logTest('Technician-reset failure surfaces as 500 COMPLETION_FAILED', res.statusCode === 500 && res.body.code === 'COMPLETION_FAILED');
         const pRiderFailAfter = await models.Parcel.findById(pRiderFail.id);
@@ -3958,16 +3958,16 @@ async function testRepairCompletionTransaction() {
         const pTrackFail = await createTestParcel(`TEST-COMPLETE-TRACKFAIL-${Date.now()}`, {
             riderId: techTrackFail.id, riderEmail: techTrackFail.email
         });
-        const originalTrackingsInsertOne = collections.trackings.insertOne.bind(collections.trackings);
-        collections.trackings.insertOne = async () => { throw new Error('simulated tracking insert outage'); };
+        const originalTrackingsInsertOne = collections.trackingEvents.insertOne.bind(collections.trackingEvents);
+        collections.trackingEvents.insertOne = async () => { throw new Error('simulated tracking insert outage'); };
         try {
             res = await callUpdateStatus(pTrackFail.id, 'parcel_delivered', techTrackFail.email);
         } finally {
-            collections.trackings.insertOne = originalTrackingsInsertOne;
+            collections.trackingEvents.insertOne = originalTrackingsInsertOne;
         }
         logTest('Tracking-insert failure surfaces as 500 COMPLETION_FAILED', res.statusCode === 500 && res.body.code === 'COMPLETION_FAILED');
         const pTrackFailAfter = await models.Parcel.findById(pTrackFail.id);
-        const techTrackFailAfter = await collections.riders.findOne({ _id: new ObjectId(techTrackFail.id) });
+        const techTrackFailAfter = await collections.technicians.findOne({ _id: new ObjectId(techTrackFail.id) });
         logTest(
             'Repair request and technician both rolled back on tracking-insert failure',
             pTrackFailAfter.deliveryStatus === 'parcel_picked_up' && techTrackFailAfter.workStatus === 'in_delivery'
@@ -3990,7 +3990,7 @@ async function testRepairCompletionTransaction() {
         logTest('Transaction commit failure surfaces as 500 COMPLETION_FAILED', res.statusCode === 500 && res.body.code === 'COMPLETION_FAILED');
         logTest('Session is always ended, even after a commit failure', commitFailSession.hasEnded === true);
         const pCommitFailAfter = await models.Parcel.findById(pCommitFail.id);
-        const techCommitFailAfter = await collections.riders.findOne({ _id: new ObjectId(techCommitFail.id) });
+        const techCommitFailAfter = await collections.technicians.findOne({ _id: new ObjectId(techCommitFail.id) });
         const commitFailLogs = await trackingLogsFor(pCommitFail.trackingId);
         logTest(
             'No partial state survives a commit failure',
@@ -4070,7 +4070,7 @@ async function testRepairCompletionTransaction() {
             newlyCompletedCount === 1 && safeRepeatCount === 1
         );
         const pRaceAfter = await models.Parcel.findById(pRace.id);
-        const techRaceAfter = await collections.riders.findOne({ _id: new ObjectId(techRace.id) });
+        const techRaceAfter = await collections.technicians.findOne({ _id: new ObjectId(techRace.id) });
         const pRaceLogs = await trackingLogsFor(pRace.trackingId);
         logTest(
             'After the race: request delivered, technician available, exactly one completion log',
@@ -4148,7 +4148,7 @@ async function testRepairCompletionTransaction() {
             'Completion of one request still succeeds even when the technician holds another active one',
             res.statusCode === 200 && res.body.deliveryStatus === 'parcel_delivered'
         );
-        const techDualBusyAfter = await collections.riders.findOne({ _id: new ObjectId(techDualBusy.id) });
+        const techDualBusyAfter = await collections.technicians.findOne({ _id: new ObjectId(techDualBusy.id) });
         logTest(
             'Technician is NOT freed to available while another active assignment (pDualOther) still exists',
             techDualBusyAfter.workStatus === 'in_delivery'
@@ -4160,10 +4160,10 @@ async function testRepairCompletionTransaction() {
         );
     } finally {
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdTrackingIds.length) {
-            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+            await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
         // Phase 5.2 Unit 4 wired real notification creation into
         // completeParcel, so every genuine completion above (which uses the
@@ -4176,7 +4176,7 @@ async function testRepairCompletionTransaction() {
             await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
         }
         for (const id of createdRiderIds) {
-            await collections.riders.deleteOne({ _id: new ObjectId(id) });
+            await collections.technicians.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdUserEmails.length) {
             await collections.users.deleteMany({ email: { $in: createdUserEmails } });
@@ -4250,7 +4250,7 @@ async function testAdminParcelsList() {
                 createdAt: now,
                 ...overrides
             };
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             return { id: result.insertedId.toString(), ...doc };
         }
@@ -4388,7 +4388,7 @@ async function testAdminParcelsList() {
 
         // --- 25. Total count matches the same filter used for data. ---
         res = await callGetAdminParcels({ search: marker, limit: 2 });
-        const directCount = await collections.parcels.countDocuments({ $or: [
+        const directCount = await collections.repairRequests.countDocuments({ $or: [
             { trackingId: { $regex: marker, $options: 'i' } },
             { senderEmail: { $regex: marker, $options: 'i' } },
             { senderName: { $regex: marker, $options: 'i' } },
@@ -4436,9 +4436,9 @@ async function testAdminParcelsList() {
         // this new section, not duplicated here.
     } finally {
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
-        const remaining = await collections.parcels.countDocuments({ parcelName: { $regex: `^${marker}` } });
+        const remaining = await collections.repairRequests.countDocuments({ parcelName: { $regex: `^${marker}` } });
         logTest('No admin-list test fixtures remain after cleanup', remaining === 0);
     }
 
@@ -5387,7 +5387,7 @@ async function testTechnicianNotificationIntegration() {
                 expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2 }],
                 status, workStatus: 'available', createdAt: new Date()
             };
-            const result = await collections.riders.insertOne(doc);
+            const result = await collections.technicians.insertOne(doc);
             createdRiderIds.push(result.insertedId.toString());
             return { id: result.insertedId.toString(), ...doc };
         }
@@ -5403,7 +5403,7 @@ async function testTechnicianNotificationIntegration() {
                 trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
                 deliveryStatus, createdAt: new Date()
             };
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             createdTrackingIds.push(doc.trackingId);
             return { id: result.insertedId.toString(), ...doc };
@@ -5539,7 +5539,7 @@ async function testTechnicianNotificationIntegration() {
             collections.notifications.insertOne = originalNotifInsertOne;
         }
         logTest('12. Notification failure aborts the approval transaction (500)', approveFailRes.statusCode === 500);
-        const riderAfterApproveFail = await collections.riders.findOne({ _id: new ObjectId(rApproveFail.id) });
+        const riderAfterApproveFail = await collections.technicians.findOne({ _id: new ObjectId(rApproveFail.id) });
         const userAfterApproveFail = await collections.users.findOne({ email: approveFailEmail });
         logTest(
             '13. Rider status and linked user role both roll back on notification failure',
@@ -5586,7 +5586,7 @@ async function testTechnicianNotificationIntegration() {
             collections.notifications.insertOne = originalNotifInsertOne;
         }
         logTest('20. Notification failure aborts the rejection transaction (500)', rejectFailRes.statusCode === 500);
-        const riderAfterRejectFail = await collections.riders.findOne({ _id: new ObjectId(rRejectFail.id) });
+        const riderAfterRejectFail = await collections.technicians.findOne({ _id: new ObjectId(rRejectFail.id) });
         const userAfterRejectFail = await collections.users.findOne({ email: rejectFailEmail });
         logTest(
             '21. Rider status and linked user role both roll back on rejection notification failure',
@@ -5649,8 +5649,8 @@ async function testTechnicianNotificationIntegration() {
         const orphanRes = await callAssign(orphanParcel.id, orphanTech.id);
         logTest('31. Missing owner user record aborts assignment (409 REPAIR_OWNER_ROLE_UNRESOLVED)', orphanRes.statusCode === 409 && orphanRes.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
         const orphanParcelAfter = await models.Parcel.findById(orphanParcel.id);
-        const orphanTechAfter = await collections.riders.findOne({ _id: new ObjectId(orphanTech.id) });
-        const orphanTrackingLogs = await collections.trackings.find({ trackingId: orphanParcel.trackingId }).toArray();
+        const orphanTechAfter = await collections.technicians.findOne({ _id: new ObjectId(orphanTech.id) });
+        const orphanTrackingLogs = await collections.trackingEvents.find({ trackingId: orphanParcel.trackingId }).toArray();
         const orphanNotifs = await notificationsFor(orphanParcel.id, 'technician_assigned');
         const orphanTechNotifs = await notificationsFor(orphanParcel.id, 'new_repair_assignment');
         logTest('32. Missing-owner failure leaves the parcel unassigned', orphanParcelAfter.deliveryStatus === 'pending-pickup' && !orphanParcelAfter.riderId);
@@ -5681,8 +5681,8 @@ async function testTechnicianNotificationIntegration() {
         }
         logTest('38. Notification failure aborts the entire assignment transaction (500)', assignNotifFailRes.statusCode === 500);
         const notifFailParcelAfter = await models.Parcel.findById(notifFailParcel.id);
-        const notifFailTechAfter = await collections.riders.findOne({ _id: new ObjectId(notifFailTech.id) });
-        const notifFailTrackingLogs = await collections.trackings.find({ trackingId: notifFailParcel.trackingId }).toArray();
+        const notifFailTechAfter = await collections.technicians.findOne({ _id: new ObjectId(notifFailTech.id) });
+        const notifFailTrackingLogs = await collections.trackingEvents.find({ trackingId: notifFailParcel.trackingId }).toArray();
         logTest(
             '39. Assignment failure rollback covers parcel, technician workload, and tracking together',
             notifFailParcelAfter.deliveryStatus === 'pending-pickup' && !notifFailParcelAfter.riderId &&
@@ -5704,13 +5704,13 @@ async function testTechnicianNotificationIntegration() {
 
     } finally {
         for (const id of createdRiderIds) {
-            await collections.riders.deleteOne({ _id: new ObjectId(id) });
+            await collections.technicians.deleteOne({ _id: new ObjectId(id) });
         }
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdTrackingIds.length) {
-            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+            await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
         if (createdUserEmails.length) {
             await collections.users.deleteMany({ email: { $in: createdUserEmails } });
@@ -5796,7 +5796,7 @@ async function testRepairLifecycleNotificationIntegration() {
                 name: marker, email, region: 'Test Region', district: 'Test District',
                 status: 'approved', workStatus, createdAt: new Date()
             };
-            const result = await collections.riders.insertOne(doc);
+            const result = await collections.technicians.insertOne(doc);
             createdRiderIds.push(result.insertedId.toString());
             await createTestUser(email, 'rider');
             return { id: result.insertedId.toString(), email };
@@ -5813,7 +5813,7 @@ async function testRepairLifecycleNotificationIntegration() {
                 doc.riderEmail = rider.email;
                 doc.riderName = rider.name || rider.email;
             }
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             createdTrackingIds.push(doc.trackingId);
             return { id: result.insertedId.toString(), ...doc };
@@ -5826,7 +5826,7 @@ async function testRepairLifecycleNotificationIntegration() {
         }
 
         function trackingLogsFor(trackingId) {
-            return collections.trackings.find({ trackingId }).toArray();
+            return collections.trackingEvents.find({ trackingId }).toArray();
         }
 
         const riderOwnerEmail = `test-unit4-riderowner-${runId}@test.local`;
@@ -5929,7 +5929,7 @@ async function testRepairLifecycleNotificationIntegration() {
         // driver_assigned so a genuine transition can be exercised, without
         // touching the pre-seeded notification's dedup key (still parcel id
         // p8.id).
-        await collections.parcels.updateOne({ _id: new ObjectId(p8.id) }, { $set: { deliveryStatus: 'driver_assigned' } });
+        await collections.repairRequests.updateOne({ _id: new ObjectId(p8.id) }, { $set: { deliveryStatus: 'driver_assigned' } });
         const dupRes = await callUpdateStatus(p8.id, 'rider_arriving', tech8.email);
         const otw8 = await notificationsFor(p8.id, 'technician_on_the_way');
         logTest('25. Duplicate notification result does not fail the status transition', dupRes.statusCode === 200 && dupRes.body.matchedCount === 1 && otw8.length === 1);
@@ -6005,7 +6005,7 @@ async function testRepairLifecycleNotificationIntegration() {
             isRead: false, readAt: null, createdAt: new Date(), actorEmail: null, actorRole: null,
             deduplicationKey: `repair:${p16.id}:status:parcel_picked_up`, metadata: {}, schemaVersion: 1
         });
-        await collections.parcels.updateOne({ _id: new ObjectId(p16.id) }, { $set: { deliveryStatus: 'rider_arriving' } });
+        await collections.repairRequests.updateOne({ _id: new ObjectId(p16.id) }, { $set: { deliveryStatus: 'rider_arriving' } });
         const dupRes16 = await callUpdateStatus(p16.id, 'parcel_picked_up', tech16.email);
         const rip16 = await notificationsFor(p16.id, 'repair_in_progress');
         logTest('46. Duplicate result is non-fatal', dupRes16.statusCode === 200 && dupRes16.body.matchedCount === 1 && rip16.length === 1);
@@ -6052,7 +6052,7 @@ async function testRepairLifecycleNotificationIntegration() {
         }
         logTest('60/63. Forced notification failure surfaces a controlled 500 and leaves no notification', completeFailRes.statusCode === 500 && (await notificationsFor(p20.id, 'repair_completed')).length === 0);
         const p20After = await models.Parcel.findById(p20.id);
-        const tech20After = await collections.riders.findOne({ _id: new ObjectId(tech20.id) });
+        const tech20After = await collections.technicians.findOne({ _id: new ObjectId(tech20.id) });
         const p20Logs = await trackingLogsFor(p20.trackingId);
         logTest(
             '61/62. Forced notification failure rolls back the parcel completion and rider workload together',
@@ -6066,7 +6066,7 @@ async function testRepairLifecycleNotificationIntegration() {
         const orphanCompleteRes = await callUpdateStatus(p21.id, 'parcel_delivered', tech21.email);
         logTest('64. Missing owner record aborts completion (409 REPAIR_OWNER_ROLE_UNRESOLVED)', orphanCompleteRes.statusCode === 409 && orphanCompleteRes.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
         const p21After = await models.Parcel.findById(p21.id);
-        const tech21After = await collections.riders.findOne({ _id: new ObjectId(tech21.id) });
+        const tech21After = await collections.technicians.findOne({ _id: new ObjectId(tech21.id) });
         const p21Logs = await trackingLogsFor(p21.trackingId);
         logTest(
             '66/67/68. Missing-owner failure leaves the parcel uncompleted, workload unchanged, and tracking unchanged',
@@ -6223,7 +6223,7 @@ async function testRepairLifecycleNotificationIntegration() {
         }
         logTest('18/20. Actor lookup participates in the completion transaction, and a missing actor record aborts completion (409 REPAIR_ACTOR_ROLE_UNRESOLVED)', missingActorCompleteRes.statusCode === 409 && missingActorCompleteRes.body.code === 'REPAIR_ACTOR_ROLE_UNRESOLVED');
         const pA14After = await models.Parcel.findById(pA14.id);
-        const techA14After = await collections.riders.findOne({ _id: new ObjectId(techA14.id) });
+        const techA14After = await collections.technicians.findOne({ _id: new ObjectId(techA14.id) });
         const pA14Logs = await trackingLogsFor(pA14.trackingId);
         const rcA14 = await notificationsFor(pA14.id, 'repair_completed');
         logTest(
@@ -6279,13 +6279,13 @@ async function testRepairLifecycleNotificationIntegration() {
 
     } finally {
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         for (const id of createdRiderIds) {
-            await collections.riders.deleteOne({ _id: new ObjectId(id) });
+            await collections.technicians.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdTrackingIds.length) {
-            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+            await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
         if (createdUserEmails.length) {
             await collections.users.deleteMany({ email: { $in: createdUserEmails } });
@@ -6375,7 +6375,7 @@ async function testPaymentNotificationIntegration() {
                 trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
                 createdAt: new Date()
             };
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             createdTrackingIds.push(doc.trackingId);
             return { id: result.insertedId.toString(), ...doc };
@@ -6586,7 +6586,7 @@ async function testPaymentNotificationIntegration() {
         logTest('56. Dedup unique index protects against double notification', dupProbe.inserted === false && dupProbe.code === 11000);
 
         const p12 = await createTestParcel(`TEST-UNIT5-CONFLICT-${runId}`, { cost: 30 });
-        await collections.parcels.updateOne({ _id: new ObjectId(p12.id) }, { $set: { paymentStatus: 'paid' } });
+        await collections.repairRequests.updateOne({ _id: new ObjectId(p12.id) }, { $set: { paymentStatus: 'paid' } });
         const sid12 = newSessionId('conflict');
         const res12 = await callWebhook(makeEvent(makeSessionObject(sid12, p12)));
         logTest('58. Guarded no-op (already-paid-elsewhere) path never invokes createNotification', res12.statusCode === 200 && res12.body.result === 'ALREADY_PAID_OTHER_SESSION' && (await notificationsFor(p12.id)).length === 0);
@@ -6621,10 +6621,10 @@ async function testPaymentNotificationIntegration() {
     } finally {
         await new Promise(resolve => setTimeout(resolve, 300));
         for (const id of createdParcelIds) {
-            await collections.parcels.deleteOne({ _id: new ObjectId(id) });
+            await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
         if (createdTrackingIds.length) {
-            await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+            await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
         if (createdSessionIds.length) {
             await collections.payments.deleteMany({ sessionId: { $in: createdSessionIds } });
@@ -6890,10 +6890,10 @@ async function testDatabaseNameValidation() {
         setEnv({ NODE_ENV: 'test', MONGO_DB_NAME: 'sarabo_test_selection_check' });
         const { collections: nameCheck } = freshDatabaseModule();
         const collectionNames = Object.values(nameCheck).map(c => c.collectionName);
-        logTest('8.7B: technician collection is "technicians"', nameCheck.riders.collectionName === 'technicians');
-        logTest('8.7B: repair-request collection is "repair_requests"', nameCheck.parcels.collectionName === 'repair_requests');
+        logTest('8.7B: technician collection is "technicians"', nameCheck.technicians.collectionName === 'technicians');
+        logTest('8.7B: repair-request collection is "repair_requests"', nameCheck.repairRequests.collectionName === 'repair_requests');
         logTest('8.7B: service-definition collection is "service_definitions"', nameCheck.serviceDefinitions.collectionName === 'service_definitions');
-        logTest('8.7B: tracking collection is "tracking_events"', nameCheck.trackings.collectionName === 'tracking_events');
+        logTest('8.7B: tracking collection is "tracking_events"', nameCheck.trackingEvents.collectionName === 'tracking_events');
         logTest('8.7B: no collection is named "riders"', !collectionNames.includes('riders'));
         logTest('8.7B: no collection is named "parcels"', !collectionNames.includes('parcels'));
     } finally {
@@ -7436,7 +7436,7 @@ async function testUserRoleUpdateSafety() {
             workStatus: 'available',
             createdAt: new Date()
         };
-        const result = await collections.riders.insertOne(doc);
+        const result = await collections.technicians.insertOne(doc);
         createdRiderIds.push(result.insertedId.toString());
         return result.insertedId;
     }
@@ -7652,7 +7652,7 @@ async function testUserRoleUpdateSafety() {
             await collections.users.deleteMany({ email: { $in: createdUserEmails } });
         }
         for (const id of createdRiderIds) {
-            await collections.riders.deleteOne({ _id: new ObjectId(id) });
+            await collections.technicians.deleteOne({ _id: new ObjectId(id) });
         }
     }
 
@@ -8207,7 +8207,7 @@ async function testTechnicianExpertise() {
                 status, workStatus, createdAt: new Date()
             };
             if (expertise !== undefined) doc.expertise = expertise;
-            const result = await collections.riders.insertOne(doc);
+            const result = await collections.technicians.insertOne(doc);
             createdRiderIds.push(result.insertedId.toString());
             return { id: result.insertedId.toString(), ...doc };
         }
@@ -8223,7 +8223,7 @@ async function testTechnicianExpertise() {
                 trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
                 deliveryStatus: 'driver_assigned', riderId, createdAt: new Date()
             };
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId.toString());
             return { id: result.insertedId.toString(), ...doc };
         }
@@ -8303,12 +8303,12 @@ async function testTechnicianExpertise() {
         // expertise array (so an approved applicant is actually matchable). An
         // application without expertise is rejected and nothing is persisted.
         const applicantEmailNoExpertise = `test-expertise-applicant-noexp-${runId}@test.local`;
-        const noExpertiseCountBefore = await collections.riders.countDocuments({ email: applicantEmailNoExpertise });
+        const noExpertiseCountBefore = await collections.technicians.countDocuments({ email: applicantEmailNoExpertise });
         const createNoExpertiseRes = await callCreateRider({
             name: `TEST-EXPERTISE-APPLY-NOEXP-${runId}`, email: applicantEmailNoExpertise,
             region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B'
         });
-        const noExpertiseCountAfter = await collections.riders.countDocuments({ email: applicantEmailNoExpertise });
+        const noExpertiseCountAfter = await collections.technicians.countDocuments({ email: applicantEmailNoExpertise });
         logTest('19. New rider without expertise is rejected, nothing persisted',
             createNoExpertiseRes.statusCode === 400 && createNoExpertiseRes.body.code === 'MISSING_EXPERTISE' &&
             noExpertiseCountBefore === 0 && noExpertiseCountAfter === 0);
@@ -8321,7 +8321,7 @@ async function testTechnicianExpertise() {
         });
         const validExpertiseRiderId = createValidExpertiseRes.body.insertedId.toString();
         createdRiderIds.push(validExpertiseRiderId);
-        const validExpertiseRiderDoc = await collections.riders.findOne({ _id: new ObjectId(validExpertiseRiderId) });
+        const validExpertiseRiderDoc = await collections.technicians.findOne({ _id: new ObjectId(validExpertiseRiderId) });
         logTest(
             '20. New rider with valid expertise persists it',
             createValidExpertiseRes.statusCode === 200 &&
@@ -8331,13 +8331,13 @@ async function testTechnicianExpertise() {
         );
 
         const applicantEmailInvalidExpertise = `test-expertise-applicant-invalid-${runId}@test.local`;
-        const riderCountBeforeInvalid = await collections.riders.countDocuments({ email: applicantEmailInvalidExpertise });
+        const riderCountBeforeInvalid = await collections.technicians.countDocuments({ email: applicantEmailInvalidExpertise });
         const createInvalidExpertiseRes = await callCreateRider({
             name: `TEST-EXPERTISE-APPLY-INVALID-${runId}`, email: applicantEmailInvalidExpertise,
             region: 'R', district: 'D', address: 'A', license: 'L', nid: 'N', bike: 'B',
             expertise: [validEntry({ level: 'wizard' })]
         });
-        const riderCountAfterInvalid = await collections.riders.countDocuments({ email: applicantEmailInvalidExpertise });
+        const riderCountAfterInvalid = await collections.technicians.countDocuments({ email: applicantEmailInvalidExpertise });
         logTest(
             '21. New rider with invalid expertise rejected, nothing persisted',
             createInvalidExpertiseRes.statusCode === 400 &&
@@ -8349,7 +8349,7 @@ async function testTechnicianExpertise() {
         const selfEmail = `test-expertise-self-${runId}@test.local`;
         const selfRider = await createTestRider(`TEST-EXPERTISE-SELF-${runId}`, { email: selfEmail });
         const selfUpdateRes = await callUpdateExpertise(selfRider.id, [validEntry()], selfEmail);
-        const selfRiderAfter = await collections.riders.findOne({ _id: new ObjectId(selfRider.id) });
+        const selfRiderAfter = await collections.technicians.findOne({ _id: new ObjectId(selfRider.id) });
         logTest(
             '22. Technician can update own expertise',
             selfUpdateRes.statusCode === 200 && selfRiderAfter.expertise.length === 1 && selfRiderAfter.expertise[0].productCategorySlug === 'smartphone'
@@ -8365,7 +8365,7 @@ async function testTechnicianExpertise() {
         await createTestUser(adminEmail, 'admin');
         const targetForAdmin = await createTestRider(`TEST-EXPERTISE-TARGET-B-${runId}`);
         const adminUpdateRes = await callUpdateExpertise(targetForAdmin.id, [validEntry()], adminEmail);
-        const targetForAdminAfter = await collections.riders.findOne({ _id: new ObjectId(targetForAdmin.id) });
+        const targetForAdminAfter = await collections.technicians.findOne({ _id: new ObjectId(targetForAdmin.id) });
         logTest(
             '24. Admin can update technician expertise',
             adminUpdateRes.statusCode === 200 && targetForAdminAfter.expertise.length === 1
@@ -8391,7 +8391,7 @@ async function testTechnicianExpertise() {
         const blockedRes = await callUpdateExpertise(activeRider.id, [validEntry({ level: 'expert', experienceYears: 10 })], activeEmail);
         logTest('28. Active technician expertise update blocked', blockedRes.statusCode === 409 && blockedRes.body.code === 'TECHNICIAN_HAS_ACTIVE_ASSIGNMENT');
 
-        const activeRiderAfter = await collections.riders.findOne({ _id: new ObjectId(activeRider.id) });
+        const activeRiderAfter = await collections.technicians.findOne({ _id: new ObjectId(activeRider.id) });
         logTest(
             '29. Blocked update leaves expertise unchanged',
             activeRiderAfter.expertise.length === 1 && activeRiderAfter.expertise[0].level === 'intermediate'
@@ -8419,7 +8419,7 @@ async function testTechnicianExpertise() {
             parcelName: `TEST-EXPERTISE-RACE-PARCEL-${runId}`, cost: 30, senderEmail: CUSTOMER_EMAIL,
             trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`, deliveryStatus: 'pending-pickup', createdAt: new Date()
         };
-        const raceParcelInsert = await collections.parcels.insertOne(raceParcelDoc);
+        const raceParcelInsert = await collections.repairRequests.insertOne(raceParcelDoc);
         createdParcelIds.push(raceParcelInsert.insertedId.toString());
         const assignFirstRes = await callAssign(raceParcelInsert.insertedId.toString(), raceRider.id);
         const updateAfterAssignRes = await callUpdateExpertise(raceRider.id, [validEntry({ level: 'advanced', experienceYears: 4 })], raceRiderEmail);
@@ -8448,7 +8448,7 @@ async function testTechnicianExpertise() {
             newExpertise: te.normalizeTechnicianExpertise([validEntry({ level: 'expert', experienceYears: 10 })])
         });
         logTest('32b. A write guarded on a stale (pre-first-update) snapshot is rejected, not applied', staleWriteResult.matchedCount === 0);
-        const staleGuardAfter = await collections.riders.findOne({ _id: new ObjectId(staleGuardRider.id) });
+        const staleGuardAfter = await collections.technicians.findOne({ _id: new ObjectId(staleGuardRider.id) });
         logTest('32c. Rejected stale write leaves the winning update intact', staleGuardAfter.expertise[0].level === 'beginner');
 
         // 32d: best-effort genuine end-to-end race across several trials -
@@ -8468,7 +8468,7 @@ async function testTechnicianExpertise() {
             if (rA.statusCode === 409 || rB.statusCode === 409) {
                 sawGenuineConflict = true;
                 const winnerLevel = rA.statusCode === 200 ? 'beginner' : 'expert';
-                const trialAfter = await collections.riders.findOne({ _id: new ObjectId(trialRider.id) });
+                const trialAfter = await collections.technicians.findOne({ _id: new ObjectId(trialRider.id) });
                 if (!trialAfter.expertise || trialAfter.expertise[0].level !== winnerLevel) anyInvalidOutcome = true;
             }
         }
@@ -8497,17 +8497,17 @@ async function testTechnicianExpertise() {
         // is left exactly as found, matching the established convention.
         if (createdParcelIds.length) {
             await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
-            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
+            await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
         }
         if (createdRiderIds.length) {
-            await collections.riders.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
+            await collections.technicians.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
         }
         if (createdUserEmails.length) {
             await collections.users.deleteMany({ email: { $in: createdUserEmails } });
         }
 
-        const leftoverRiders = await collections.riders.countDocuments({ name: { $regex: '^TEST-EXPERTISE-' } });
-        const leftoverParcels = await collections.parcels.countDocuments({ parcelName: { $regex: '^TEST-EXPERTISE-' } });
+        const leftoverRiders = await collections.technicians.countDocuments({ name: { $regex: '^TEST-EXPERTISE-' } });
+        const leftoverParcels = await collections.repairRequests.countDocuments({ parcelName: { $regex: '^TEST-EXPERTISE-' } });
         const leftoverUsers = await collections.users.countDocuments({ email: { $regex: '^test-expertise-' } });
         logTest('34. No fixture leakage after tests', leftoverRiders === 0 && leftoverParcels === 0 && leftoverUsers === 0);
     }
@@ -8630,17 +8630,17 @@ async function testRepairRequestV2() {
         // ================= Schema version (1-5) =================
         const legacyNoVersionRes = await callCreateParcel({ parcelName: `TEST-REQUEST-V2-LEGACY-${runId}`, cost: 40 }, customerEmail);
         createdParcelIds.push(legacyNoVersionRes.body.insertedId.toString());
-        const legacyNoVersionDoc = await collections.parcels.findOne({ _id: new ObjectId(legacyNoVersionRes.body.insertedId) });
+        const legacyNoVersionDoc = await collections.repairRequests.findOne({ _id: new ObjectId(legacyNoVersionRes.body.insertedId) });
         logTest('1. Missing schemaVersion follows legacy path', legacyNoVersionRes.statusCode === 200 && legacyNoVersionDoc.product === undefined && legacyNoVersionDoc.cost === 40);
 
         const legacyV1Res = await callCreateParcel({ schemaVersion: 1, parcelName: `TEST-REQUEST-V2-LEGACYV1-${runId}`, cost: 40 }, customerEmail);
         createdParcelIds.push(legacyV1Res.body.insertedId.toString());
-        const legacyV1Doc = await collections.parcels.findOne({ _id: new ObjectId(legacyV1Res.body.insertedId) });
+        const legacyV1Doc = await collections.repairRequests.findOne({ _id: new ObjectId(legacyV1Res.body.insertedId) });
         logTest('2. schemaVersion 1 follows legacy path', legacyV1Res.statusCode === 200 && legacyV1Doc.product === undefined && legacyV1Doc.cost === 40);
 
         const v2Res = await callCreateParcel(validV2Body(), customerEmail);
         createdParcelIds.push(v2Res.body.insertedId.toString());
-        const v2Doc = await collections.parcels.findOne({ _id: new ObjectId(v2Res.body.insertedId) });
+        const v2Doc = await collections.repairRequests.findOne({ _id: new ObjectId(v2Res.body.insertedId) });
         logTest('3. schemaVersion 2 follows v2 path', v2Res.statusCode === 200 && v2Doc.schemaVersion === 2 && v2Doc.product.categorySlug === 'smartphone');
 
         const unsupportedVersionRes = await callCreateParcel(validV2Body({ schemaVersion: 3 }), customerEmail);
@@ -8654,12 +8654,12 @@ async function testRepairRequestV2() {
 
         const spoofRes = await callCreateParcel(validV2Body({ senderEmail: 'attacker@test.local' }), customerEmail);
         createdParcelIds.push(spoofRes.body.insertedId.toString());
-        const spoofDoc = await collections.parcels.findOne({ _id: new ObjectId(spoofRes.body.insertedId) });
+        const spoofDoc = await collections.repairRequests.findOne({ _id: new ObjectId(spoofRes.body.insertedId) });
         logTest('7. Client cannot create for another email (senderEmail body field ignored)', spoofDoc.senderEmail === customerEmail);
 
         const spoofRes2 = await callCreateParcel(validV2Body({ customer: { email: 'attacker2@test.local' } }), customerEmail);
         createdParcelIds.push(spoofRes2.body.insertedId.toString());
-        const spoofDoc2 = await collections.parcels.findOne({ _id: new ObjectId(spoofRes2.body.insertedId) });
+        const spoofDoc2 = await collections.repairRequests.findOne({ _id: new ObjectId(spoofRes2.body.insertedId) });
         logTest('8. Client ownership field cannot override token identity (nested customer.email ignored)', spoofDoc2.senderEmail === customerEmail);
 
         // ================= Product (9-14) =================
@@ -8694,7 +8694,7 @@ async function testRepairRequestV2() {
 
         const overrideRepairRes = await callCreateParcel(validV2Body({ service: { definitionId: activeDef.id, repairCategorySlug: 'totally-different' } }), customerEmail);
         createdParcelIds.push(overrideRepairRes.body.insertedId.toString());
-        const overrideRepairDoc = await collections.parcels.findOne({ _id: new ObjectId(overrideRepairRes.body.insertedId) });
+        const overrideRepairDoc = await collections.repairRequests.findOne({ _id: new ObjectId(overrideRepairRes.body.insertedId) });
         logTest('20. Client repairCategorySlug cannot override server value', overrideRepairDoc.service.repairCategorySlug === 'charging-port');
 
         // ================= Pricing (21-30) =================
@@ -8717,7 +8717,7 @@ async function testRepairRequestV2() {
             customerEmail
         );
         createdParcelIds.push(inspectionRequiredRes.body.insertedId.toString());
-        const inspectionRequiredDoc = await collections.parcels.findOne({ _id: new ObjectId(inspectionRequiredRes.body.insertedId) });
+        const inspectionRequiredDoc = await collections.repairRequests.findOne({ _id: new ObjectId(inspectionRequiredRes.body.insertedId) });
         logTest(
             '25c. quoteStatus is pending_inspection for a definition with inspectionRequired true',
             inspectionRequiredDoc.pricing.quoteStatus === 'pending_inspection' && inspectionRequiredDoc.pricing.quotedAmount === null && inspectionRequiredDoc.pricing.finalAmount === null
@@ -8745,7 +8745,7 @@ async function testRepairRequestV2() {
         );
         createdParcelIds.push(priceChangeCreateRes.body.insertedId.toString());
         await collections.serviceDefinitions.updateOne({ _id: new ObjectId(priceChangeDefResult.id) }, { $set: { 'pricingRule.baseMin': 999, 'pricingRule.baseMax': 1000, 'pricingRule.version': 2 } });
-        const priceChangeDocAfter = await collections.parcels.findOne({ _id: new ObjectId(priceChangeCreateRes.body.insertedId) });
+        const priceChangeDocAfter = await collections.repairRequests.findOne({ _id: new ObjectId(priceChangeCreateRes.body.insertedId) });
         logTest(
             '30. Service-definition price change after creation does not mutate request snapshot',
             priceChangeDocAfter.pricing.estimateMin === 25 && priceChangeDocAfter.pricing.calculationVersion === 1
@@ -8817,7 +8817,7 @@ async function testRepairRequestV2() {
             expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['charging-port'], level: 'advanced', experienceYears: 5 }],
             createdAt: new Date()
         };
-        const raceTechInsert = await collections.riders.insertOne(raceTechDoc);
+        const raceTechInsert = await collections.technicians.insertOne(raceTechDoc);
         createdRiderIds.push(raceTechInsert.insertedId.toString());
         await collections.users.insertOne({ email: raceTechEmail, role: 'rider', createdAt: new Date() });
         createdUserEmails.push(raceTechEmail);
@@ -8844,12 +8844,12 @@ async function testRepairRequestV2() {
         createdParcelIds.push(mutationRes.body.insertedId.toString());
         mutableBody.product.brand = 'TAMPERED-AFTER-CREATE';
         mutableBody.damage.description = 'TAMPERED-AFTER-CREATE';
-        const mutationDocAfter = await collections.parcels.findOne({ _id: new ObjectId(mutationRes.body.insertedId) });
+        const mutationDocAfter = await collections.repairRequests.findOne({ _id: new ObjectId(mutationRes.body.insertedId) });
         logTest('62. Input-object mutation after creation cannot alter persisted snapshot', mutationDocAfter.product.brand === 'MutateMe');
 
         const fetchedDefForMutation = await models.ServiceDefinition.findById(activeDef.id);
         fetchedDefForMutation.pricingRule.baseMin = 777777;
-        const v2DocAfterDefMutation = await collections.parcels.findOne({ _id: new ObjectId(v2Res.body.insertedId) });
+        const v2DocAfterDefMutation = await collections.repairRequests.findOne({ _id: new ObjectId(v2Res.body.insertedId) });
         logTest('63. Persisted snapshot remains independent of service-definition object mutation', v2DocAfterDefMutation.pricing.estimateMin === 25);
 
         logTest('64. Service snapshot exposes only definitionId and repairCategorySlug, nothing else', Object.keys(v2Doc.service).sort().join(',') === 'definitionId,repairCategorySlug');
@@ -8864,21 +8864,21 @@ async function testRepairRequestV2() {
             // those specific tracking logs. Scoped by exact value, never a
             // broad pattern, so no other request's tracking history is ever
             // touched.
-            const ownParcels = await collections.parcels.find(
+            const ownParcels = await collections.repairRequests.find(
                 { _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } },
                 { projection: { trackingId: 1 } }
             ).toArray();
             const ownTrackingIds = ownParcels.map((p) => p.trackingId).filter(Boolean);
             if (ownTrackingIds.length) {
-                await collections.trackings.deleteMany({ trackingId: { $in: ownTrackingIds } });
+                await collections.trackingEvents.deleteMany({ trackingId: { $in: ownTrackingIds } });
             }
-            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
+            await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
         }
         if (createdServiceDefinitionIds.length) {
             await collections.serviceDefinitions.deleteMany({ _id: { $in: createdServiceDefinitionIds } });
         }
         if (createdRiderIds.length) {
-            await collections.riders.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
+            await collections.technicians.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
         }
         if (createdUserEmails.length) {
             await collections.users.deleteMany({ email: { $in: createdUserEmails } });
@@ -8896,9 +8896,9 @@ async function testRepairRequestV2() {
         // documents have no parcelName field at all, but every parcel this
         // section created (legacy or v2) shares this run's synthetic
         // customerEmail as its owner.
-        const leftoverParcels = customerEmail ? await collections.parcels.countDocuments({ senderEmail: customerEmail }) : 0;
+        const leftoverParcels = customerEmail ? await collections.repairRequests.countDocuments({ senderEmail: customerEmail }) : 0;
         const leftoverDefs = await collections.serviceDefinitions.countDocuments({ label: { $regex: '^TEST-REQUEST-V2-' } });
-        const leftoverRiders = await collections.riders.countDocuments({ name: { $regex: '^TEST-REQUEST-V2-' } });
+        const leftoverRiders = await collections.technicians.countDocuments({ name: { $regex: '^TEST-REQUEST-V2-' } });
         const canonicalSeedCount = await collections.serviceDefinitions.countDocuments({ label: { $not: { $regex: '^TEST-REQUEST-V2-' } } });
         logTest('65. No fixture leakage after tests', leftoverParcels === 0 && leftoverDefs === 0 && leftoverRiders === 0);
         logTest('65b. Canonical service-definition seed rows untouched (still present, not counted as test fixtures)', canonicalSeedCount >= 0);
@@ -9078,7 +9078,7 @@ async function testEligibleTechnicianAPI() {
                 createdAt: new Date(),
                 ...overrides
             };
-            const result = await collections.riders.insertOne(doc);
+            const result = await collections.technicians.insertOne(doc);
             createdRiderIds.push(result.insertedId.toString());
             return { id: result.insertedId.toString(), ...doc };
         }
@@ -9181,7 +9181,7 @@ async function testEligibleTechnicianAPI() {
             schemaVersion: 2, senderEmail: customerEmail, product: { categorySlug: 'smartphone' },
             deliveryStatus: 'pending-pickup', trackingId: `TEST-${runId}-incomplete`, createdAt: new Date(), updatedAt: new Date()
         };
-        const incompleteInsert = await collections.parcels.insertOne(incompleteTaxonomyDoc);
+        const incompleteInsert = await collections.repairRequests.insertOne(incompleteTaxonomyDoc);
         createdParcelIds.push(incompleteInsert.insertedId.toString());
         const incompleteRes = await callGetEligible(incompleteInsert.insertedId.toString(), {}, adminEmail);
         logTest('8. V2 request with incomplete taxonomy returns controlled error', incompleteRes.statusCode === 409 && incompleteRes.body.code === 'REQUEST_TAXONOMY_INCOMPLETE');
@@ -9194,7 +9194,7 @@ async function testEligibleTechnicianAPI() {
             serviceLocation: { region: 'Dhaka', district: 'Mirpur', address: '123 Test Street' },
             deliveryStatus: 'pending-pickup', trackingId: `TEST-${runId}-missingdef`, createdAt: new Date(), updatedAt: new Date()
         };
-        const missingDefInsert = await collections.parcels.insertOne(missingDefDoc);
+        const missingDefInsert = await collections.repairRequests.insertOne(missingDefDoc);
         createdParcelIds.push(missingDefInsert.insertedId.toString());
         const missingDefRes = await callGetEligible(missingDefInsert.insertedId.toString(), {}, adminEmail);
         logTest('9. Missing current service definition handled', missingDefRes.statusCode === 409 && missingDefRes.body.code === 'SERVICE_DEFINITION_NOT_FOUND');
@@ -9238,14 +9238,14 @@ async function testEligibleTechnicianAPI() {
                 parcelName: `TEST-ELIGIBILITY-COMPLETED-${runId}-${i}`, cost: 40, senderEmail: customerEmail,
                 trackingId: `TEST-${runId}-completed-${i}`, deliveryStatus: 'parcel_delivered', riderId: eligibleRider2.id, createdAt: new Date()
             };
-            const inserted = await collections.parcels.insertOne(completedDoc);
+            const inserted = await collections.repairRequests.insertOne(completedDoc);
             createdParcelIds.push(inserted.insertedId.toString());
         }
         const cancelledDoc = {
             parcelName: `TEST-ELIGIBILITY-CANCELLED-${runId}`, cost: 40, senderEmail: customerEmail,
             trackingId: `TEST-${runId}-cancelled`, deliveryStatus: 'cancelled', riderId: eligibleRider2.id, createdAt: new Date()
         };
-        const cancelledInsert = await collections.parcels.insertOne(cancelledDoc);
+        const cancelledInsert = await collections.repairRequests.insertOne(cancelledDoc);
         createdParcelIds.push(cancelledInsert.insertedId.toString());
 
         const pendingRider = await createTestRider(`TEST-ELIGIBILITY-PENDING-${runId}`, { status: 'pending' });
@@ -9257,7 +9257,7 @@ async function testEligibleTechnicianAPI() {
             parcelName: `TEST-ELIGIBILITY-ACTIVE-${runId}`, cost: 40, senderEmail: customerEmail,
             trackingId: `TEST-${runId}-active`, deliveryStatus: 'driver_assigned', riderId: busyRiderFixture.id, createdAt: new Date()
         };
-        const activeInsert = await collections.parcels.insertOne(activeParcelDoc);
+        const activeInsert = await collections.repairRequests.insertOne(activeParcelDoc);
         createdParcelIds.push(activeInsert.insertedId.toString());
 
         // ---- Default response (37-45) ----
@@ -9294,8 +9294,8 @@ async function testEligibleTechnicianAPI() {
         const diagTaxonomy = es.deriveRequestTaxonomy(await models.Parcel.findById(v2RequestId));
         const diagServiceDef = await models.ServiceDefinition.findById(serviceDef.id);
         const diagActiveIds = await models.Parcel.findRiderIdsWithDeliveryStatuses([busyRiderFixture.id, pendingRider.id], ['driver_assigned', 'rider_arriving', 'parcel_picked_up']);
-        const busyRiderDoc = await collections.riders.findOne({ _id: new ObjectId(busyRiderFixture.id) });
-        const pendingRiderDoc = await collections.riders.findOne({ _id: new ObjectId(pendingRider.id) });
+        const busyRiderDoc = await collections.technicians.findOne({ _id: new ObjectId(busyRiderFixture.id) });
+        const pendingRiderDoc = await collections.technicians.findOne({ _id: new ObjectId(pendingRider.id) });
         const busyEval = es.evaluateTechnician(busyRiderDoc, { requestTaxonomy: diagTaxonomy, serviceDefinition: diagServiceDef, activeRiderIds: diagActiveIds, riderRole: 'rider' });
         const pendingEval = es.evaluateTechnician(pendingRiderDoc, { requestTaxonomy: diagTaxonomy, serviceDefinition: diagServiceDef, activeRiderIds: diagActiveIds, riderRole: 'user' });
         logTest('48. Multiple reason codes supported (structure allows array)', Array.isArray(busyEval.reasonCodes) && busyEval.reasonCodes.includes('TECHNICIAN_ALREADY_ASSIGNED'));
@@ -9346,26 +9346,26 @@ async function testEligibleTechnicianAPI() {
         logTest('62. Linked-user lookup set-based (role-consistent riders correctly included)', !!rider2Entry);
         logTest('63. Completed-count lookup set-based (excludes cancelled/active, only counts parcel_delivered)', rider2Entry.completedRepairCount === 2);
 
-        const riderBeforeCall = await collections.riders.findOne({ _id: new ObjectId(eligibleRider1.id) });
+        const riderBeforeCall = await collections.technicians.findOne({ _id: new ObjectId(eligibleRider1.id) });
         await callGetEligible(v2RequestId, { diagnostic: 'true' }, adminEmail);
-        const riderAfterCall = await collections.riders.findOne({ _id: new ObjectId(eligibleRider1.id) });
+        const riderAfterCall = await collections.technicians.findOne({ _id: new ObjectId(eligibleRider1.id) });
         logTest('64. No eligibility mutation', riderBeforeCall.workStatus === riderAfterCall.workStatus && riderBeforeCall.status === riderAfterCall.status);
 
         const notifCountBefore = await collections.notifications.countDocuments({ entityId: v2RequestId });
         await callGetEligible(v2RequestId, {}, adminEmail);
         const notifCountAfter = await collections.notifications.countDocuments({ entityId: v2RequestId });
-        const trackingCountBefore = await collections.trackings.countDocuments({});
-        const trackingCountAfter = await collections.trackings.countDocuments({});
+        const trackingCountBefore = await collections.trackingEvents.countDocuments({});
+        const trackingCountAfter = await collections.trackingEvents.countDocuments({});
         logTest('65. No notification/tracking side effect', notifCountBefore === notifCountAfter && trackingCountBefore === trackingCountAfter);
 
-        const riderIndexNames = (await collections.riders.indexes()).map((i) => i.name);
-        const parcelIndexNames = (await collections.parcels.indexes()).map((i) => i.name);
+        const riderIndexNames = (await collections.technicians.indexes()).map((i) => i.name);
+        const parcelIndexNames = (await collections.repairRequests.indexes()).map((i) => i.name);
         logTest(
             '66. Indexes exist as intended',
             riderIndexNames.includes('riders_status_workStatus') && riderIndexNames.includes('riders_expertise_productCategorySlug') &&
             riderIndexNames.includes('riders_expertise_repairCategorySlugs') && parcelIndexNames.includes('parcels_riderId_deliveryStatus')
         );
-        const riderIndexSpecs = await collections.riders.indexes();
+        const riderIndexSpecs = await collections.technicians.indexes();
         const hasInvalidCompoundMultikey = riderIndexSpecs.some((idx) => {
             const keys = Object.keys(idx.key);
             return keys.includes('expertise.productCategorySlug') && keys.includes('expertise.repairCategorySlugs');
@@ -9382,22 +9382,22 @@ async function testEligibleTechnicianAPI() {
         // consecutive runs (Phase Z), not an assertion here.
     } finally {
         if (createdParcelIds.length) {
-            const ownParcels = await collections.parcels.find(
+            const ownParcels = await collections.repairRequests.find(
                 { _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } },
                 { projection: { trackingId: 1 } }
             ).toArray();
             const ownTrackingIds = ownParcels.map((p) => p.trackingId).filter(Boolean);
             if (ownTrackingIds.length) {
-                await collections.trackings.deleteMany({ trackingId: { $in: ownTrackingIds } });
+                await collections.trackingEvents.deleteMany({ trackingId: { $in: ownTrackingIds } });
             }
             await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
-            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
+            await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
         }
         if (createdServiceDefinitionIds.length) {
             await collections.serviceDefinitions.deleteMany({ _id: { $in: createdServiceDefinitionIds } });
         }
         if (createdRiderIds.length) {
-            await collections.riders.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
+            await collections.technicians.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
         }
         if (createdUserEmails.length) {
             await collections.users.deleteMany({ email: { $in: createdUserEmails } });
@@ -9409,9 +9409,9 @@ async function testEligibleTechnicianAPI() {
         // pattern, but every parcel this section created (via the real
         // controller or a direct insert) consistently used this run's
         // synthetic customerEmail as senderEmail.
-        const leftoverParcels = customerEmail ? await collections.parcels.countDocuments({ senderEmail: customerEmail }) : 0;
+        const leftoverParcels = customerEmail ? await collections.repairRequests.countDocuments({ senderEmail: customerEmail }) : 0;
         const leftoverDefs = await collections.serviceDefinitions.countDocuments({ label: { $regex: '^TEST-ELIGIBILITY-' } });
-        const leftoverRiders = await collections.riders.countDocuments({ name: { $regex: '^TEST-ELIGIBILITY-' } });
+        const leftoverRiders = await collections.technicians.countDocuments({ name: { $regex: '^TEST-ELIGIBILITY-' } });
         const leftoverUsers = await collections.users.countDocuments({ email: { $regex: '^test-eligibility-' } });
         logTest('71. No fixture leakage after tests', leftoverParcels === 0 && leftoverDefs === 0 && leftoverRiders === 0 && leftoverUsers === 0);
     }
@@ -9493,7 +9493,7 @@ async function testAssignmentExpertiseRevalidation() {
                 createdAt: new Date(),
                 ...overrides
             };
-            const result = await collections.riders.insertOne(doc);
+            const result = await collections.technicians.insertOne(doc);
             createdRiderIds.push(result.insertedId.toString());
             if (linkedRole !== null) {
                 await createTestUser(doc.email, linkedRole);
@@ -9575,7 +9575,7 @@ async function testAssignmentExpertiseRevalidation() {
             '1. Legacy request assignable to a rider with no usable expertise (v2 block never reached)',
             legacyAssignRes.statusCode === 200 && legacyAssignRes.body.deliveryStatus === 'driver_assigned'
         );
-        const legacyRiderAfter = await collections.riders.findOne({ _id: new ObjectId(legacyIneligibleRider.id) });
+        const legacyRiderAfter = await collections.technicians.findOne({ _id: new ObjectId(legacyIneligibleRider.id) });
         logTest('2. Legacy assignment claims the rider exactly as before (workStatus in_delivery)', legacyRiderAfter.workStatus === 'in_delivery');
         const legacyParcelAfter = await models.Parcel.findById(legacyParcelId);
         logTest(
@@ -9587,7 +9587,7 @@ async function testAssignmentExpertiseRevalidation() {
         // ---- v2 happy path: eligible technician, response/side-effect parity with legacy (4-9) ----
         const eligibleParcelId = await createV2Parcel();
         const eligibleRider = await createTestRider('ELIGIBLE');
-        const trackingCountBefore = await collections.trackings.countDocuments({});
+        const trackingCountBefore = await collections.trackingEvents.countDocuments({});
         const notifCountBefore = await collections.notifications.countDocuments({});
         const eligibleAssignRes = await callAssign(eligibleParcelId, eligibleRider.id, adminEmail);
         logTest(
@@ -9595,9 +9595,9 @@ async function testAssignmentExpertiseRevalidation() {
             eligibleAssignRes.statusCode === 200 &&
             JSON.stringify(eligibleAssignRes.body) === JSON.stringify({ acknowledged: true, matchedCount: 1, modifiedCount: 1, deliveryStatus: 'assignment_pending' })
         );
-        const eligibleRiderAfter = await collections.riders.findOne({ _id: new ObjectId(eligibleRider.id) });
+        const eligibleRiderAfter = await collections.technicians.findOne({ _id: new ObjectId(eligibleRider.id) });
         logTest('5. v2 offer reserves the rider (workStatus in_delivery)', eligibleRiderAfter.workStatus === 'in_delivery');
-        const eligibleParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(eligibleParcelId) });
+        const eligibleParcelAfter = await collections.repairRequests.findOne({ _id: new ObjectId(eligibleParcelId) });
         logTest(
             '6. v2 offer sets assignment_pending + active rider fields, and a pending assignmentHistory entry',
             eligibleParcelAfter.deliveryStatus === 'assignment_pending' && eligibleParcelAfter.riderId === eligibleRider.id &&
@@ -9610,7 +9610,7 @@ async function testAssignmentExpertiseRevalidation() {
             eligibleParcelAfter.eligibilityVersion === undefined && eligibleParcelAfter.recommendationScore === undefined &&
             eligibleParcelAfter.matchedExpertise === undefined && eligibleParcelAfter.expertiseSnapshot === undefined
         );
-        const trackingCountAfter = await collections.trackings.countDocuments({});
+        const trackingCountAfter = await collections.trackingEvents.countDocuments({});
         const notifCountAfter = await collections.notifications.countDocuments({});
         logTest('8. Exactly one tracking log written', trackingCountAfter - trackingCountBefore === 1);
         logTest('9. Exactly two notifications written (owner + technician)', notifCountAfter - notifCountBefore === 2);
@@ -9620,8 +9620,8 @@ async function testAssignmentExpertiseRevalidation() {
             const parcelId = await createV2Parcel();
             const rider = await createTestRider(marker, riderOverrides, linkedRole);
             const res = await callAssign(parcelId, rider.id, adminEmail);
-            const parcelAfter = await collections.parcels.findOne({ _id: new ObjectId(parcelId) });
-            const riderAfter = await collections.riders.findOne({ _id: new ObjectId(rider.id) });
+            const parcelAfter = await collections.repairRequests.findOne({ _id: new ObjectId(parcelId) });
+            const riderAfter = await collections.technicians.findOne({ _id: new ObjectId(rider.id) });
             return {
                 rejected: res.statusCode === 409 && res.body.code === 'TECHNICIAN_NOT_ELIGIBLE' && Array.isArray(res.body.reasonCodes) && res.body.reasonCodes.includes(expectedReasonCode),
                 untouched: parcelAfter.deliveryStatus === 'pending-pickup' && parcelAfter.riderId === undefined && riderAfter.workStatus === 'available'
@@ -9727,7 +9727,7 @@ async function testAssignmentExpertiseRevalidation() {
             serviceLocation: { region: 'Dhaka' },
             createdAt: new Date()
         };
-        const incompleteInsert = await collections.parcels.insertOne(incompleteTaxonomyParcel);
+        const incompleteInsert = await collections.repairRequests.insertOne(incompleteTaxonomyParcel);
         createdParcelIds.push(incompleteInsert.insertedId.toString());
         const incompleteTaxonomyRider = await createTestRider('INCOMPLETE-TAXONOMY');
         const incompleteTaxonomyRes = await callAssign(incompleteInsert.insertedId.toString(), incompleteTaxonomyRider.id, adminEmail);
@@ -9747,7 +9747,7 @@ async function testAssignmentExpertiseRevalidation() {
         // reassignment path incorrectly ran the new eligibility check, this
         // technician would now fail it and the existing, more specific
         // REQUEST_ALREADY_ASSIGNED outcome would be masked.
-        await collections.riders.updateOne({ _id: new ObjectId(redundantRider.id) }, { $set: { expertise: [] } });
+        await collections.technicians.updateOne({ _id: new ObjectId(redundantRider.id) }, { $set: { expertise: [] } });
         const redundantReassignRes = await callAssign(redundantParcelId, redundantRider.id, adminEmail);
         logTest(
             '23. Redundant reassignment to the same (now v2-ineligible) technician still reports REQUEST_ALREADY_ASSIGNED, not TECHNICIAN_NOT_ELIGIBLE',
@@ -9763,7 +9763,7 @@ async function testAssignmentExpertiseRevalidation() {
         // createTestRider now auto-links a 'rider'-role account at
         // assignexpert-no-owner-*, so reusing that exact address here would
         // accidentally give this "nonexistent" owner a real account.
-        await collections.parcels.updateOne({ _id: new ObjectId(noOwnerParcelId) }, { $set: { senderEmail: `assignexpert-nonexistent-owner-${runId}@test.local` } });
+        await collections.repairRequests.updateOne({ _id: new ObjectId(noOwnerParcelId) }, { $set: { senderEmail: `assignexpert-nonexistent-owner-${runId}@test.local` } });
         const noOwnerRider = await createTestRider('NO-OWNER');
         const noOwnerRes = await callAssign(noOwnerParcelId, noOwnerRider.id, adminEmail);
         logTest('24. Unresolved owner role still blocks assignment before the new v2 eligibility block runs', noOwnerRes.statusCode === 409 && noOwnerRes.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
@@ -9781,19 +9781,19 @@ async function testAssignmentExpertiseRevalidation() {
         // ---- Concurrency guard: deterministic proof of the stale-expertise guard condition (27-28) ----
         const guardRider = await createTestRider('GUARD-DETERMINISTIC');
         const capturedExpertise = guardRider.expertise;
-        await collections.riders.updateOne({ _id: new ObjectId(guardRider.id) }, { $set: { expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'beginner', experienceYears: 0 }] } });
-        const staleGuardResult = await collections.riders.updateOne(
+        await collections.technicians.updateOne({ _id: new ObjectId(guardRider.id) }, { $set: { expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'beginner', experienceYears: 0 }] } });
+        const staleGuardResult = await collections.technicians.updateOne(
             { _id: new ObjectId(guardRider.id), status: 'approved', workStatus: 'available', expertise: capturedExpertise },
             { $set: { workStatus: 'in_delivery' } }
         );
         logTest('27. Guarded update using a stale (pre-change) expertise snapshot fails to match (matchedCount 0)', staleGuardResult.matchedCount === 0);
-        const freshGuardResult = await collections.riders.updateOne(
+        const freshGuardResult = await collections.technicians.updateOne(
             { _id: new ObjectId(guardRider.id), status: 'approved', workStatus: 'available', expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'beginner', experienceYears: 0 }] },
             { $set: { workStatus: 'in_delivery' } }
         );
         logTest('28. Same guard using the current expertise value matches (matchedCount 1)', freshGuardResult.matchedCount === 1);
         // Reset so this fixture doesn't interfere with cleanup accounting below.
-        await collections.riders.updateOne({ _id: new ObjectId(guardRider.id) }, { $set: { workStatus: 'available' } });
+        await collections.technicians.updateOne({ _id: new ObjectId(guardRider.id) }, { $set: { workStatus: 'available' } });
 
         // ---- Concurrency guard: genuine end-to-end race against a real concurrent expertise update (29) ----
         let raceInvariantHeld = true;
@@ -9813,8 +9813,8 @@ async function testAssignmentExpertiseRevalidation() {
                 raceConflictObserved = true;
             }
 
-            const finalParcel = await collections.parcels.findOne({ _id: new ObjectId(raceParcelId) });
-            const finalRider = await collections.riders.findOne({ _id: new ObjectId(raceRider.id) });
+            const finalParcel = await collections.repairRequests.findOne({ _id: new ObjectId(raceParcelId) });
+            const finalRider = await collections.technicians.findOne({ _id: new ObjectId(raceRider.id) });
             const parcelAssigned = finalParcel.deliveryStatus === 'driver_assigned';
             const expertiseIsOriginal = JSON.stringify(finalRider.expertise) === JSON.stringify(raceOriginalExpertise);
 
@@ -9840,7 +9840,7 @@ async function testAssignmentExpertiseRevalidation() {
         );
 
         // ---- No index change required (31) ----
-        const riderIndexNames = (await collections.riders.indexes()).map((i) => i.name);
+        const riderIndexNames = (await collections.technicians.indexes()).map((i) => i.name);
         logTest(
             '31. No new index required - existing riders_status_workStatus / expertise indexes still cover this transaction\'s reads',
             riderIndexNames.includes('riders_status_workStatus')
@@ -9848,30 +9848,30 @@ async function testAssignmentExpertiseRevalidation() {
 
     } finally {
         if (createdParcelIds.length) {
-            const ownParcels = await collections.parcels.find(
+            const ownParcels = await collections.repairRequests.find(
                 { _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } },
                 { projection: { trackingId: 1 } }
             ).toArray();
             const ownTrackingIds = ownParcels.map((p) => p.trackingId).filter(Boolean);
             if (ownTrackingIds.length) {
-                await collections.trackings.deleteMany({ trackingId: { $in: ownTrackingIds } });
+                await collections.trackingEvents.deleteMany({ trackingId: { $in: ownTrackingIds } });
             }
             await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
-            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
+            await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
         }
         if (createdServiceDefinitionIds.length) {
             await collections.serviceDefinitions.deleteMany({ _id: { $in: createdServiceDefinitionIds } });
         }
         if (createdRiderIds.length) {
-            await collections.riders.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
+            await collections.technicians.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
         }
         if (createdUserEmails.length) {
             await collections.users.deleteMany({ email: { $in: createdUserEmails } });
         }
 
-        const leftoverParcels = customerEmail ? await collections.parcels.countDocuments({ senderEmail: customerEmail }) : 0;
+        const leftoverParcels = customerEmail ? await collections.repairRequests.countDocuments({ senderEmail: customerEmail }) : 0;
         const leftoverDefs = await collections.serviceDefinitions.countDocuments({ label: { $regex: '^TEST-ASSIGNEXPERT-' } });
-        const leftoverRiders = await collections.riders.countDocuments({ name: { $regex: '^TEST-ASSIGNEXPERT-' } });
+        const leftoverRiders = await collections.technicians.countDocuments({ name: { $regex: '^TEST-ASSIGNEXPERT-' } });
         const leftoverUsers = await collections.users.countDocuments({ email: { $regex: '^assignexpert-' } });
         logTest('32. No fixture leakage after tests', leftoverParcels === 0 && leftoverDefs === 0 && leftoverRiders === 0 && leftoverUsers === 0);
     }
@@ -10067,7 +10067,7 @@ async function testDamageUploadFoundation() {
         }
 
         async function lockRequest(parcelId) {
-            await collections.parcels.updateOne(
+            await collections.repairRequests.updateOne(
                 { _id: new ObjectId(parcelId) },
                 { $set: { deliveryStatus: 'driver_assigned', riderId: 'TEST-DAMAGE-UPLOAD-FAKE-RIDER', riderName: 'TEST-DAMAGE-UPLOAD-FAKE-RIDER', riderEmail: `damage-upload-fakerider-${runId}@test.local` } }
             );
@@ -10225,7 +10225,7 @@ async function testDamageUploadFoundation() {
         const missingObjParcelId = await createV2Parcel();
         const missingObjResult = await uploadAndFinalize(missingObjParcelId, customerEmail, { skipUpload: true });
         logTest('27. Missing storage object rejected with STORAGE_OBJECT_NOT_FOUND', missingObjResult.finalizeRes.statusCode === 404 && missingObjResult.finalizeRes.body.code === 'STORAGE_OBJECT_NOT_FOUND');
-        const missingObjParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(missingObjParcelId) });
+        const missingObjParcelAfter = await collections.repairRequests.findOne({ _id: new ObjectId(missingObjParcelId) });
         logTest('27b. Failed verification leaves the parcel with zero attached images', (missingObjParcelAfter.damage.images || []).length === 0);
 
         const badActualMimeParcelId = await createV2Parcel();
@@ -10243,7 +10243,7 @@ async function testDamageUploadFoundation() {
         // ---- Canonical metadata / server authority (31-36) ----
         const authorityParcelId = await createV2Parcel();
         const authorityResult = await uploadAndFinalize(authorityParcelId);
-        const authorityParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(authorityParcelId) });
+        const authorityParcelAfter = await collections.repairRequests.findOne({ _id: new ObjectId(authorityParcelId) });
         const authorityImage = authorityParcelAfter.damage.images[0];
         const uploadedAtMs = new Date(authorityImage.uploadedAt).getTime();
         logTest('31. uploadedAt is server-owned and close to the actual finalize time', Math.abs(Date.now() - uploadedAtMs) < 60000);
@@ -10273,7 +10273,7 @@ async function testDamageUploadFoundation() {
         // 4th attempt never reaches finalize at all.
         const limit4 = await uploadAndFinalize(limitParcelId);
         logTest('39. A 4th upload session is refused once the request already holds 3 images (DAMAGE_IMAGE_LIMIT_REACHED)', limit4.sessionRes.statusCode === 409 && limit4.sessionRes.body.code === 'DAMAGE_IMAGE_LIMIT_REACHED' && limit4.finalizeRes === null);
-        const limitParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(limitParcelId) });
+        const limitParcelAfter = await collections.repairRequests.findOne({ _id: new ObjectId(limitParcelId) });
         logTest('39b. Request never stores more than 3 images', limitParcelAfter.damage.images.length === 3);
 
         const raceParcelId = await createV2Parcel();
@@ -10293,7 +10293,7 @@ async function testDamageUploadFoundation() {
         const raceSuccesses = [raceOutcomeA, raceOutcomeB].filter((r) => r.statusCode === 200).length;
         const raceRejections = [raceOutcomeA, raceOutcomeB].filter((r) => r.statusCode === 409 && r.body.code === 'DAMAGE_IMAGE_LIMIT_REACHED').length;
         logTest('40. Two concurrent finalizations at count 2 produce exactly one success and one controlled rejection', raceSuccesses === 1 && raceRejections === 1);
-        const raceParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(raceParcelId) });
+        const raceParcelAfter = await collections.repairRequests.findOne({ _id: new ObjectId(raceParcelId) });
         logTest('41. Final image count never exceeds 3 after the race', raceParcelAfter.damage.images.length === 3);
         const raceStorageKeys = raceParcelAfter.damage.images.map((img) => img.storageKey);
         logTest('42. No duplicate metadata entries after the race (all storageKeys unique)', new Set(raceStorageKeys).size === raceStorageKeys.length);
@@ -10306,7 +10306,7 @@ async function testDamageUploadFoundation() {
             '43. Duplicate finalization of the same session is idempotent (200, same image, no duplicate entry)',
             idempotentReplayRes.statusCode === 200 && idempotentReplayRes.body.image.imageId === idempotentResult.finalizeRes.body.image.imageId
         );
-        const idempotentParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(idempotentParcelId) });
+        const idempotentParcelAfter = await collections.repairRequests.findOne({ _id: new ObjectId(idempotentParcelId) });
         logTest('43b. Idempotent replay never creates a second damage.images entry', idempotentParcelAfter.damage.images.length === 1);
 
         // Attempts to construct a second session pointed at an
@@ -10347,7 +10347,7 @@ async function testDamageUploadFoundation() {
         const removalResult = await uploadAndFinalize(removalParcelId);
         const removalRes = await callRemove(removalParcelId, removalResult.sessionId, customerEmail);
         logTest('47. Owner removes an editable, finalized image successfully', removalRes.statusCode === 200 && removalRes.body.removedImageId === removalResult.sessionId);
-        const removalParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(removalParcelId) });
+        const removalParcelAfter = await collections.repairRequests.findOne({ _id: new ObjectId(removalParcelId) });
         logTest('47b. Removed image is gone from parcel.damage.images and the fake storage object is deleted', removalParcelAfter.damage.images.length === 0 && !fakeBucket._objects.has(removalResult.sessionDoc.storageKey));
 
         const nonOwnerRemovalParcelId = await createV2Parcel();
@@ -10374,7 +10374,7 @@ async function testDamageUploadFoundation() {
         const multiImage1 = await uploadAndFinalize(multiImageParcelId);
         const multiImage2 = await uploadAndFinalize(multiImageParcelId);
         await callRemove(multiImageParcelId, multiImage1.sessionId, customerEmail);
-        const multiImageParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(multiImageParcelId) });
+        const multiImageParcelAfter = await collections.repairRequests.findOne({ _id: new ObjectId(multiImageParcelId) });
         logTest(
             '52. Removing one image leaves the other image on the same request untouched',
             multiImageParcelAfter.damage.images.length === 1 && multiImageParcelAfter.damage.images[0].storageKey === multiImage2.sessionDoc.storageKey
@@ -10398,7 +10398,7 @@ async function testDamageUploadFoundation() {
 
         const atomicMimeParcelId = await createV2Parcel();
         const atomicMimeResult = await uploadAndFinalize(atomicMimeParcelId, customerEmail, { actualMimeType: 'image/gif' });
-        const atomicMimeParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(atomicMimeParcelId) });
+        const atomicMimeParcelAfter = await collections.repairRequests.findOne({ _id: new ObjectId(atomicMimeParcelId) });
         const atomicMimeSessionAfter = await collections.damageUploadSessions.findOne({ _id: atomicMimeResult.sessionId });
         logTest('55. Object-verification failure (disallowed MIME) leaves the parcel and session unchanged', atomicMimeParcelAfter.damage.images.length === 0 && atomicMimeSessionAfter.status === 'pending');
 
@@ -10407,9 +10407,9 @@ async function testDamageUploadFoundation() {
         logTest('56. A losing (limit-reached) concurrent finalize never marks its own session finalized', losingSessionDoc.status !== 'finalized');
 
         const pricingSnapshotParcelId = await createV2Parcel();
-        const pricingParcelBefore = await collections.parcels.findOne({ _id: new ObjectId(pricingSnapshotParcelId) });
+        const pricingParcelBefore = await collections.repairRequests.findOne({ _id: new ObjectId(pricingSnapshotParcelId) });
         await uploadAndFinalize(pricingSnapshotParcelId);
-        const pricingParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(pricingSnapshotParcelId) });
+        const pricingParcelAfter = await collections.repairRequests.findOne({ _id: new ObjectId(pricingSnapshotParcelId) });
         logTest(
             '57. No pricing/service/assignment fields are ever touched by a damage-upload operation',
             pricingParcelBefore.cost === pricingParcelAfter.cost && pricingParcelBefore.deliveryStatus === pricingParcelAfter.deliveryStatus &&
@@ -10450,7 +10450,7 @@ async function testDamageUploadFoundation() {
             await collections.damageUploadSessions.deleteMany({ _id: { $in: createdSessionIds } });
         }
         if (createdParcelIds.length) {
-            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
+            await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
         }
         if (createdServiceDefinitionIds.length) {
             await collections.serviceDefinitions.deleteMany({ _id: { $in: createdServiceDefinitionIds } });
@@ -10459,7 +10459,7 @@ async function testDamageUploadFoundation() {
             await collections.users.deleteMany({ email: { $in: createdUserEmails } });
         }
 
-        const leftoverParcels = customerEmail ? await collections.parcels.countDocuments({ senderEmail: { $in: [customerEmail, otherCustomerEmail] } }) : 0;
+        const leftoverParcels = customerEmail ? await collections.repairRequests.countDocuments({ senderEmail: { $in: [customerEmail, otherCustomerEmail] } }) : 0;
         const leftoverDefs = await collections.serviceDefinitions.countDocuments({ label: { $regex: '^TEST-DAMAGE-UPLOAD-' } });
         const leftoverUsers = await collections.users.countDocuments({ email: { $regex: '^damage-upload-' } });
         const leftoverSessions = customerEmail ? await collections.damageUploadSessions.countDocuments({ ownerEmail: { $in: [customerEmail, otherCustomerEmail] } }) : 0;
@@ -10571,7 +10571,7 @@ async function testAuthorizedDamageImageAccess() {
                 region: 'Dhaka', district: 'Mirpur', status: 'approved', workStatus: 'available',
                 expertise: [], createdAt: new Date()
             };
-            const result = await collections.riders.insertOne(doc);
+            const result = await collections.technicians.insertOne(doc);
             createdRiderIds.push(result.insertedId.toString());
             if (linkedRole !== null) await createTestUser(doc.email, linkedRole);
             return { id: result.insertedId.toString(), ...doc };
@@ -10682,7 +10682,7 @@ async function testAuthorizedDamageImageAccess() {
         }
 
         async function assignRider(parcelId, rider, deliveryStatus = 'driver_assigned') {
-            await collections.parcels.updateOne(
+            await collections.repairRequests.updateOne(
                 { _id: new ObjectId(parcelId) },
                 { $set: { deliveryStatus, riderId: rider.id, riderEmail: rider.email, riderName: rider.name } }
             );
@@ -10737,7 +10737,7 @@ async function testAuthorizedDamageImageAccess() {
             newTechListRes.statusCode === 200 && newTechListRes.body.accessRole === 'assigned-technician'
         );
 
-        await collections.parcels.updateOne({ _id: new ObjectId(assignParcelId) }, { $set: { deliveryStatus: 'parcel_delivered' } });
+        await collections.repairRequests.updateOne({ _id: new ObjectId(assignParcelId) }, { $set: { deliveryStatus: 'parcel_delivered' } });
         const completedTechListRes = await callList(assignParcelId, reassignedToRider.email);
         logTest('11. Technician access is removed once the request is no longer in an active assigned state (parcel_delivered)', completedTechListRes.statusCode === 404 && completedTechListRes.body.code === 'REQUEST_NOT_FOUND');
 
@@ -10783,7 +10783,7 @@ async function testAuthorizedDamageImageAccess() {
         logTest('25. No separate bucket-name field exists in the response (bucket only ever appears inside the functional readUrl itself)', readList1.body.bucket === undefined && readList1.body.images[0].bucket === undefined);
 
         const sessionDocAfterList = await collections.damageUploadSessions.findOne({ _id: readImage1.sessionId });
-        const parcelDocAfterList = await collections.parcels.findOne({ _id: new ObjectId(readParcelId) });
+        const parcelDocAfterList = await collections.repairRequests.findOne({ _id: new ObjectId(readParcelId) });
         logTest(
             '26. Signed read URLs are never written back to MongoDB',
             sessionDocAfterList.readUrl === undefined && sessionDocAfterList.signedUrl === undefined &&
@@ -10923,21 +10923,21 @@ async function testAuthorizedDamageImageAccess() {
             await collections.damageUploadSessions.deleteMany({ _id: { $in: createdSessionIds } });
         }
         if (createdParcelIds.length) {
-            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
+            await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
         }
         if (createdServiceDefinitionIds.length) {
             await collections.serviceDefinitions.deleteMany({ _id: { $in: createdServiceDefinitionIds } });
         }
         if (createdRiderIds.length) {
-            await collections.riders.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
+            await collections.technicians.deleteMany({ _id: { $in: createdRiderIds.map((id) => new ObjectId(id)) } });
         }
         if (createdUserEmails.length) {
             await collections.users.deleteMany({ email: { $in: createdUserEmails } });
         }
 
-        const leftoverParcels = ownerEmail ? await collections.parcels.countDocuments({ senderEmail: { $in: [ownerEmail, otherCustomerEmail] } }) : 0;
+        const leftoverParcels = ownerEmail ? await collections.repairRequests.countDocuments({ senderEmail: { $in: [ownerEmail, otherCustomerEmail] } }) : 0;
         const leftoverDefs = await collections.serviceDefinitions.countDocuments({ label: { $regex: '^TEST-DAMAGE-ACCESS-' } });
-        const leftoverRiders = await collections.riders.countDocuments({ name: { $regex: '^TEST-DAMAGE-ACCESS-' } });
+        const leftoverRiders = await collections.technicians.countDocuments({ name: { $regex: '^TEST-DAMAGE-ACCESS-' } });
         const leftoverUsers = await collections.users.countDocuments({ email: { $regex: '^damage-access-' } });
         const leftoverSessions = ownerEmail ? await collections.damageUploadSessions.countDocuments({ ownerEmail: { $in: [ownerEmail, otherCustomerEmail] } }) : 0;
         logTest(
@@ -11109,7 +11109,7 @@ async function testBdtPricingMigration() {
         logTest('25. New V2 request created against a BDT definition', createRes.statusCode === 200 && !!createRes.body.insertedId);
         const bdtParcelId = createRes.body.insertedId.toString();
         createdParcelIds.push(bdtParcelId);
-        const bdtParcel = await collections.parcels.findOne({ _id: new ObjectId(bdtParcelId) });
+        const bdtParcel = await collections.repairRequests.findOne({ _id: new ObjectId(bdtParcelId) });
         logTest('26. New request snapshots currency BDT', bdtParcel.pricing.currency === 'BDT');
         logTest('27. Snapshot minimum matches the selected definition', bdtParcel.pricing.estimateMin === 1200);
         logTest('28. Snapshot maximum matches the selected definition', bdtParcel.pricing.estimateMax === 4500);
@@ -11120,7 +11120,7 @@ async function testBdtPricingMigration() {
 
         // ================= Snapshot immutability (31-32, Phase H) =================
         await sd.updateOne({ _id: bdtInsert.insertedId }, { $set: { 'pricingRule.baseMin': 9999, 'pricingRule.baseMax': 99999, updatedAt: new Date() } });
-        const bdtParcelReread = await collections.parcels.findOne({ _id: new ObjectId(bdtParcelId) });
+        const bdtParcelReread = await collections.repairRequests.findOne({ _id: new ObjectId(bdtParcelId) });
         logTest('31. Existing request snapshot unaffected by a later definition change', bdtParcelReread.pricing.estimateMin === 1200 && bdtParcelReread.pricing.estimateMax === 4500 && bdtParcelReread.pricing.calculationVersion === 2);
         const estimateFromChangedDef = getPricingEstimate(await sd.findOne({ _id: bdtInsert.insertedId }));
         logTest('32. Definition itself did change (control) - proving immutability is real, not a no-op', estimateFromChangedDef.estimateMin === 9999);
@@ -11140,7 +11140,7 @@ async function testBdtPricingMigration() {
         const usdV2Res = await (async () => { const res = fakeRes(); await parcelController.createParcel({ body: { schemaVersion: 2, product: { categorySlug: 'laptop-computer', brand: 'B', model: 'M' }, service: { definitionId: usdInsert.insertedId.toString() }, damage: { description: 'Laptop will not power on after a liquid spill on the keyboard.' }, serviceLocation: validLocation() }, decoded_email: ownerEmail }, res); return res; })();
         const usdParcelId = usdV2Res.body.insertedId.toString();
         createdParcelIds.push(usdParcelId);
-        const usdParcelBefore = await collections.parcels.findOne({ _id: new ObjectId(usdParcelId) });
+        const usdParcelBefore = await collections.repairRequests.findOne({ _id: new ObjectId(usdParcelId) });
         const legacyRes = await (async () => { const res = fakeRes(); await parcelController.createParcel({ body: { parcelName: `TEST-BDT-LEGACY-${runId}`, cost: 55 }, decoded_email: ownerEmail }, res); return res; })();
         const legacyParcelId = legacyRes.body.insertedId.toString();
         createdParcelIds.push(legacyParcelId);
@@ -11151,11 +11151,11 @@ async function testBdtPricingMigration() {
         // Run the canonical migration again with all historical fixtures in place.
         await runMigration({ collection: sd, seedRows: SERVICE_DEFINITION_SEED, dryRun: false, expectedCount: 16 });
 
-        const usdParcelAfter = await collections.parcels.findOne({ _id: new ObjectId(usdParcelId) });
+        const usdParcelAfter = await collections.repairRequests.findOne({ _id: new ObjectId(usdParcelId) });
         logTest('33. Historical USD V2 request still displays USD', usdParcelAfter.pricing.currency === 'usd');
         logTest('34. Historical USD amounts + version unchanged by migration', usdParcelAfter.pricing.estimateMin === usdParcelBefore.pricing.estimateMin && usdParcelAfter.pricing.estimateMax === usdParcelBefore.pricing.estimateMax && usdParcelAfter.pricing.calculationVersion === 1);
         logTest('35. Historical quote fields unchanged (quotedAmount still null)', usdParcelAfter.pricing.quotedAmount === null && usdParcelAfter.pricing.quoteStatus === usdParcelBefore.pricing.quoteStatus);
-        const legacyAfter = await collections.parcels.findOne({ _id: new ObjectId(legacyParcelId) });
+        const legacyAfter = await collections.repairRequests.findOne({ _id: new ObjectId(legacyParcelId) });
         logTest('36. Legacy parcel cost unchanged by migration', legacyAfter.cost === 55 && legacyAfter.schemaVersion === undefined);
         const paymentAfter = await collections.payments.findOne({ _id: paymentInsert.insertedId });
         logTest('37. Payment record unchanged by migration', paymentAfter.amount === 55 && paymentAfter.currency === 'usd' && paymentAfter.status === 'paid');
@@ -11176,7 +11176,7 @@ async function testBdtPricingMigration() {
         logTest('42. API canonical estimates are the migrated integer BDT ranges', canonicalReturned.every((d) => Number.isInteger(d.pricingEstimate.min) && Number.isInteger(d.pricingEstimate.max) && d.pricingEstimate.min <= d.pricingEstimate.max));
     } finally {
         if (createdParcelIds.length) {
-            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
+            await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds.map((id) => new ObjectId(id)) } });
         }
         if (createdPaymentIds.length) {
             await collections.payments.deleteMany({ _id: { $in: createdPaymentIds } });
@@ -11250,8 +11250,8 @@ async function testInspectionWorkflow() {
 
         const techRider = { name: `TEST-INSPECTION-TECH-${runId}`, email: techEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() };
         const otherRider = { name: `TEST-INSPECTION-OTHERTECH-${runId}`, email: otherTechEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() };
-        const techInsert = await collections.riders.insertOne(techRider);
-        const otherInsert = await collections.riders.insertOne(otherRider);
+        const techInsert = await collections.technicians.insertOne(techRider);
+        const otherInsert = await collections.technicians.insertOne(otherRider);
         createdRiderIds.push(techInsert.insertedId, otherInsert.insertedId);
         const techRiderId = techInsert.insertedId.toString();
         const otherRiderId = otherInsert.insertedId.toString();
@@ -11284,7 +11284,7 @@ async function testInspectionWorkflow() {
                 updatedAt: now,
                 ...overrides
             };
-            const result = await collections.parcels.insertOne(doc);
+            const result = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(result.insertedId);
             return { id: result.insertedId.toString(), _id: result.insertedId, ...doc };
         }
@@ -11394,7 +11394,7 @@ async function testInspectionWorkflow() {
             // 32. unknown authority fields ignored safely (accepted, never persisted).
             const p = await createParcel();
             const r = await callSubmit(p.id, techEmail, validPayload({ status: 'not_started', submittedByEmail: 'attacker@evil.com', version: 999, approvedAmount: 10, payableAmount: 20, quoteStatus: 'approved' }));
-            const doc = await collections.parcels.findOne({ _id: p._id });
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
             const insp = doc.inspection;
             logTest('32. Unknown authority fields ignored/rejected safely (server-owned values win)',
                 r.statusCode === 201 && insp.status === 'submitted' && insp.submittedByEmail === techEmail && insp.version === 1 && insp.approvedAmount === undefined && insp.payableAmount === undefined && insp.quoteStatus === undefined);
@@ -11406,7 +11406,7 @@ async function testInspectionWorkflow() {
             const beforePricing = JSON.parse(JSON.stringify(p.pricing));
             const stripeBefore = capturedStripeSessionParams.length;
             const r = await callSubmit(p.id, techEmail, validPayload());
-            const doc = await collections.parcels.findOne({ _id: p._id });
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
             const insp = doc.inspection;
             logTest('33. Inspection stored correctly', insp && insp.diagnosis.summary.startsWith('No display output') && insp.diagnosis.detectedIssues.length === 1 && insp.repairability.decision === 'repairable_with_parts');
             logTest('34. Submitted rider id correct', insp.submittedByRiderId && insp.submittedByRiderId.toString() === techRiderId);
@@ -11416,7 +11416,7 @@ async function testInspectionWorkflow() {
             logTest('38b. Canonical pricing snapshot unchanged', JSON.stringify(doc.pricing) === JSON.stringify(beforePricing));
             logTest('39. Damage metadata unchanged', Array.isArray(doc.damage.images) && doc.damage.images.length === 0 && doc.damage.description === p.damage.description);
             logTest('40. Assignment unchanged (rider fields + rider workStatus)', doc.riderId === techRiderId && doc.riderEmail === techEmail);
-            const riderAfter = await collections.riders.findOne({ _id: techInsert.insertedId });
+            const riderAfter = await collections.technicians.findOne({ _id: techInsert.insertedId });
             logTest('47. Rider remains busy after inspection', riderAfter.workStatus === 'in_delivery');
             logTest('68. No Stripe call during inspection', capturedStripeSessionParams.length === stripeBefore);
             logTest('41. Status atomically becomes inspection_completed', doc.deliveryStatus === INSPECTION_COMPLETED);
@@ -11429,7 +11429,7 @@ async function testInspectionWorkflow() {
             // 42. no partial persistence on a failed submit.
             const p = await createParcel();
             const r = await callSubmit(p.id, techEmail, validPayload({ repairability: { decision: 'bad', reason: 'long enough reason text here' } }));
-            const doc = await collections.parcels.findOne({ _id: p._id });
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
             logTest('42. Failed submit persists neither inspection nor status change', r.statusCode === 400 && doc.inspection === undefined && doc.deliveryStatus === 'parcel_picked_up');
         }
 
@@ -11439,22 +11439,22 @@ async function testInspectionWorkflow() {
             const p = await createParcel();
             const [a, b] = await Promise.all([callSubmit(p.id, techEmail, validPayload()), callSubmit(p.id, techEmail, validPayload())]);
             const statuses = [a.statusCode, b.statusCode].sort();
-            const inspCount = await collections.parcels.countDocuments({ _id: p._id, 'inspection.status': 'submitted' });
-            const trackCount = await collections.trackings.countDocuments({ trackingId: p.trackingId, status: INSPECTION_COMPLETED });
+            const inspCount = await collections.repairRequests.countDocuments({ _id: p._id, 'inspection.status': 'submitted' });
+            const trackCount = await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: INSPECTION_COMPLETED });
             const loser = a.statusCode === 409 ? a : b;
             logTest('43. Double-submit race yields exactly one winner (201) + one 409', JSON.stringify(statuses) === JSON.stringify([201, 409]) && loser.body.code === 'INSPECTION_ALREADY_SUBMITTED' && inspCount === 1 && trackCount === 1);
         }
         {
             // 44. reassignment blocks the stale technician.
             const p = await createParcel();
-            await collections.parcels.updateOne({ _id: p._id }, { $set: { riderId: otherRiderId, riderEmail: otherTechEmail } });
+            await collections.repairRequests.updateOne({ _id: p._id }, { $set: { riderId: otherRiderId, riderEmail: otherTechEmail } });
             const r = await callSubmit(p.id, techEmail, validPayload());
             logTest('44. Reassignment blocks stale technician', r.statusCode === 404 && r.body.code === 'REQUEST_NOT_FOUND');
         }
         {
             // 45. status change blocks stale submission.
             const p = await createParcel();
-            await collections.parcels.updateOne({ _id: p._id }, { $set: { deliveryStatus: 'parcel_delivered' } });
+            await collections.repairRequests.updateOne({ _id: p._id }, { $set: { deliveryStatus: 'parcel_delivered' } });
             const r = await callSubmit(p.id, techEmail, validPayload());
             logTest('45. Status-change blocks stale submission', r.statusCode === 409 && r.body.code === 'INSPECTION_NOT_ALLOWED');
         }
@@ -11471,9 +11471,9 @@ async function testInspectionWorkflow() {
         {
             const p = await createParcel();
             await callSubmit(p.id, techEmail, validPayload());
-            const events = await collections.trackings.find({ trackingId: p.trackingId, status: INSPECTION_COMPLETED }).toArray();
+            const events = await collections.trackingEvents.find({ trackingId: p.trackingId, status: INSPECTION_COMPLETED }).toArray();
             logTest('49. Exactly one tracking event written', events.length === 1);
-            logTest('51. No duplicate tracking event on retry', (await callSubmit(p.id, techEmail, validPayload())).statusCode === 409 && (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: INSPECTION_COMPLETED })) === 1);
+            logTest('51. No duplicate tracking event on retry', (await callSubmit(p.id, techEmail, validPayload())).statusCode === 409 && (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: INSPECTION_COMPLETED })) === 1);
             const notif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:inspection_completed` }).toArray();
             logTest('52. Customer notification created exactly once', notif.length === 1 && notif[0].recipientEmail === ownerEmail);
             const serialized = JSON.stringify(notif[0]);
@@ -11490,7 +11490,7 @@ async function testInspectionWorkflow() {
             // 50/53. failed submit creates no tracking event and no notification.
             const p = await createParcel();
             await callSubmit(p.id, techEmail, validPayload({ diagnosis: undefined }));
-            const trk = await collections.trackings.countDocuments({ trackingId: p.trackingId, status: INSPECTION_COMPLETED });
+            const trk = await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: INSPECTION_COMPLETED });
             const ntf = await collections.notifications.countDocuments({ deduplicationKey: `repair:${p.id}:inspection_completed` });
             logTest('50/53. Failed submit creates no tracking event and no notification', trk === 0 && ntf === 0);
         }
@@ -11535,14 +11535,14 @@ async function testInspectionWorkflow() {
             if (created.body && created.body.insertedId) createdParcelIds.push(new ObjectId(created.body.insertedId));
         }
     } finally {
-        if (createdParcelIds.length) await collections.parcels.deleteMany({ _id: { $in: createdParcelIds } });
-        if (createdRiderIds.length) await collections.riders.deleteMany({ _id: { $in: createdRiderIds } });
+        if (createdParcelIds.length) await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds } });
+        if (createdRiderIds.length) await collections.technicians.deleteMany({ _id: { $in: createdRiderIds } });
         if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
-        if (usedTrackingIds.length) await collections.trackings.deleteMany({ trackingId: { $in: usedTrackingIds } });
+        if (usedTrackingIds.length) await collections.trackingEvents.deleteMany({ trackingId: { $in: usedTrackingIds } });
         if (ownerEmails.length) await collections.notifications.deleteMany({ recipientEmail: { $in: ownerEmails } });
 
-        const leftoverParcels = await collections.parcels.countDocuments({ trackingId: { $regex: '^TEST-INSP-' } });
-        const leftoverRiders = await collections.riders.countDocuments({ name: { $regex: '^TEST-INSPECTION-' } });
+        const leftoverParcels = await collections.repairRequests.countDocuments({ trackingId: { $regex: '^TEST-INSP-' } });
+        const leftoverRiders = await collections.technicians.countDocuments({ name: { $regex: '^TEST-INSPECTION-' } });
         const leftoverUsers = await collections.users.countDocuments({ email: { $regex: '^inspection-.*@test.local$' } });
         logTest('75/76. No inspection fixture leakage after tests', leftoverParcels === 0 && leftoverRiders === 0 && leftoverUsers === 0);
     }
@@ -11596,8 +11596,8 @@ async function testQuoteWorkflow() {
             { email: otherTechEmail, role: 'rider', createdAt: new Date() },
             { email: adminEmail, role: 'admin', createdAt: new Date() },
         ]);
-        const techInsert = await collections.riders.insertOne({ name: `TEST-QUOTE-TECH-${runId}`, email: techEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
-        const otherInsert = await collections.riders.insertOne({ name: `TEST-QUOTE-OTHERTECH-${runId}`, email: otherTechEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
+        const techInsert = await collections.technicians.insertOne({ name: `TEST-QUOTE-TECH-${runId}`, email: techEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
+        const otherInsert = await collections.technicians.insertOne({ name: `TEST-QUOTE-OTHERTECH-${runId}`, email: otherTechEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
         createdRiderIds.push(techInsert.insertedId, otherInsert.insertedId);
         const techRiderId = techInsert.insertedId.toString();
         const otherRiderId = otherInsert.insertedId.toString();
@@ -11618,7 +11618,7 @@ async function testQuoteWorkflow() {
                 deliveryStatus: INSPECTION_COMPLETED, riderId: techRiderId, riderName: `TEST-QUOTE-TECH-${runId}`, riderEmail: techEmail,
                 createdAt: now, updatedAt: now, ...overrides,
             };
-            const r = await collections.parcels.insertOne(doc);
+            const r = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(r.insertedId);
             return { id: r.insertedId.toString(), _id: r.insertedId, ...doc };
         }
@@ -11638,7 +11638,7 @@ async function testQuoteWorkflow() {
         }
         {
             const p = await createParcel();
-            await collections.parcels.updateOne({ _id: p._id }, { $set: { riderId: otherRiderId, riderEmail: otherTechEmail } });
+            await collections.repairRequests.updateOne({ _id: p._id }, { $set: { riderId: otherRiderId, riderEmail: otherTechEmail } });
             logTest('5. Reassigned rider (stale) blocked', (await submit(p.id, techEmail, validQuote())).statusCode === 404);
         }
         {
@@ -11679,12 +11679,12 @@ async function testQuoteWorkflow() {
             const beforeInsp = JSON.stringify(p.inspection);
             const stripeBefore = capturedStripeSessionParams.length;
             const r = await submit(p.id, techEmail, validQuote());
-            const doc = await collections.parcels.findOne({ _id: p._id });
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
             logTest('19. Quote stored', !!doc.quote && doc.quote.status === 'submitted');
             logTest('20. Quote currency server-owned BDT', doc.quote.currency === 'BDT');
             logTest('21. Server-computed total correct (800+3500+200=4500)', doc.quote.totalAmount === 4500 && r.body.quote.totalAmount === 4500);
             logTest('22. deliveryStatus becomes quote_submitted', doc.deliveryStatus === QUOTE_SUBMITTED);
-            const rider = await collections.riders.findOne({ _id: techInsert.insertedId });
+            const rider = await collections.technicians.findOne({ _id: techInsert.insertedId });
             logTest('23. Rider stays busy (workStatus + active status)', rider.workStatus === 'in_delivery' && ACTIVE_STATUSES.includes(doc.deliveryStatus));
             logTest('24. request.pricing unchanged by quote', JSON.stringify(doc.pricing) === beforePricing);
             logTest('25. inspection unchanged by quote', JSON.stringify(doc.inspection) === beforeInsp);
@@ -11696,7 +11696,7 @@ async function testQuoteWorkflow() {
         {
             const p = await submittedParcel();
             const r = await decide(p.id, ownerEmail, { decision: 'approve' });
-            const doc = await collections.parcels.findOne({ _id: p._id });
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
             logTest('26/34/35. Owner approve -> quote_approved', r.statusCode === 200 && doc.quote.status === 'approved' && doc.deliveryStatus === QUOTE_APPROVED && doc.quote.decidedAt instanceof Date);
             logTest('32. Second decision rejected', (await decide(p.id, ownerEmail, { decision: 'reject', reason: 'changed mind' })).body.code === 'QUOTE_ALREADY_DECIDED');
             logTest('47. Payment still blocked after approval', getPaymentEligibility(doc).code === 'PAYMENT_NOT_AVAILABLE');
@@ -11704,7 +11704,7 @@ async function testQuoteWorkflow() {
         {
             const p = await submittedParcel();
             const r = await decide(p.id, ownerEmail, { decision: 'reject', reason: 'Too expensive for this device.' });
-            const doc = await collections.parcels.findOne({ _id: p._id });
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
             logTest('27. Owner reject -> quote_rejected with reason', r.statusCode === 200 && doc.quote.status === 'rejected' && doc.deliveryStatus === QUOTE_REJECTED && doc.quote.decisionReason === 'Too expensive for this device.');
         }
         logTest('28. Rejection reason required', (await decide((await submittedParcel()).id, ownerEmail, { decision: 'reject' })).body.code === 'QUOTE_REJECTION_REASON_REQUIRED');
@@ -11719,7 +11719,7 @@ async function testQuoteWorkflow() {
             const p = await submittedParcel();
             const [a, b] = await Promise.all([decide(p.id, ownerEmail, { decision: 'approve' }), decide(p.id, ownerEmail, { decision: 'reject', reason: 'concurrent reject attempt' })]);
             const statuses = [a.statusCode, b.statusCode].sort();
-            const doc = await collections.parcels.findOne({ _id: p._id });
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
             logTest('33. Concurrent approve/reject -> one winner', JSON.stringify(statuses) === JSON.stringify([200, 409]) && (doc.quote.status === 'approved' || doc.quote.status === 'rejected') && (doc.deliveryStatus === QUOTE_APPROVED || doc.deliveryStatus === QUOTE_REJECTED));
         }
 
@@ -11728,8 +11728,8 @@ async function testQuoteWorkflow() {
             const p = await createParcel();
             await submit(p.id, techEmail, validQuote());
             await decide(p.id, ownerEmail, { decision: 'approve' });
-            logTest('36. quote_submitted tracking event once', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED })) === 1);
-            logTest('37. quote_approved tracking event once', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: QUOTE_APPROVED })) === 1);
+            logTest('36. quote_submitted tracking event once', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED })) === 1);
+            logTest('37. quote_approved tracking event once', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_APPROVED })) === 1);
             const subNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:quote_submitted` }).toArray();
             logTest('40. Customer quote_submitted notification once', subNotif.length === 1 && subNotif[0].recipientEmail === ownerEmail);
             // Phase 8.3: assert the exact business invariant structurally rather
@@ -11750,13 +11750,13 @@ async function testQuoteWorkflow() {
             const p = await createParcel();
             await submit(p.id, techEmail, validQuote());
             await decide(p.id, ownerEmail, { decision: 'reject', reason: 'Prefer to replace the device.' });
-            logTest('38. quote_rejected tracking event once', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: QUOTE_REJECTED })) === 1);
+            logTest('38. quote_rejected tracking event once', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_REJECTED })) === 1);
         }
         {
             // 39. failed submit -> no tracking event, no notification.
             const p = await createParcel();
             await submit(p.id, techEmail, validQuote({ laborAmount: -5 }));
-            logTest('39. Failed submit creates no tracking/notification', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED })) === 0 && (await collections.notifications.countDocuments({ deduplicationKey: `repair:${p.id}:quote_submitted` })) === 0);
+            logTest('39. Failed submit creates no tracking/notification', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED })) === 0 && (await collections.notifications.countDocuments({ deduplicationKey: `repair:${p.id}:quote_submitted` })) === 0);
         }
 
         // ================= Read (42-46) =================
@@ -11773,13 +11773,13 @@ async function testQuoteWorkflow() {
         // ================= Regression (49) =================
         logTest('49. Canonical BDT count remains 16', (await collections.serviceDefinitions.countDocuments({ $or: SERVICE_DEFINITION_SEED.map((r) => ({ productCategorySlug: r.productCategorySlug, repairCategorySlug: r.repairCategorySlug })) })) === 16);
     } finally {
-        if (createdParcelIds.length) await collections.parcels.deleteMany({ _id: { $in: createdParcelIds } });
-        if (createdRiderIds.length) await collections.riders.deleteMany({ _id: { $in: createdRiderIds } });
+        if (createdParcelIds.length) await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds } });
+        if (createdRiderIds.length) await collections.technicians.deleteMany({ _id: { $in: createdRiderIds } });
         if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
-        if (usedTrackingIds.length) await collections.trackings.deleteMany({ trackingId: { $in: usedTrackingIds } });
+        if (usedTrackingIds.length) await collections.trackingEvents.deleteMany({ trackingId: { $in: usedTrackingIds } });
         if (recipientEmails.length) await collections.notifications.deleteMany({ recipientEmail: { $in: recipientEmails } });
-        const leftoverP = await collections.parcels.countDocuments({ trackingId: { $regex: '^TEST-QUOTE-' } });
-        const leftoverR = await collections.riders.countDocuments({ name: { $regex: '^TEST-QUOTE-' } });
+        const leftoverP = await collections.repairRequests.countDocuments({ trackingId: { $regex: '^TEST-QUOTE-' } });
+        const leftoverR = await collections.technicians.countDocuments({ name: { $regex: '^TEST-QUOTE-' } });
         const leftoverU = await collections.users.countDocuments({ email: { $regex: '^quote-.*@test.local$' } });
         logTest('53. No quote fixture leakage after tests', leftoverP === 0 && leftoverR === 0 && leftoverU === 0);
     }
@@ -11836,7 +11836,7 @@ async function testV2PaymentWorkflow() {
             { email: otherEmail, role: 'user', createdAt: new Date() },
             { email: adminEmail, role: 'admin', createdAt: new Date() },
         ]);
-        const techInsert = await collections.riders.insertOne({ name: `TEST-PAY-TECH-${runId}`, email: techEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
+        const techInsert = await collections.technicians.insertOne({ name: `TEST-PAY-TECH-${runId}`, email: techEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
         createdRiderIds.push(techInsert.insertedId);
         const techRiderId = techInsert.insertedId.toString();
 
@@ -11865,7 +11865,7 @@ async function testV2PaymentWorkflow() {
                 deliveryStatus: QUOTE_APPROVED, riderId: techRiderId, riderName: `TEST-PAY-TECH-${runId}`, riderEmail: techEmail,
                 createdAt: now, updatedAt: now, ...overrides,
             };
-            const r = await collections.parcels.insertOne(doc);
+            const r = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(r.insertedId);
             return { id: r.insertedId.toString(), _id: r.insertedId, ...doc };
         }
@@ -12001,8 +12001,8 @@ async function testV2PaymentWorkflow() {
             const beforeQuote = JSON.stringify(p.quote);
             const sid = setPaidSession(makeSid(), { parcelId: p.id, trackingId: p.trackingId });
             const r = await pay(sid, ownerEmail);
-            const doc = await collections.parcels.findOne({ _id: p._id });
-            const rider = await collections.riders.findOne({ _id: techInsert.insertedId });
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
+            const rider = await collections.technicians.findOne({ _id: techInsert.insertedId });
             const payDoc = await collections.payments.findOne({ sessionId: sid });
             logTest('28. Verified succeeded intent accepted (200)', r.statusCode === 200 && r.body.success === true);
             logTest('29. Payment stored (payments collection)', !!payDoc && payDoc.amount === 4500 && payDoc.currency === 'BDT' && payDoc.schemaVersion === 2);
@@ -12017,7 +12017,7 @@ async function testV2PaymentWorkflow() {
             const payCount = await collections.payments.countDocuments({ sessionId: sid });
             logTest('36. Second completion idempotent (no double payment)', r2.statusCode === 200 && r2.body.alreadyProcessed === true && payCount === 1);
             // 37. Tracking once.
-            logTest('37. payment_completed tracking event once', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: PAYMENT_COMPLETED })) === 1);
+            logTest('37. payment_completed tracking event once', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: PAYMENT_COMPLETED })) === 1);
             // 38. Notifications once (customer + technician), no card/Stripe data.
             const custNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:payment_completed` }).toArray();
             const techNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:payment_completed_technician` }).toArray();
@@ -12028,7 +12028,7 @@ async function testV2PaymentWorkflow() {
         // ================= Regression / isolation (39-46) =================
         {
             // 39. Legacy payment path still creates a USD session, unchanged.
-            const legacy = await collections.parcels.insertOne({ trackingId: makeTrackingId(), senderEmail: ownerEmail, parcelName: `TEST-PAY-LEGACY-${runId}`, cost: 30, deliveryStatus: 'parcel_picked_up', createdAt: new Date() });
+            const legacy = await collections.repairRequests.insertOne({ trackingId: makeTrackingId(), senderEmail: ownerEmail, parcelName: `TEST-PAY-LEGACY-${runId}`, cost: 30, deliveryStatus: 'parcel_picked_up', createdAt: new Date() });
             createdParcelIds.push(legacy.insertedId);
             const before = capturedStripeSessionParams.length;
             const res = fakeRes();
@@ -12057,14 +12057,14 @@ async function testV2PaymentWorkflow() {
         if (createdParcelIds.length) {
             await collections.payments.deleteMany({ parcelId: { $in: createdParcelIds.map((x) => x.toString()) } });
             await collections.checkoutSessions.deleteMany({ parcelId: { $in: createdParcelIds.map((x) => x.toString()) } });
-            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds } });
+            await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds } });
         }
-        if (createdRiderIds.length) await collections.riders.deleteMany({ _id: { $in: createdRiderIds } });
+        if (createdRiderIds.length) await collections.technicians.deleteMany({ _id: { $in: createdRiderIds } });
         if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
-        if (usedTrackingIds.length) await collections.trackings.deleteMany({ trackingId: { $in: usedTrackingIds } });
+        if (usedTrackingIds.length) await collections.trackingEvents.deleteMany({ trackingId: { $in: usedTrackingIds } });
         if (recipientEmails.length) await collections.notifications.deleteMany({ recipientEmail: { $in: recipientEmails } });
         for (const s of usedSessionIds) stripeSessionFixtures.delete(s);
-        const leftoverP = await collections.parcels.countDocuments({ trackingId: { $regex: '^TEST-PAY-' } });
+        const leftoverP = await collections.repairRequests.countDocuments({ trackingId: { $regex: '^TEST-PAY-' } });
         const leftoverU = await collections.users.countDocuments({ email: { $regex: '^pay-.*@test.local$' } });
         logTest('45. No payment fixture leakage after tests', leftoverP === 0 && leftoverU === 0);
     }
@@ -12133,8 +12133,8 @@ async function testRepairWorkflow() {
             { email: otherTechEmail, role: 'rider', createdAt: new Date() },
             { email: adminEmail, role: 'admin', createdAt: new Date() },
         ]);
-        const techInsert = await collections.riders.insertOne({ name: `TEST-REP-TECH-${runId}`, email: techEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
-        const otherInsert = await collections.riders.insertOne({ name: `TEST-REP-OTHERTECH-${runId}`, email: otherTechEmail, status: 'approved', workStatus: 'available', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
+        const techInsert = await collections.technicians.insertOne({ name: `TEST-REP-TECH-${runId}`, email: techEmail, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
+        const otherInsert = await collections.technicians.insertOne({ name: `TEST-REP-OTHERTECH-${runId}`, email: otherTechEmail, status: 'approved', workStatus: 'available', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
         createdRiderIds.push(techInsert.insertedId, otherInsert.insertedId);
         const techRiderId = techInsert.insertedId.toString();
 
@@ -12153,7 +12153,7 @@ async function testRepairWorkflow() {
                 deliveryStatus: PAYMENT_COMPLETED, riderId: techRiderId, riderName: `TEST-REP-TECH-${runId}`, riderEmail: techEmail,
                 createdAt: now, updatedAt: now, ...overrides,
             };
-            const r = await collections.parcels.insertOne(doc);
+            const r = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(r.insertedId);
             return { id: r.insertedId.toString(), _id: r.insertedId, ...doc };
         }
@@ -12193,7 +12193,7 @@ async function testRepairWorkflow() {
         {
             const p = await createParcel();
             const r = await start(p.id, techEmail);
-            const doc = await collections.parcels.findOne({ _id: p._id });
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
             logTest('7. payment_completed start accepted', r.statusCode === 201 && r.body.deliveryStatus === REPAIR_IN_PROGRESS && doc.repair.status === 'in_progress' && doc.repair.startedAt instanceof Date);
             logTest('8. Duplicate start rejected', (await start(p.id, techEmail)).body.code === 'REPAIR_ALREADY_STARTED');
         }
@@ -12204,12 +12204,12 @@ async function testRepairWorkflow() {
         {
             const p = await startedParcel();
             const r = await progress(p.id, techEmail, { message: 'Opened the device and inspected the board.' });
-            const doc = await collections.parcels.findOne({ _id: p._id });
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
             logTest('11. Valid progress update accepted', r.statusCode === 201 && doc.repair.progressUpdates.length === 1 && r.body.update.id);
             logTest('12a. Too-short message rejected', (await progress(p.id, techEmail, { message: 'hi' })).body.code === 'INVALID_PROGRESS_MESSAGE');
             logTest('12b. Too-long message rejected', (await progress(p.id, techEmail, { message: 'x'.repeat(501) })).body.code === 'INVALID_PROGRESS_MESSAGE');
             const r2 = await progress(p.id, techEmail, { message: 'Ordered a replacement part.', foo: 'bar' });
-            const doc2 = await collections.parcels.findOne({ _id: p._id });
+            const doc2 = await collections.repairRequests.findOne({ _id: p._id });
             const last = doc2.repair.progressUpdates[doc2.repair.progressUpdates.length - 1];
             logTest('13. Unknown fields excluded from stored update', r2.statusCode === 201 && !('foo' in last) && Object.keys(last).sort().join() === 'createdAt,createdByRiderId,id,message');
             logTest('14a. Client-supplied id rejected', (await progress(p.id, techEmail, { message: 'valid message here', id: 'forged' })).body.code === 'INVALID_PROGRESS');
@@ -12220,14 +12220,14 @@ async function testRepairWorkflow() {
             const p = await startedParcel();
             const seed = [];
             for (let i = 0; i < MAX_PROGRESS_UPDATES; i++) seed.push({ id: `seed-${i}`, message: `seed ${i}`, createdAt: new Date(), createdByRiderId: techInsert.insertedId });
-            await collections.parcels.updateOne({ _id: p._id }, { $set: { 'repair.progressUpdates': seed } });
+            await collections.repairRequests.updateOne({ _id: p._id }, { $set: { 'repair.progressUpdates': seed } });
             logTest('15. Max 50 progress updates enforced', (await progress(p.id, techEmail, { message: 'one too many updates' })).body.code === 'PROGRESS_LIMIT_REACHED');
         }
         {
             // 16. Concurrent progress appends both preserved.
             const p = await startedParcel();
             await Promise.all([progress(p.id, techEmail, { message: 'concurrent update one' }), progress(p.id, techEmail, { message: 'concurrent update two' })]);
-            const doc = await collections.parcels.findOne({ _id: p._id });
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
             logTest('16. Concurrent progress appends both preserved', doc.repair.progressUpdates.length === 2);
         }
 
@@ -12269,7 +12269,7 @@ async function testRepairWorkflow() {
             const beforePricing = JSON.stringify(p.pricing), beforeInsp = JSON.stringify(p.inspection), beforeQuote = JSON.stringify(p.quote), beforePay = JSON.stringify(p.payment);
             const eid = await uploadEvidence(p.id);
             const r = await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: [eid] });
-            const doc = await collections.parcels.findOne({ _id: p._id });
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
             logTest('25. Valid completion accepted (200)', r.statusCode === 200 && r.body.deliveryStatus === REPAIR_COMPLETED);
             logTest('26. Double completion -> one winner', (await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: [eid] })).body.code === 'REPAIR_ALREADY_COMPLETED');
             logTest('27. deliveryStatus -> repair_completed, repair.status completed', doc.deliveryStatus === REPAIR_COMPLETED && doc.repair.status === 'completed');
@@ -12297,7 +12297,7 @@ async function testRepairWorkflow() {
             const email = `rep-rel-${runId}-${relSeq++}@test.local`;
             createdUserEmails.push(email); recipientEmails.push(email);
             await collections.users.insertOne({ email, role: 'rider', createdAt: new Date() });
-            const ins = await collections.riders.insertOne({ name: `TEST-REP-REL-${runId}-${relSeq}`, email, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
+            const ins = await collections.technicians.insertOne({ name: `TEST-REP-REL-${runId}-${relSeq}`, email, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
             createdRiderIds.push(ins.insertedId);
             const p = await createParcel({ riderId: ins.insertedId.toString(), riderName: `TEST-REP-REL-${runId}`, riderEmail: email });
             await start(p.id, email);
@@ -12305,12 +12305,12 @@ async function testRepairWorkflow() {
         }
         {
             const { p, riderEmail, riderId } = await freshRiderParcel();
-            const riderDuring = await collections.riders.findOne({ _id: riderId });
-            const docDuring = await collections.parcels.findOne({ _id: p._id });
+            const riderDuring = await collections.technicians.findOne({ _id: riderId });
+            const docDuring = await collections.repairRequests.findOne({ _id: p._id });
             logTest('36. Rider busy before completion', riderDuring.workStatus === 'in_delivery' && ACTIVE_STATUSES.includes(docDuring.deliveryStatus));
             const eid = await uploadEvidence(p.id, riderEmail);
             await complete(p.id, riderEmail, { summary: validSummary, evidenceImageIds: [eid] });
-            const riderAfter = await collections.riders.findOne({ _id: riderId });
+            const riderAfter = await collections.technicians.findOne({ _id: riderId });
             logTest('37. Rider available after completion', riderAfter.workStatus === 'available');
             logTest('40. Rider assignment-eligible again (released, terminal status not active)', riderAfter.workStatus === 'available' && !ACTIVE_STATUSES.includes(REPAIR_COMPLETED));
         }
@@ -12318,7 +12318,7 @@ async function testRepairWorkflow() {
             // 38. Failed completion (no evidence) does not release the rider.
             const { p, riderEmail, riderId } = await freshRiderParcel();
             await complete(p.id, riderEmail, { summary: validSummary, evidenceImageIds: [] });
-            const rider = await collections.riders.findOne({ _id: riderId });
+            const rider = await collections.technicians.findOne({ _id: riderId });
             logTest('38. Failed completion does not release rider', rider.workStatus === 'in_delivery');
         }
         {
@@ -12327,7 +12327,7 @@ async function testRepairWorkflow() {
             const eid = await uploadEvidence(p.id, riderEmail);
             const [a, b] = await Promise.all([complete(p.id, riderEmail, { summary: validSummary, evidenceImageIds: [eid] }), complete(p.id, riderEmail, { summary: validSummary, evidenceImageIds: [eid] })]);
             const statuses = [a.statusCode, b.statusCode].sort((x, y) => x - y);
-            const rider = await collections.riders.findOne({ _id: riderId });
+            const rider = await collections.technicians.findOne({ _id: riderId });
             const oneWinner = statuses[0] === 200 && (statuses[1] === 404 || statuses[1] === 409);
             logTest('39. Double completion releases rider exactly once', oneWinner && rider.workStatus === 'available');
         }
@@ -12337,10 +12337,10 @@ async function testRepairWorkflow() {
             const p = await startedParcel();
             await progress(p.id, techEmail, { message: 'Progress update for tracking.' });
             await completeWithEvidence(p.id);
-            logTest('41. repair_started tracking event once', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: 'repair_started' })) === 1);
-            logTest('42. repair_progress_updated tracking event present', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: 'repair_progress_updated' })) >= 1);
-            logTest('43. repair_completed tracking event once', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: 'repair_completed' })) === 1);
-            logTest('44. No duplicate repair_started event', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: 'repair_started' })) === 1);
+            logTest('41. repair_started tracking event once', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: 'repair_started' })) === 1);
+            logTest('42. repair_progress_updated tracking event present', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: 'repair_progress_updated' })) >= 1);
+            logTest('43. repair_completed tracking event once', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: 'repair_completed' })) === 1);
+            logTest('44. No duplicate repair_started event', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: 'repair_started' })) === 1);
             const finishNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:repair_finished` }).toArray();
             const ser = JSON.stringify(finishNotif[0] || {});
             logTest('46. Customer completion notification once, safe copy', finishNotif.length === 1 && finishNotif[0].recipientEmail === ownerEmail && finishNotif[0].message === 'Your repair has been completed.' && !ser.includes('storageKey') && !ser.includes('4500'));
@@ -12349,7 +12349,7 @@ async function testRepairWorkflow() {
             // 45. Failed start creates no tracking event.
             const p = await createParcel({ deliveryStatus: QUOTE_APPROVED, payment: undefined });
             await start(p.id, techEmail);
-            logTest('45. No tracking event on failed start', (await collections.trackings.countDocuments({ trackingId: p.trackingId, status: 'repair_started' })) === 0);
+            logTest('45. No tracking event on failed start', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: 'repair_started' })) === 0);
         }
 
         // ================= Read / privacy (47-54) =================
@@ -12373,7 +12373,7 @@ async function testRepairWorkflow() {
         {
             const p = await startedParcel();
             await completeWithEvidence(p.id);
-            const doc = await collections.parcels.findOne({ _id: p._id });
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
             logTest('55. Payment remains completed after repair', doc.payment.status === 'completed');
             logTest('56. Quote remains approved after repair', doc.quote.status === 'approved' && doc.quote.totalAmount === 4500);
             logTest('57. V2 payment eligibility reflects already-paid', getV2PaymentEligibility(doc).code === 'ALREADY_PAID');
@@ -12391,13 +12391,13 @@ async function testRepairWorkflow() {
     } finally {
         if (createdParcelIds.length) {
             await collections.repairEvidenceSessions.deleteMany({ requestId: { $in: createdParcelIds.map((x) => x.toString()) } });
-            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds } });
+            await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds } });
         }
-        if (createdRiderIds.length) await collections.riders.deleteMany({ _id: { $in: createdRiderIds } });
+        if (createdRiderIds.length) await collections.technicians.deleteMany({ _id: { $in: createdRiderIds } });
         if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
-        if (usedTrackingIds.length) await collections.trackings.deleteMany({ trackingId: { $in: usedTrackingIds } });
+        if (usedTrackingIds.length) await collections.trackingEvents.deleteMany({ trackingId: { $in: usedTrackingIds } });
         if (recipientEmails.length) await collections.notifications.deleteMany({ recipientEmail: { $in: recipientEmails } });
-        const leftoverP = await collections.parcels.countDocuments({ trackingId: { $regex: '^TEST-REP-' } });
+        const leftoverP = await collections.repairRequests.countDocuments({ trackingId: { $regex: '^TEST-REP-' } });
         const leftoverU = await collections.users.countDocuments({ email: { $regex: '^rep-.*@test.local$' } });
         const leftoverE = await collections.repairEvidenceSessions.countDocuments({ requestId: { $in: createdParcelIds.map((x) => x.toString()) } });
         logTest('63. No repair fixture leakage after tests', leftoverP === 0 && leftoverU === 0 && leftoverE === 0);
@@ -12492,7 +12492,7 @@ async function testSafeRepairDeletion() {
                 product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
                 deliveryStatus: 'pending-pickup', createdAt: now, updatedAt: now, ...overrides,
             };
-            const r = await collections.parcels.insertOne(doc);
+            const r = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(r.insertedId);
             usedSessionRequestIds.push(r.insertedId.toString());
             usedPaymentParcelIds.push(r.insertedId.toString());
@@ -12553,7 +12553,7 @@ async function testSafeRepairDeletion() {
 
         // --- 10. Legacy (no schemaVersion) request is never deletable through this path. ---
         const legacy = await createParcel({ schemaVersion: undefined });
-        await collections.parcels.updateOne({ _id: legacy._id }, { $unset: { schemaVersion: '' } });
+        await collections.repairRequests.updateOne({ _id: legacy._id }, { $unset: { schemaVersion: '' } });
         res = await delReq(legacy.id, ownerEmail);
         logTest('10. Legacy request rejected (409 REQUEST_DELETE_NOT_ALLOWED) and survives', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(legacy.id)));
         res = await delReq(legacy.id, adminEmail);
@@ -12641,10 +12641,10 @@ async function testSafeRepairDeletion() {
         // --- 29. Stale inactive checkout rows and tracking logs are purged. ---
         const cleanupParcel = await createParcel();
         await collections.checkoutSessions.insertOne({ parcelId: cleanupParcel.id, active: false, sessionId: `cs_stale_${runId}`, createdAt: new Date() });
-        await collections.trackings.insertOne({ trackingId: cleanupParcel.trackingId, status: 'pending-pickup', timestamp: new Date() });
+        await collections.trackingEvents.insertOne({ trackingId: cleanupParcel.trackingId, status: 'pending-pickup', timestamp: new Date() });
         res = await delReq(cleanupParcel.id, ownerEmail);
         const staleCheckout = await collections.checkoutSessions.findOne({ parcelId: cleanupParcel.id });
-        const trackingAfter = await collections.trackings.findOne({ trackingId: cleanupParcel.trackingId });
+        const trackingAfter = await collections.trackingEvents.findOne({ trackingId: cleanupParcel.trackingId });
         logTest('29. Delete purges stale checkout rows and tracking logs for the request', res.statusCode === 200 && !staleCheckout && !trackingAfter);
 
         // --- 30. Storage cleanup is best-effort: a failing deleteObject never fails the response or the DB delete. ---
@@ -12770,9 +12770,9 @@ async function testSafeRepairDeletion() {
         logTest('59. Concurrent duplicate delete yields exactly one 200 winner (loser 404/409)', dupWinners === 1 && [du1.statusCode, du2.statusCode].some((s) => s === 404 || s === 409));
     } finally {
         if (createdParcelIds.length) {
-            await collections.parcels.deleteMany({ _id: { $in: createdParcelIds } });
+            await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds } });
         }
-        if (usedTrackingIds.length) await collections.trackings.deleteMany({ trackingId: { $in: usedTrackingIds } });
+        if (usedTrackingIds.length) await collections.trackingEvents.deleteMany({ trackingId: { $in: usedTrackingIds } });
         if (usedSessionRequestIds.length) {
             await collections.damageUploadSessions.deleteMany({ requestId: { $in: usedSessionRequestIds } });
             await collections.repairEvidenceSessions.deleteMany({ requestId: { $in: usedSessionRequestIds } });
@@ -12782,7 +12782,7 @@ async function testSafeRepairDeletion() {
         const cleanupIds = [...createdParcelIds.map((x) => x.toString()), `notfound-${runId}`];
         await collections.deletionCleanups.deleteMany({ _id: { $in: cleanupIds } });
         if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
-        const leftoverP = await collections.parcels.countDocuments({ trackingId: { $regex: '^TEST-DEL-' } });
+        const leftoverP = await collections.repairRequests.countDocuments({ trackingId: { $regex: '^TEST-DEL-' } });
         const leftoverU = await collections.users.countDocuments({ email: { $regex: '^del-.*@test.local$' } });
         const leftoverC = await collections.deletionCleanups.countDocuments({ _id: { $in: cleanupIds } });
         logTest('60. No deletion fixture leakage after tests (parcels, users, cleanup records)', leftoverP === 0 && leftoverU === 0 && leftoverC === 0);
@@ -12816,7 +12816,7 @@ async function seedTestBaseline() {
 
     // The approved, matchable seeded technician (RIDER_EMAIL) the assignment and
     // status-transition sections assign real work to.
-    await collections.riders.updateOne(
+    await collections.technicians.updateOne(
         { email: RIDER_EMAIL },
         {
             $setOnInsert: { email: RIDER_EMAIL, createdAt: new Date() },
@@ -13156,7 +13156,7 @@ async function testDamageProjectionHardening() {
             damage: { description: 'Cracked screen after a drop.', images: [rawImage, { ...rawImage, storageKey: `${rawImage.storageKey}.2` }] },
             createdAt: new Date(),
         };
-        const ins = await collections.parcels.insertOne(doc);
+        const ins = await collections.repairRequests.insertOne(doc);
         createdIds.push(ins.insertedId);
         const id = ins.insertedId.toString();
 
@@ -13200,7 +13200,7 @@ async function testDamageProjectionHardening() {
             assignmentHistory: [{ assignmentId: 'a1', riderEmail: techEmail, assignedBy: adminEmail, decision: 'rejected', rejectionReason: 'Private rejection note', decidedAt: new Date() }],
             createdAt: new Date(),
         };
-        const histIns = await collections.parcels.insertOne(histParcel);
+        const histIns = await collections.repairRequests.insertOne(histParcel);
         createdIds.push(histIns.insertedId);
         const custList = await getAll(customerEmail);
         const custHist = (custList.body || []).find((p) => p.trackingId === `TEST-DP-HIST-${runId}`);
@@ -13209,7 +13209,7 @@ async function testDamageProjectionHardening() {
         const techHist = (techList.body || []).find((p) => p.trackingId === `TEST-DP-HIST-${runId}`);
         logTest('11. Technician list never exposes assignmentHistory', !!techHist && !('assignmentHistory' in techHist));
     } finally {
-        if (createdIds.length) await collections.parcels.deleteMany({ _id: { $in: createdIds } });
+        if (createdIds.length) await collections.repairRequests.deleteMany({ _id: { $in: createdIds } });
         if (emails.length) await collections.users.deleteMany({ email: { $in: emails } });
     }
 }
@@ -13314,7 +13314,7 @@ async function testInspectionListProjectionTightening() {
             payment: { status: 'completed', provider: 'stripe', paymentIntentId: 'pi_SECRET_paymentintent', amount: 4500, currency: 'BDT', quoteVersion: 1, completedAt: new Date() },
             createdAt: new Date(),
         };
-        const ins = await collections.parcels.insertOne(richDoc);
+        const ins = await collections.repairRequests.insertOne(richDoc);
         createdIds.push(ins.insertedId);
         const id = ins.insertedId.toString();
 
@@ -13352,7 +13352,7 @@ async function testInspectionListProjectionTightening() {
         logTest('4a. Existence markers hasInspection/hasQuote/hasRepair are true when the stages exist', custItem.hasInspection === true && custItem.hasQuote === true && custItem.hasRepair === true);
         // A brand-new pending-pickup request has none of the sub-documents.
         const freshDoc = { schemaVersion: 2, trackingId: `TEST-ILP-FRESH-${runId}`, senderEmail: customerEmail, deliveryStatus: 'pending-pickup', damage: { description: 'x', images: [] }, createdAt: new Date() };
-        const freshIns = await collections.parcels.insertOne(freshDoc);
+        const freshIns = await collections.repairRequests.insertOne(freshDoc);
         createdIds.push(freshIns.insertedId);
         const freshList = await getAll(customerEmail);
         const freshItem = (freshList.body || []).find((p) => p.trackingId === `TEST-ILP-FRESH-${runId}`);
@@ -13368,7 +13368,7 @@ async function testInspectionListProjectionTightening() {
         await parcelController.getParcelById({ params: { id }, decoded_email: 'ilp-nobody@test.local' }, otherRes);
         logTest('6b. GET /parcels/:id authorization unchanged (unauthorized caller still 403)', otherRes.statusCode === 403);
         // The stored document itself is never mutated - dedicated endpoints still read the full data.
-        const stored = await collections.parcels.findOne({ _id: ins.insertedId });
+        const stored = await collections.repairRequests.findOne({ _id: ins.insertedId });
         logTest('6c. Projection does not mutate the stored document (dedicated endpoints unaffected)', stored.inspection.internalNotes === 'INTERNAL-NOTES-SECRET do not show customer' && stored.quote.laborAmount === 2000 && stored.payment.paymentIntentId === 'pi_SECRET_paymentintent');
 
         // --- 7. No damage/assignment projection regression ---
@@ -13387,7 +13387,7 @@ async function testInspectionListProjectionTightening() {
         const pure = projectSafeListParcel(richDoc);
         logTest('9. projectSafeListParcel is pure (input keeps its inspection/quote/repair/payment sub-documents)', richDoc.inspection && richDoc.quote && richDoc.repair && richDoc.payment && !('inspection' in pure) && pure.hasInspection === true);
     } finally {
-        if (createdIds.length) await collections.parcels.deleteMany({ _id: { $in: createdIds } });
+        if (createdIds.length) await collections.repairRequests.deleteMany({ _id: { $in: createdIds } });
         if (emails.length) await collections.users.deleteMany({ email: { $in: emails } });
     }
 }
@@ -13474,7 +13474,7 @@ async function testTechnicianMatchingProfileFlow() {
 
         // ================= APPLICATION (1-10) =================
         let res = trackApplicant(await callCreateRider(baseApplication()));
-        const app1Doc = res.body.insertedId ? await collections.riders.findOne({ _id: res.body.insertedId }) : null;
+        const app1Doc = res.body.insertedId ? await collections.technicians.findOne({ _id: res.body.insertedId }) : null;
         logTest('1. Valid canonical expertise application accepted and persisted', res.statusCode === 200 && !!app1Doc && Array.isArray(app1Doc.expertise) && app1Doc.expertise[0].productCategorySlug === 'smartphone');
 
         res = trackApplicant(await callCreateRider(baseApplication({
@@ -13484,7 +13484,7 @@ async function testTechnicianMatchingProfileFlow() {
                 { productCategorySlug: 'laptop-computer', repairCategorySlugs: ['charging-port'], level: 'advanced', experienceYears: 5 },
             ]
         })));
-        const app2Doc = res.body.insertedId ? await collections.riders.findOne({ _id: res.body.insertedId }) : null;
+        const app2Doc = res.body.insertedId ? await collections.technicians.findOne({ _id: res.body.insertedId }) : null;
         logTest('2. Multiple distinct expertise entries accepted', res.statusCode === 200 && !!app2Doc && app2Doc.expertise.length === 2);
 
         res = await callCreateRider(baseApplication({
@@ -13508,17 +13508,17 @@ async function testTechnicianMatchingProfileFlow() {
         res = await callCreateRider(baseApplication({ email: `tmp-tech-malformed-${runId}@test.local`, expertise: 'not-an-array' }));
         logTest('7. Malformed expertise (not an array) rejected', res.statusCode === 400 && res.body.code === 'MISSING_EXPERTISE');
 
-        const missingRegionCountBefore = await collections.riders.countDocuments({ email: `tmp-tech-noregion-${runId}@test.local` });
+        const missingRegionCountBefore = await collections.technicians.countDocuments({ email: `tmp-tech-noregion-${runId}@test.local` });
         res = await callCreateRider(baseApplication({ email: `tmp-tech-noregion-${runId}@test.local`, region: '   ' }));
-        const missingRegionCountAfter = await collections.riders.countDocuments({ email: `tmp-tech-noregion-${runId}@test.local` });
+        const missingRegionCountAfter = await collections.technicians.countDocuments({ email: `tmp-tech-noregion-${runId}@test.local` });
         logTest('8. Missing service-area field (region) rejected, nothing persisted', res.statusCode === 400 && res.body.code === 'MISSING_APPLICATION_FIELD' && missingRegionCountBefore === 0 && missingRegionCountAfter === 0);
 
         res = trackApplicant(await callCreateRider(baseApplication({ email: `tmp-tech-wsinject-${runId}@test.local`, workStatus: 'in_delivery', status: 'approved' })));
-        const wsDoc = res.body.insertedId ? await collections.riders.findOne({ _id: res.body.insertedId }) : null;
+        const wsDoc = res.body.insertedId ? await collections.technicians.findOne({ _id: res.body.insertedId }) : null;
         logTest('9. Client workStatus/status ignored (status forced to pending, no client workStatus persisted)', res.statusCode === 200 && !!wsDoc && wsDoc.status === 'pending' && wsDoc.workStatus === undefined);
 
         res = trackApplicant(await callCreateRider(baseApplication({ email: `tmp-tech-massassign-${runId}@test.local`, role: 'admin', approved: true, riderId: 'x', rating: 5, isAdmin: true })));
-        const maDoc = res.body.insertedId ? await collections.riders.findOne({ _id: res.body.insertedId }) : null;
+        const maDoc = res.body.insertedId ? await collections.technicians.findOne({ _id: res.body.insertedId }) : null;
         logTest('10. Authoritative fields cannot be mass-assigned (role/approved/riderId/rating/isAdmin dropped)', res.statusCode === 200 && !!maDoc && maDoc.role === undefined && maDoc.approved === undefined && maDoc.riderId === undefined && maDoc.rating === undefined && maDoc.isAdmin === undefined);
 
         // ================= APPROVAL (11-16) =================
@@ -13528,7 +13528,7 @@ async function testTechnicianMatchingProfileFlow() {
         const applyRes = trackApplicant(await callCreateRider(baseApplication({ email: approveEmail })));
         const applyId = applyRes.body.insertedId.toString();
         const approveRes = await callUpdate(applyId, { status: 'approved' });
-        const approvedDoc = await collections.riders.findOne({ _id: new ObjectId(applyId) });
+        const approvedDoc = await collections.technicians.findOne({ _id: new ObjectId(applyId) });
         const approvedUser = await collections.users.findOne({ email: approveEmail });
         logTest('11. Approved technician keeps canonical expertise', approveRes.statusCode === 200 && Array.isArray(approvedDoc.expertise) && approvedDoc.expertise[0].productCategorySlug === 'smartphone');
         logTest('12. Approved technician keeps canonical service area (region/district)', approvedDoc.region === 'Dhaka' && approvedDoc.district === 'Dhaka');
@@ -13538,23 +13538,23 @@ async function testTechnicianMatchingProfileFlow() {
         const activeEmail = `tmp-active-${runId}@test.local`;
         createdUserEmails.push(activeEmail);
         await collections.users.insertOne({ email: activeEmail, role: 'rider', createdAt: new Date() });
-        const activeRiderInsert = await collections.riders.insertOne({ name: `TMP-ACTIVE-${runId}`, email: activeEmail, region: 'Dhaka', district: 'Dhaka', status: 'approved', workStatus: 'in_delivery', expertise: validExpertise(), createdAt: new Date() });
+        const activeRiderInsert = await collections.technicians.insertOne({ name: `TMP-ACTIVE-${runId}`, email: activeEmail, region: 'Dhaka', district: 'Dhaka', status: 'approved', workStatus: 'in_delivery', expertise: validExpertise(), createdAt: new Date() });
         createdRiderIds.push(activeRiderInsert.insertedId.toString());
-        const activeParcelInsert = await collections.parcels.insertOne({ schemaVersion: 2, trackingId: `TMP-ACTIVE-${runId}`, senderEmail: customerEmail, deliveryStatus: 'driver_assigned', riderId: activeRiderInsert.insertedId.toString(), createdAt: new Date() });
+        const activeParcelInsert = await collections.repairRequests.insertOne({ schemaVersion: 2, trackingId: `TMP-ACTIVE-${runId}`, senderEmail: customerEmail, deliveryStatus: 'driver_assigned', riderId: activeRiderInsert.insertedId.toString(), createdAt: new Date() });
         createdParcelIds.push(activeParcelInsert.insertedId.toString());
         createdTrackingIds.push(`TMP-ACTIVE-${runId}`);
         await callUpdate(activeRiderInsert.insertedId.toString(), { status: 'approved' });
-        const activeAfter = await collections.riders.findOne({ _id: activeRiderInsert.insertedId });
+        const activeAfter = await collections.technicians.findOne({ _id: activeRiderInsert.insertedId });
         logTest('14. Reapproving an actively-assigned technician preserves in_delivery (not reset to available)', activeAfter.workStatus === 'in_delivery');
 
         // Legacy incomplete application: approval blocked.
         const legacyEmail = `tmp-legacy-${runId}@test.local`;
         createdUserEmails.push(legacyEmail);
         await collections.users.insertOne({ email: legacyEmail, role: 'user', createdAt: new Date() });
-        const legacyInsert = await collections.riders.insertOne({ name: `TMP-LEGACY-${runId}`, email: legacyEmail, region: 'Dhaka', district: 'Dhaka', status: 'pending', createdAt: new Date() });
+        const legacyInsert = await collections.technicians.insertOne({ name: `TMP-LEGACY-${runId}`, email: legacyEmail, region: 'Dhaka', district: 'Dhaka', status: 'pending', createdAt: new Date() });
         createdRiderIds.push(legacyInsert.insertedId.toString());
         const legacyApproveRes = await callUpdate(legacyInsert.insertedId.toString(), { status: 'approved' });
-        const legacyAfter = await collections.riders.findOne({ _id: legacyInsert.insertedId });
+        const legacyAfter = await collections.technicians.findOne({ _id: legacyInsert.insertedId });
         const legacyUserAfter = await collections.users.findOne({ email: legacyEmail });
         logTest('15. Legacy incomplete application cannot be approved (409 INCOMPLETE_TECHNICIAN_PROFILE)', legacyApproveRes.statusCode === 409 && legacyApproveRes.body.code === 'INCOMPLETE_TECHNICIAN_PROFILE');
         logTest('16. Blocked approval leaves no partial state (rider stays pending, user stays user)', legacyAfter.status === 'pending' && legacyUserAfter.role === 'user');
@@ -13594,39 +13594,39 @@ async function testTechnicianMatchingProfileFlow() {
         const otherRegionEmail = `tmp-otherregion-${runId}@test.local`;
         createdUserEmails.push(otherRegionEmail);
         await collections.users.insertOne({ email: otherRegionEmail, role: 'rider', createdAt: new Date() });
-        const otherRegionInsert = await collections.riders.insertOne({ name: `TMP-OTHERREGION-${runId}`, email: otherRegionEmail, region: 'Chittagong', district: 'Chittagong', status: 'approved', workStatus: 'available', expertise: validExpertise(), createdAt: new Date() });
+        const otherRegionInsert = await collections.technicians.insertOne({ name: `TMP-OTHERREGION-${runId}`, email: otherRegionEmail, region: 'Chittagong', district: 'Chittagong', status: 'approved', workStatus: 'available', expertise: validExpertise(), createdAt: new Date() });
         createdRiderIds.push(otherRegionInsert.insertedId.toString());
         const areaRes = await callGetEligible(matchParcelId, adminEmail);
         const areaIds = (areaRes.body.technicians || []).map((t) => t.technicianId);
         logTest('19. Service area affects ranking only - a different-region complete profile stays eligible', areaIds.includes(otherRegionInsert.insertedId.toString()));
 
         // Busy technician (workStatus in_delivery) is excluded.
-        await collections.riders.updateOne({ _id: new ObjectId(applyId) }, { $set: { workStatus: 'in_delivery' } });
+        await collections.technicians.updateOne({ _id: new ObjectId(applyId) }, { $set: { workStatus: 'in_delivery' } });
         const busyRes = await callGetEligible(matchParcelId, adminEmail);
         const busyIds = (busyRes.body.technicians || []).map((t) => t.technicianId);
         logTest('20. Busy technician (workStatus in_delivery) is excluded', !busyIds.includes(applyId));
 
         // Technician holding an active assignment is excluded even if workStatus drifts to available.
-        const heldParcelInsert = await collections.parcels.insertOne({ schemaVersion: 2, trackingId: `TMP-HELD-${runId}`, senderEmail: customerEmail, deliveryStatus: 'assignment_pending', riderId: applyId, createdAt: new Date() });
+        const heldParcelInsert = await collections.repairRequests.insertOne({ schemaVersion: 2, trackingId: `TMP-HELD-${runId}`, senderEmail: customerEmail, deliveryStatus: 'assignment_pending', riderId: applyId, createdAt: new Date() });
         createdParcelIds.push(heldParcelInsert.insertedId.toString());
         createdTrackingIds.push(`TMP-HELD-${runId}`);
-        await collections.riders.updateOne({ _id: new ObjectId(applyId) }, { $set: { workStatus: 'available' } });
+        await collections.technicians.updateOne({ _id: new ObjectId(applyId) }, { $set: { workStatus: 'available' } });
         const heldRes = await callGetEligible(matchParcelId, adminEmail);
         const heldIds = (heldRes.body.technicians || []).map((t) => t.technicianId);
         logTest('21. Technician with an active (assignment_pending) assignment is excluded', !heldIds.includes(applyId));
 
         // Release the assignment -> eligible again.
-        await collections.parcels.deleteOne({ _id: heldParcelInsert.insertedId });
+        await collections.repairRequests.deleteOne({ _id: heldParcelInsert.insertedId });
         const releasedRes = await callGetEligible(matchParcelId, adminEmail);
         const releasedIds = (releasedRes.body.technicians || []).map((t) => t.technicianId);
         logTest('22. Released technician (no active assignment, available) is eligible again', releasedIds.includes(applyId));
     } finally {
-        if (createdRiderIds.length) await collections.riders.deleteMany({ _id: { $in: createdRiderIds.map((x) => new ObjectId(x)) } });
-        if (createdParcelIds.length) await collections.parcels.deleteMany({ _id: { $in: createdParcelIds.map((x) => new ObjectId(x)) } });
+        if (createdRiderIds.length) await collections.technicians.deleteMany({ _id: { $in: createdRiderIds.map((x) => new ObjectId(x)) } });
+        if (createdParcelIds.length) await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds.map((x) => new ObjectId(x)) } });
         if (createdServiceDefinitionIds.length) await collections.serviceDefinitions.deleteMany({ _id: { $in: createdServiceDefinitionIds } });
         if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
         await collections.users.deleteMany({ email: { $regex: `^tmp-tech.*-${runId}@test.local$` } });
-        if (createdTrackingIds.length) await collections.trackings.deleteMany({ trackingId: { $in: createdTrackingIds } });
+        if (createdTrackingIds.length) await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
     }
 }
 
@@ -13677,7 +13677,7 @@ async function testTechnicianAssignmentDecisions() {
             { email: techEmail, role: 'rider', createdAt: new Date() },
             { email: otherTechEmail, role: 'rider', createdAt: new Date() },
         ]);
-        const techRider = await collections.riders.insertOne({ email: techEmail, name: 'Assigned Tech', status: 'approved', workStatus: 'in_delivery', createdAt: new Date() });
+        const techRider = await collections.technicians.insertOne({ email: techEmail, name: 'Assigned Tech', status: 'approved', workStatus: 'in_delivery', createdAt: new Date() });
         const techRiderId = techRider.insertedId;
         createdRiderIds.push(techRiderId);
 
@@ -13706,7 +13706,7 @@ async function testTechnicianAssignmentDecisions() {
                 }],
                 createdAt: now,
             };
-            const r = await collections.parcels.insertOne(doc);
+            const r = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(r.insertedId);
             return { id: r.insertedId.toString(), _id: r.insertedId, trackingId };
         }
@@ -13725,7 +13725,7 @@ async function testTechnicianAssignmentDecisions() {
         let after = await models.Parcel.findById(pAccept.id);
         logTest('3. Accept moves status to driver_assigned', after.deliveryStatus === 'driver_assigned');
         logTest('4. Accept marks the pending history entry accepted with a timestamp', after.assignmentHistory[0].decision === 'accepted' && !!after.assignmentHistory[0].decidedAt);
-        const riderAfterAccept = await collections.riders.findOne({ _id: techRiderId });
+        const riderAfterAccept = await collections.technicians.findOne({ _id: techRiderId });
         logTest('5. Accept keeps the technician in_delivery', riderAfterAccept.workStatus === 'in_delivery');
         // replay/idempotency: second accept now conflicts (already decided)
         res = await accept(pAccept.id, techEmail);
@@ -13742,7 +13742,7 @@ async function testTechnicianAssignmentDecisions() {
 
         // --- REJECT ---
         // Reset the reserved rider to in_delivery for the reject scenarios.
-        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        await collections.technicians.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
         const pReject = await makePendingParcel();
         res = await reject(pReject.id, techEmail, 'Outside my current service area for this repair.');
         logTest('10. Assigned technician rejects with a valid reason (200, pending-pickup)', res.statusCode === 200 && res.body.success === true && res.body.deliveryStatus === 'pending-pickup');
@@ -13750,11 +13750,11 @@ async function testTechnicianAssignmentDecisions() {
         logTest('11. Reject returns the request to pending-pickup', after.deliveryStatus === 'pending-pickup');
         logTest('12. Reject clears the active rider fields (reassignable)', after.riderId === undefined && after.riderEmail === undefined && after.riderName === undefined);
         logTest('13. Reject records the rejection in history with the reason retained', after.assignmentHistory[0].decision === 'rejected' && after.assignmentHistory[0].rejectionReason === 'Outside my current service area for this repair.' && !!after.assignmentHistory[0].decidedAt);
-        const riderAfterReject = await collections.riders.findOne({ _id: techRiderId });
+        const riderAfterReject = await collections.technicians.findOne({ _id: techRiderId });
         logTest('14. Reject releases the technician back to available', riderAfterReject.workStatus === 'available');
 
         // --- REJECT reason validation ---
-        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        await collections.technicians.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
         const pReasonBad = await makePendingParcel();
         res = await reject(pReasonBad.id, techEmail, 'x');
         logTest('15. Too-short rejection reason rejected (400 INVALID_REJECTION_REASON)', res.statusCode === 400 && res.body.code === 'INVALID_REJECTION_REASON');
@@ -13797,7 +13797,7 @@ async function testTechnicianAssignmentDecisions() {
             const pending = (p.assignmentHistory || []).filter((h) => h.decision === 'pending');
             // exactly one decided entry, none left pending, no duplicate decisions
             if (decided.length !== 1 || pending.length !== 0 || !decided[0].decidedAt) return false;
-            const rider = await collections.riders.findOne({ _id: techRiderId });
+            const rider = await collections.technicians.findOne({ _id: techRiderId });
             if (p.deliveryStatus === 'driver_assigned') {
                 // accept winner: active rider preserved, technician stays reserved
                 return decided[0].decision === 'accepted' && p.riderEmail === techEmail && rider.workStatus === 'in_delivery';
@@ -13811,25 +13811,25 @@ async function testTechnicianAssignmentDecisions() {
         };
 
         // accept vs reject
-        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        await collections.technicians.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
         const pAR = await makePendingParcel();
         const arResponses = await Promise.all([accept(pAR.id, techEmail), reject(pAR.id, techEmail, 'Concurrent reject racing the accept.')]);
         logTest('19. Accept vs reject: exactly one wins, loser gets a controlled conflict, final state coherent', await raceResolvedCleanly(arResponses, pAR._id));
 
         // accept vs accept
-        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        await collections.technicians.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
         const pAA = await makePendingParcel();
         const aaResponses = await Promise.all([accept(pAA.id, techEmail), accept(pAA.id, techEmail)]);
         logTest('20. Accept vs accept: exactly one wins, loser gets a controlled conflict, final state coherent', await raceResolvedCleanly(aaResponses, pAA._id));
 
         // reject vs reject
-        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        await collections.technicians.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
         const pRR = await makePendingParcel();
         const rrResponses = await Promise.all([reject(pRR.id, techEmail, 'First concurrent reject reason.'), reject(pRR.id, techEmail, 'Second concurrent reject reason.')]);
         logTest('21. Reject vs reject: exactly one wins, loser gets a controlled conflict, final state coherent', await raceResolvedCleanly(rrResponses, pRR._id));
 
         // --- REASSIGNMENT lock: admin cannot reassign the same offered request while pending ---
-        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        await collections.technicians.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
         const pLock = await makePendingParcel();
         const reassignRes = fakeRes();
         await parcelController.assignRiderToParcel({ params: { id: pLock.id }, body: { riderId: techRiderId.toString() }, decoded_email: adminEmail }, reassignRes);
@@ -13840,7 +13840,7 @@ async function testTechnicianAssignmentDecisions() {
         logTest('23. After rejection the request is reassignable (pending-pickup, no active rider)', lockAfter.deliveryStatus === 'pending-pickup' && lockAfter.riderId === undefined);
 
         // --- PRIVACY ---
-        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        await collections.technicians.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
         const pPriv = await makePendingParcel();
         await reject(pPriv.id, techEmail, 'Sensitive internal rejection reason not for customers.');
         // general GET must not expose assignmentHistory to anyone
@@ -13861,7 +13861,7 @@ async function testTechnicianAssignmentDecisions() {
         // not a settable status (not in VALID_STATUSES) and has no allowed generic
         // transition out (empty ALLOWED_TRANSITIONS), so the generic path can neither
         // enter nor leave it. ---
-        await collections.riders.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
+        await collections.technicians.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
         const pGuard = await makePendingParcel();
         const enterRes = fakeRes();
         await parcelController.updateParcelStatus({ params: { id: pGuard.id }, body: { deliveryStatus: 'assignment_pending' }, decoded_email: adminEmail }, enterRes);
@@ -13872,10 +13872,10 @@ async function testTechnicianAssignmentDecisions() {
         const guardAfter = await models.Parcel.findById(pGuard.id);
         logTest('30. The request stays assignment_pending after both blocked generic updates', guardAfter.deliveryStatus === 'assignment_pending');
     } finally {
-        if (createdParcelIds.length) await collections.parcels.deleteMany({ _id: { $in: createdParcelIds } });
-        if (createdRiderIds.length) await collections.riders.deleteMany({ _id: { $in: createdRiderIds } });
+        if (createdParcelIds.length) await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds } });
+        if (createdRiderIds.length) await collections.technicians.deleteMany({ _id: { $in: createdRiderIds } });
         if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
-        await collections.trackings.deleteMany({ trackingId: { $regex: `^TEST-AD-${runId}-` } });
+        await collections.trackingEvents.deleteMany({ trackingId: { $regex: `^TEST-AD-${runId}-` } });
     }
 }
 

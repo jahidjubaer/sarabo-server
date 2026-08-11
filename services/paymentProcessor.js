@@ -130,7 +130,7 @@ function createPaymentProcessor(models, collections, notifications) {
                 // approved quote total/currency were validated above; the
                 // payment sub-document records the completion without ever
                 // altering the quote line items.
-                const updateResult = await collections.parcels.updateOne(
+                const updateResult = await collections.repairRequests.updateOne(
                     {
                         _id: parcel._id,
                         schemaVersion: 2,
@@ -168,7 +168,7 @@ function createPaymentProcessor(models, collections, notifications) {
                 // payment can commit without them and none can be emitted for a
                 // payment that did not commit. Safe text only - never card
                 // data, a client secret, a Stripe id, or an amount.
-                await logTracking(collections.trackings, trackingId, PAYMENT_COMPLETED, mongoSession);
+                await logTracking(collections.trackingEvents, trackingId, PAYMENT_COMPLETED, mongoSession);
                 await notifications.createNotification({
                     session: mongoSession,
                     recipientEmail: parcel.senderEmail,
@@ -378,7 +378,7 @@ function createPaymentProcessor(models, collections, notifications) {
                 // query condition itself is the race-resolver, not a
                 // read-then-write check (the early check above only catches
                 // the non-racing case).
-                const updateResult = await collections.parcels.updateOne(
+                const updateResult = await collections.repairRequests.updateOne(
                     { _id: parcel._id, paymentStatus: { $ne: 'paid' }, deliveryStatus: { $ne: 'cancelled' } },
                     { $set: { paymentStatus: 'paid' } },
                     { session: mongoSession }
@@ -450,7 +450,7 @@ function createPaymentProcessor(models, collections, notifications) {
             return { code: 'ALREADY_PAID_OTHER_SESSION' };
         }
 
-        logTracking(collections.trackings, trackingId, 'parcel_paid');
+        logTracking(collections.trackingEvents, trackingId, 'parcel_paid');
 
         return {
             code: 'OK',

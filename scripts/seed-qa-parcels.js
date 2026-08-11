@@ -237,7 +237,7 @@ async function runQaSeed({ collections, dryRun }) {
     }
     let parcelsUpserted = 0;
     for (const parcel of parcels) {
-        await collections.parcels.updateOne({ trackingId: parcel.trackingId }, { $set: parcel }, { upsert: true });
+        await collections.repairRequests.updateOne({ trackingId: parcel.trackingId }, { $set: parcel }, { upsert: true });
         parcelsUpserted += 1;
     }
     return { dryRun: false, usersUpserted, parcelsUpserted };
@@ -248,13 +248,13 @@ async function runQaReset({ collections, dryRun }) {
     const userFilter = { email: { $regex: `${QA_EMAIL_DOMAIN.replace('.', '\\.')}$` } };
     if (dryRun) {
         const [parcels, users] = await Promise.all([
-            collections.parcels.countDocuments(parcelFilter),
+            collections.repairRequests.countDocuments(parcelFilter),
             collections.users.countDocuments(userFilter),
         ]);
         return { dryRun: true, wouldDeleteParcels: parcels, wouldDeleteUsers: users };
     }
     const [p, u] = await Promise.all([
-        collections.parcels.deleteMany(parcelFilter),
+        collections.repairRequests.deleteMany(parcelFilter),
         collections.users.deleteMany(userFilter),
     ]);
     return { dryRun: false, deletedParcels: p.deletedCount, deletedUsers: u.deletedCount };

@@ -219,7 +219,7 @@ class UserController {
                     if (normalizedRole === 'rider') {
                         const email = normalize(targetUser.email);
                         const riderDoc = email
-                            ? await this.collections.riders.findOne({ email }, { session: mongoSession })
+                            ? await this.collections.technicians.findOne({ email }, { session: mongoSession })
                             : null;
                         if (!riderDoc) {
                             outcome = { httpStatus: 409, code: 'RIDER_RECORD_NOT_FOUND', message: 'no technician application exists for this user' };

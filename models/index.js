@@ -12,10 +12,10 @@ const DeletionCleanupModel = require('./DeletionCleanup');
 function initializeModels(collections) {
     return {
         User: new UserModel(collections.users),
-        Parcel: new ParcelModel(collections.parcels),
-        Rider: new RiderModel(collections.riders),
+        Parcel: new ParcelModel(collections.repairRequests),
+        Rider: new RiderModel(collections.technicians),
         Payment: new PaymentModel(collections.payments),
-        Tracking: new TrackingModel(collections.trackings),
+        Tracking: new TrackingModel(collections.trackingEvents),
         Notification: new NotificationModel(collections.notifications),
         ServiceDefinition: new ServiceDefinitionModel(collections.serviceDefinitions),
         DamageUploadSession: new DamageUploadSessionModel(collections.damageUploadSessions),

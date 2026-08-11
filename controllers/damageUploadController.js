@@ -247,7 +247,7 @@ class DamageUploadController {
                         requestId: parcelId, storageKey: uploadSession.storageKey, image: imageEntry, session: mongoSession
                     });
                     if (attachResult.matchedCount === 0) {
-                        const freshParcel = await this.collections.parcels.findOne({ _id: new ObjectId(parcelId) }, { session: mongoSession });
+                        const freshParcel = await this.collections.repairRequests.findOne({ _id: new ObjectId(parcelId) }, { session: mongoSession });
                         if (!freshParcel) {
                             outcome = { code: 'REQUEST_NOT_FOUND', httpStatus: 404 };
                             return;

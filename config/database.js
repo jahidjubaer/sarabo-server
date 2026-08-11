@@ -24,18 +24,17 @@ const DB_NAME = resolveDatabaseName();
 // these collections require connectDatabase() to have resolved first, which
 // is enforced per-request by middleware/database.js.
 const db = client.db(DB_NAME);
-// Phase 8.7B: the Mongo COLLECTION names are the canonical Sarabo domain names
-// in snake_case (technicians / repair_requests / service_definitions /
-// tracking_events / ...). The JS handle keys below (e.g. `riders`, `parcels`)
-// are internal code vocabulary whose rename to `technicians`/`repairRequests`
-// is deferred to a follow-up phase - the on-disk collection contract migrates
-// here now, so nothing is ever created under the old `riders`/`parcels` names.
+// The Mongo COLLECTION names are the canonical Sarabo domain names in
+// snake_case (technicians / repair_requests / service_definitions /
+// tracking_events / ...) - Phase 8.7B. The JS handle keys below are the
+// canonical camelCase Sarabo domain terms (technicians / repairRequests /
+// trackingEvents / ...) - Phase 8.7C.
 const collections = {
     users: db.collection("users"),
-    parcels: db.collection("repair_requests"),
+    repairRequests: db.collection("repair_requests"),
     payments: db.collection("payments"),
-    riders: db.collection("technicians"),
-    trackings: db.collection("tracking_events"),
+    technicians: db.collection("technicians"),
+    trackingEvents: db.collection("tracking_events"),
     checkoutSessions: db.collection("checkout_sessions"),
     notifications: db.collection("notifications"),
     serviceDefinitions: db.collection("service_definitions"),
@@ -74,7 +73,7 @@ async function connectDatabase() {
                 // controllers/trackingController.js's getPublicTracking), so
                 // two repair requests must never be able to collide onto the
                 // same code.
-                await collections.parcels.createIndex({ trackingId: 1 }, { unique: true });
+                await collections.repairRequests.createIndex({ trackingId: 1 }, { unique: true });
                 // Notification foundation (Phase 5.2 Unit 1) - no business
                 // workflow creates notifications yet, but the collection and
                 // its indexes are established up front. No TTL index: unread
@@ -139,15 +138,15 @@ async function connectDatabase() {
                 // MongoDB does not allow a single compound index across two
                 // separate multikey (array) fields in one document, so each
                 // gets its own standalone index rather than being combined.
-                await collections.riders.createIndex(
+                await collections.technicians.createIndex(
                     { status: 1, workStatus: 1 },
                     { name: 'riders_status_workStatus' }
                 );
-                await collections.riders.createIndex(
+                await collections.technicians.createIndex(
                     { 'expertise.productCategorySlug': 1 },
                     { name: 'riders_expertise_productCategorySlug' }
                 );
-                await collections.riders.createIndex(
+                await collections.technicians.createIndex(
                     { 'expertise.repairCategorySlugs': 1 },
                     { name: 'riders_expertise_repairCategorySlugs' }
                 );
@@ -157,7 +156,7 @@ async function connectDatabase() {
                 // together with deliveryStatus, so one compound index serves
                 // either regardless of which deliveryStatus values are
                 // actually matched.
-                await collections.parcels.createIndex(
+                await collections.repairRequests.createIndex(
                     { riderId: 1, deliveryStatus: 1 },
                     { name: 'parcels_riderId_deliveryStatus' }
                 );

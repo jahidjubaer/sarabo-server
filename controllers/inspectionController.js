@@ -121,7 +121,7 @@ class InspectionController {
                     // riderId), and no inspection yet. Any concurrent
                     // reassignment / status change / first-submission-winner
                     // makes this match zero documents.
-                    const updateResult = await this.collections.parcels.updateOne(
+                    const updateResult = await this.collections.repairRequests.updateOne(
                         {
                             _id: parcel._id,
                             schemaVersion: 2,
@@ -140,7 +140,7 @@ class InspectionController {
                     if (updateResult.matchedCount === 0) {
                         // Derive the most precise, still-safe reason from a
                         // fresh in-transaction read.
-                        const fresh = await this.collections.parcels.findOne({ _id: parcel._id }, { session: mongoSession });
+                        const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
                         else if (fresh.inspection && fresh.inspection.status === 'submitted') conflictCode = 'INSPECTION_ALREADY_SUBMITTED';
                         else if (fresh.riderEmail !== email || fresh.riderId !== parcel.riderId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
@@ -152,7 +152,7 @@ class InspectionController {
                     // rolled back with everything else on any failure, and its
                     // free-text detail is only the status words, never
                     // diagnosis/notes/estimate data.
-                    await logTracking(this.collections.trackings, parcel.trackingId, INSPECTION_COMPLETED, mongoSession);
+                    await logTracking(this.collections.trackingEvents, parcel.trackingId, INSPECTION_COMPLETED, mongoSession);
 
                     // Customer notification, transactionally coupled and
                     // deduplicated by the unique deduplicationKey index. Its

@@ -149,7 +149,7 @@ class RepairController {
                     const now = new Date();
                     repairDoc = buildInitialRepair(now);
 
-                    const updateResult = await this.collections.parcels.updateOne(
+                    const updateResult = await this.collections.repairRequests.updateOne(
                         {
                             _id: parcel._id,
                             schemaVersion: 2,
@@ -164,7 +164,7 @@ class RepairController {
                         { session: mongoSession }
                     );
                     if (updateResult.matchedCount === 0) {
-                        const fresh = await this.collections.parcels.findOne({ _id: parcel._id }, { session: mongoSession });
+                        const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
                         else if (fresh.repair && fresh.repair.status && fresh.repair.status !== 'not_started') conflictCode = 'REPAIR_ALREADY_STARTED';
                         else if (fresh.riderEmail !== email || fresh.riderId !== parcel.riderId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
@@ -172,7 +172,7 @@ class RepairController {
                         throw new Error('repair start guard failed');
                     }
 
-                    await logTracking(this.collections.trackings, parcel.trackingId, 'repair_started', mongoSession);
+                    await logTracking(this.collections.trackingEvents, parcel.trackingId, 'repair_started', mongoSession);
                     await this.notifications.createNotification({
                         session: mongoSession,
                         recipientEmail: parcel.senderEmail,
@@ -239,7 +239,7 @@ class RepairController {
                     // lock, so two concurrent appends serialize: both are pushed
                     // while under the limit (never overwriting each other), and
                     // the one that would exceed 50 matches nothing.
-                    const updateResult = await this.collections.parcels.updateOne(
+                    const updateResult = await this.collections.repairRequests.updateOne(
                         {
                             _id: parcel._id,
                             schemaVersion: 2,
@@ -253,7 +253,7 @@ class RepairController {
                         { session: mongoSession }
                     );
                     if (updateResult.matchedCount === 0) {
-                        const fresh = await this.collections.parcels.findOne({ _id: parcel._id }, { session: mongoSession });
+                        const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
                         else if (fresh.riderEmail !== email || fresh.riderId !== parcel.riderId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
                         else if (!fresh.repair || fresh.repair.status !== 'in_progress') conflictCode = 'REPAIR_NOT_IN_PROGRESS';
@@ -261,7 +261,7 @@ class RepairController {
                         throw new Error('progress update guard failed');
                     }
 
-                    await logTracking(this.collections.trackings, parcel.trackingId, 'repair_progress_updated', mongoSession);
+                    await logTracking(this.collections.trackingEvents, parcel.trackingId, 'repair_progress_updated', mongoSession);
                 });
             } catch (txError) {
                 if (!conflictCode) throw txError;
@@ -427,7 +427,7 @@ class RepairController {
                     // completion / reassignment / status mutation makes this
                     // match zero - so the technician is released exactly once,
                     // by the single winner.
-                    const parcelUpdate = await this.collections.parcels.updateOne(
+                    const parcelUpdate = await this.collections.repairRequests.updateOne(
                         {
                             _id: parcel._id,
                             schemaVersion: 2,
@@ -440,7 +440,7 @@ class RepairController {
                         { session: mongoSession }
                     );
                     if (parcelUpdate.matchedCount === 0) {
-                        const fresh = await this.collections.parcels.findOne({ _id: parcel._id }, { session: mongoSession });
+                        const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
                         else if (fresh.repair && fresh.repair.status === 'completed') conflictCode = 'REPAIR_ALREADY_COMPLETED';
                         else if (fresh.riderEmail !== email || fresh.riderId !== parcel.riderId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
@@ -463,15 +463,15 @@ class RepairController {
                     // assignment (defense in depth). Historical riderId/riderEmail
                     // are intentionally retained on the request for audit/history.
                     const riderObjectId = new ObjectId(parcel.riderId);
-                    const technician = await this.collections.riders.findOne({ _id: riderObjectId }, { session: mongoSession });
+                    const technician = await this.collections.technicians.findOne({ _id: riderObjectId }, { session: mongoSession });
                     if (!technician) {
                         throw Object.assign(new Error('assigned technician not found during completion'), { code: 'COMPLETION_FAILED' });
                     }
-                    const otherActive = await this.collections.parcels.findOne(
+                    const otherActive = await this.collections.repairRequests.findOne(
                         { riderId: parcel.riderId, deliveryStatus: { $in: ACTIVE_STATUSES }, _id: { $ne: parcel._id } },
                         { session: mongoSession }
                     );
-                    const riderUpdate = await this.collections.riders.updateOne(
+                    const riderUpdate = await this.collections.technicians.updateOne(
                         { _id: riderObjectId },
                         { $set: { workStatus: otherActive ? technician.workStatus : 'available' } },
                         { session: mongoSession }
@@ -480,7 +480,7 @@ class RepairController {
                         throw Object.assign(new Error('technician release failed during completion'), { code: 'COMPLETION_FAILED' });
                     }
 
-                    await logTracking(this.collections.trackings, parcel.trackingId, 'repair_completed', mongoSession);
+                    await logTracking(this.collections.trackingEvents, parcel.trackingId, 'repair_completed', mongoSession);
                     await this.notifications.createNotification({
                         session: mongoSession,
                         recipientEmail: parcel.senderEmail,

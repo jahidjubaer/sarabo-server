@@ -116,7 +116,7 @@ class RiderController {
                 }
             ];
 
-            const result = await this.collections.parcels.aggregate(pipeline).toArray();
+            const result = await this.collections.repairRequests.aggregate(pipeline).toArray();
             res.send(result);
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair stats', error: error.message });
@@ -222,7 +222,7 @@ class RiderController {
     // the check is consistent with everything else read/written in that
     // same transaction attempt.
     async hasActiveAssignment(riderId, session) {
-        const activeParcel = await this.collections.parcels.findOne(
+        const activeParcel = await this.collections.repairRequests.findOne(
             { riderId: riderId.toString(), deliveryStatus: { $in: ACTIVE_STATUSES } },
             { session, projection: { _id: 1 } }
         );
@@ -260,7 +260,7 @@ class RiderController {
             let outcome = null;
             try {
                 await mongoSession.withTransaction(async () => {
-                    const technician = await this.collections.riders.findOne(
+                    const technician = await this.collections.technicians.findOne(
                         { _id: new ObjectId(riderId) },
                         { session: mongoSession }
                     );
@@ -298,7 +298,7 @@ class RiderController {
                                 const activeNow = await this.hasActiveAssignment(technician._id, mongoSession);
                                 const correctWorkStatus = activeNow ? 'in_delivery' : 'available';
                                 if (technician.workStatus !== correctWorkStatus) {
-                                    await this.collections.riders.updateOne(
+                                    await this.collections.technicians.updateOne(
                                         { _id: technician._id, status: currentStatus, workStatus: technician.workStatus },
                                         { $set: { workStatus: correctWorkStatus } },
                                         { session: mongoSession }
@@ -390,7 +390,7 @@ class RiderController {
                     // both fields we actually read, not just the one we're
                     // changing, so either kind of concurrent change is
                     // detected here rather than silently overwritten.
-                    const technicianUpdateResult = await this.collections.riders.updateOne(
+                    const technicianUpdateResult = await this.collections.technicians.updateOne(
                         { _id: technician._id, status: currentStatus, workStatus: technician.workStatus },
                         { $set: { status: requestedStatus, workStatus: newWorkStatus } },
                         { session: mongoSession }
@@ -512,7 +512,7 @@ class RiderController {
             // the second one silently clobbering the first).
             const requester = requesterEmail ? await this.collections.users.findOne({ email: requesterEmail }) : null;
             const isAdmin = !!requester && requester.role === 'admin';
-            const technician = await this.collections.riders.findOne({ _id: new ObjectId(riderId) });
+            const technician = await this.collections.technicians.findOne({ _id: new ObjectId(riderId) });
 
             if (!technician) {
                 const notFound = isAdmin

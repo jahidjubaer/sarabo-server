@@ -285,7 +285,7 @@ class ParcelController {
                 }
             }
 
-            logTracking(this.collections.trackings, parcel.trackingId, 'parcel_created');
+            logTracking(this.collections.trackingEvents, parcel.trackingId, 'parcel_created');
 
             res.send(result);
         } catch (error) {
@@ -400,7 +400,7 @@ class ParcelController {
                 }
             }
 
-            logTracking(this.collections.trackings, document.trackingId, 'parcel_created');
+            logTracking(this.collections.trackingEvents, document.trackingId, 'parcel_created');
 
             res.send(result);
         } catch (error) {
@@ -586,7 +586,7 @@ class ParcelController {
             // Guarded atomically against a concurrent status change landing
             // between the read above and this write - the query condition
             // itself is the race-resolver, not the read-then-write check.
-            const result = await this.collections.parcels.updateOne(
+            const result = await this.collections.repairRequests.updateOne(
                 { _id: parcel._id, deliveryStatus: parcel.deliveryStatus },
                 { $set: { deliveryStatus: requestedStatus } }
             );
@@ -599,7 +599,7 @@ class ParcelController {
             // trackingId, never a client-supplied value - trusting the body
             // here would let a caller write a tracking event under an
             // arbitrary/unrelated trackingId.
-            logTracking(this.collections.trackings, parcel.trackingId, requestedStatus);
+            logTracking(this.collections.trackingEvents, parcel.trackingId, requestedStatus);
 
             // Best-effort lifecycle notification - only reached after a
             // genuine, newly-committed transition (never on the no-op or
@@ -689,7 +689,7 @@ class ParcelController {
             let outcome = null;
             try {
                 await mongoSession.withTransaction(async () => {
-                    const freshParcel = await this.collections.parcels.findOne(
+                    const freshParcel = await this.collections.repairRequests.findOne(
                         { _id: parcel._id },
                         { session: mongoSession }
                     );
@@ -712,7 +712,7 @@ class ParcelController {
                         // Otherwise this is a pre-existing inconsistency
                         // between the request and the technician, which must
                         // never be silently reported as success.
-                        const technician = await this.collections.riders.findOne(
+                        const technician = await this.collections.technicians.findOne(
                             { _id: new ObjectId(riderId) },
                             { session: mongoSession }
                         );
@@ -735,7 +735,7 @@ class ParcelController {
                         return;
                     }
 
-                    const technician = await this.collections.riders.findOne(
+                    const technician = await this.collections.technicians.findOne(
                         { _id: new ObjectId(riderId) },
                         { session: mongoSession }
                     );
@@ -778,7 +778,7 @@ class ParcelController {
                     // attempt on the same request - re-verifies the status is
                     // still what was just read, not just a read-then-write
                     // check.
-                    const parcelUpdateResult = await this.collections.parcels.updateOne(
+                    const parcelUpdateResult = await this.collections.repairRequests.updateOne(
                         { _id: freshParcel._id, deliveryStatus: 'parcel_picked_up' },
                         { $set: { deliveryStatus: 'parcel_delivered' } },
                         { session: mongoSession }
@@ -800,7 +800,7 @@ class ParcelController {
                     // narrower fix than blocking it), it just leaves the
                     // technician's workStatus untouched rather than
                     // incorrectly marking them available.
-                    const otherActiveAssignment = await this.collections.parcels.findOne(
+                    const otherActiveAssignment = await this.collections.repairRequests.findOne(
                         {
                             riderId: technician._id.toString(),
                             deliveryStatus: { $in: ACTIVE_STATUSES },
@@ -809,7 +809,7 @@ class ParcelController {
                         { session: mongoSession }
                     );
 
-                    const riderUpdateResult = await this.collections.riders.updateOne(
+                    const riderUpdateResult = await this.collections.technicians.updateOne(
                         { _id: technician._id },
                         { $set: { workStatus: otherActiveAssignment ? technician.workStatus : 'available' } },
                         { session: mongoSession }
@@ -823,7 +823,7 @@ class ParcelController {
                         throw Object.assign(new Error('technician reset failed during completion'), { code: 'COMPLETION_FAILED' });
                     }
 
-                    const trackingResult = await this.collections.trackings.insertOne(
+                    const trackingResult = await this.collections.trackingEvents.insertOne(
                         {
                             trackingId: freshParcel.trackingId,
                             status: 'parcel_delivered',
@@ -929,7 +929,7 @@ class ParcelController {
                 // (the guarded rider update inside the transaction below
                 // is) - it only produces a faster, clearer rejection in the
                 // common non-concurrent case.
-                const existingActiveAssignment = await this.collections.parcels.findOne({
+                const existingActiveAssignment = await this.collections.repairRequests.findOne({
                     riderId: technician._id.toString(),
                     deliveryStatus: { $in: ACTIVE_STATUSES },
                     _id: { $ne: parcel._id }
@@ -969,7 +969,7 @@ class ParcelController {
                     // below (workStatus: 'available' in its filter), not
                     // from this query - a plain read can't by itself
                     // prevent a race the way a conditional write can.
-                    const activeAssignmentInTransaction = await this.collections.parcels.findOne(
+                    const activeAssignmentInTransaction = await this.collections.repairRequests.findOne(
                         {
                             riderId: technician._id.toString(),
                             deliveryStatus: { $in: ACTIVE_STATUSES },
@@ -1084,7 +1084,7 @@ class ParcelController {
                             })
                         };
                     }
-                    const parcelUpdateResult = await this.collections.parcels.updateOne(
+                    const parcelUpdateResult = await this.collections.repairRequests.updateOne(
                         {
                             _id: parcel._id,
                             $or: [
@@ -1114,7 +1114,7 @@ class ParcelController {
                     if (v2ExpertiseGuard !== null) {
                         riderUpdateFilter.expertise = v2ExpertiseGuard;
                     }
-                    const riderUpdateResult = await this.collections.riders.updateOne(
+                    const riderUpdateResult = await this.collections.technicians.updateOne(
                         riderUpdateFilter,
                         { $set: { workStatus: 'in_delivery' } },
                         { session: mongoSession }
@@ -1136,7 +1136,7 @@ class ParcelController {
                         throw Object.assign(new Error('technician became unavailable during assignment'), { code: 'ASSIGNMENT_CONFLICT' });
                     }
 
-                    await logTracking(this.collections.trackings, parcel.trackingId, assignedStatus, mongoSession);
+                    await logTracking(this.collections.trackingEvents, parcel.trackingId, assignedStatus, mongoSession);
 
                     // Both notifications join the same transaction - a
                     // failure creating either one aborts the parcel
@@ -1251,7 +1251,7 @@ class ParcelController {
             }
 
             const now = new Date();
-            const result = await this.collections.parcels.updateOne(
+            const result = await this.collections.repairRequests.updateOne(
                 { _id: parcel._id, deliveryStatus: ASSIGNMENT_PENDING, riderEmail: parcel.riderEmail },
                 {
                     $set: {
@@ -1266,7 +1266,7 @@ class ParcelController {
                 return res.status(409).send({ message: 'this assignment has already been decided', code: 'ASSIGNMENT_ALREADY_DECIDED' });
             }
 
-            logTracking(this.collections.trackings, parcel.trackingId, 'driver_assigned');
+            logTracking(this.collections.trackingEvents, parcel.trackingId, 'driver_assigned');
             return res.send({ success: true, deliveryStatus: 'driver_assigned' });
         } catch (error) {
             console.error('Accept assignment failed:', error.message);
@@ -1309,7 +1309,7 @@ class ParcelController {
             let alreadyDecided = false;
             try {
                 await mongoSession.withTransaction(async () => {
-                    const parcelResult = await this.collections.parcels.updateOne(
+                    const parcelResult = await this.collections.repairRequests.updateOne(
                         { _id: parcel._id, deliveryStatus: ASSIGNMENT_PENDING, riderEmail: parcel.riderEmail },
                         {
                             $set: {
@@ -1332,7 +1332,7 @@ class ParcelController {
                     // booking prevention keeps a technician on one active
                     // assignment), so this restoration is safe and atomic.
                     if (riderId && ObjectId.isValid(riderId)) {
-                        await this.collections.riders.updateOne(
+                        await this.collections.technicians.updateOne(
                             { _id: new ObjectId(riderId), workStatus: 'in_delivery' },
                             { $set: { workStatus: 'available' } },
                             { session: mongoSession }
@@ -1351,7 +1351,7 @@ class ParcelController {
             // public timeline status, so the rejection is never exposed to the
             // customer (who only ever sees the neutral assignment_pending state
             // and, on reassignment, another assignment_pending).
-            logTracking(this.collections.trackings, parcel.trackingId, 'assignment_rejected');
+            logTracking(this.collections.trackingEvents, parcel.trackingId, 'assignment_rejected');
             return res.send({ success: true, deliveryStatus: 'pending-pickup' });
         } catch (error) {
             console.error('Reject assignment failed:', error.message);
@@ -1532,7 +1532,7 @@ class ParcelController {
                 await this.collections.repairEvidenceSessions.deleteMany({ requestId: id }, { session: mongoSession });
                 await this.collections.checkoutSessions.deleteMany({ parcelId: id }, { session: mongoSession });
                 if (parcel.trackingId) {
-                    await this.collections.trackings.deleteMany({ trackingId: parcel.trackingId }, { session: mongoSession });
+                    await this.collections.trackingEvents.deleteMany({ trackingId: parcel.trackingId }, { session: mongoSession });
                 }
             });
         } catch (error) {
@@ -1624,7 +1624,7 @@ class ParcelController {
             // Atomic guarded update - the query condition itself is the real
             // race-resolver against a concurrent assignment or payment
             // completion, not the read-then-write eligibility check above.
-            const updateResult = await this.collections.parcels.updateOne(
+            const updateResult = await this.collections.repairRequests.updateOne(
                 {
                     _id: parcel._id,
                     $or: [
@@ -1648,7 +1648,7 @@ class ParcelController {
                 return res.status(409).send({ message: 'this request can no longer be cancelled', code: 'CANCELLATION_NOT_ALLOWED' });
             }
 
-            logTracking(this.collections.trackings, parcel.trackingId, 'cancelled');
+            logTracking(this.collections.trackingEvents, parcel.trackingId, 'cancelled');
 
             // Release any active checkout session for this parcel so an old
             // checkout URL can never be reused to reach a valid paid state.
