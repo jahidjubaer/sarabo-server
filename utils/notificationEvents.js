@@ -156,6 +156,20 @@ const NOTIFICATION_EVENTS = {
         actionUrl: () => '/dashboard/assigned-jobs',
         deduplicationKey: ({ entityId }) => `repair:${entityId}:receipt_confirmed`,
     },
+    technician_earning_paid: {
+        // Phase 8.11: an admin recorded the technician's earning for a completed
+        // repair as settled ("paid"). Accounting only - no money transfer. Sent
+        // once to the assigned technician (role 'rider'); dedup per request.
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: ['trackingId'],
+        title: () => 'Earning marked as paid',
+        message: ({ metadata }) => `Your earning for repair request ${metadata.trackingId} has been marked as paid.`,
+        actionUrl: () => '/dashboard/completed-jobs',
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:technician_earning_paid`,
+    },
     inspection_completed: {
         entityType: 'repair_request',
         // Same reasoning as technician_assigned - the repair owner's real role

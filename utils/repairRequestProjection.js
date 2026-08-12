@@ -67,8 +67,13 @@ function projectSafeListRepairRequest(repairRequest) {
     if (!safe || typeof safe !== 'object') {
         return safe;
     }
+    // technicianEarning (Phase 8.11) is internal accounting - it carries the
+    // settling admin's email (paidBy) and is never customer-facing. It is
+    // stripped from every GENERAL list here; the technician Completed Repairs
+    // view re-attaches a sanitized, paidBy-free earning in the controller, and
+    // admin settlement reads the full earning through GET /repair-requests/:id.
     // eslint-disable-next-line no-unused-vars
-    const { assignmentHistory, inspection, repair, quote, payment, ...rest } = safe;
+    const { assignmentHistory, inspection, repair, quote, payment, technicianEarning, ...rest } = safe;
     const projected = {
         ...rest,
         hasInspection: Boolean(inspection),

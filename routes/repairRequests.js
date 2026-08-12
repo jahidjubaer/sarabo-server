@@ -10,6 +10,12 @@ function repairRequestRoutes(app, controllers) {
     // Get repair requests for technician
     app.get('/repair-requests/technician', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => repairRequestController.getTechnicianRepairRequests(req, res));
 
+    // Authenticated technician's own earnings summary (Phase 8.11). A distinct
+    // 3-segment literal path so Express never confuses it with /repair-requests/:id;
+    // the controller aggregates server-side over the caller's own completed
+    // repairs (never a client-supplied total).
+    app.get('/repair-requests/technician/earnings-summary', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => repairRequestController.getTechnicianEarningsSummary(req, res));
+
     // Get repair request by ID
     app.get('/repair-requests/:id', verifyFBToken, ensureDatabaseReady, (req, res) => repairRequestController.getRepairRequestById(req, res));
 
@@ -28,6 +34,11 @@ function repairRequestRoutes(app, controllers) {
     // response shape is already relied on by MyRequests and
     // AssignTechnicians and is not changed by this route).
     app.get('/admin/repair-requests', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => repairRequestController.getAdminRepairRequests(req, res));
+
+    // Admin-only manual settlement of a completed repair's technician earning
+    // (Phase 8.11). Accounting/settlement state only - marks the earning "paid";
+    // no external money transfer occurs. Idempotent (duplicate settlement -> 409).
+    app.post('/admin/repair-requests/:id/technician-earning/mark-paid', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => repairRequestController.markTechnicianEarningPaid(req, res));
 
     // Create new repair request. Customer-exclusive business mutation - gated
     // by verifyEmailVerified (Phase 8.1) so an unverified email/password user

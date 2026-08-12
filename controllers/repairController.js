@@ -422,6 +422,37 @@ class RepairController {
                         completedAt: now,
                     };
 
+                    // technicianEarning (Phase 8.11): the labor component of the
+                    // approved quote, snapshotted once at completion. NO
+                    // commission/percentage; parts + additional charges are
+                    // platform cost, never technician income. Server-authoritative
+                    // - derived from the persisted approved quote (guaranteed
+                    // present + approved by the start-repair gate), never from the
+                    // client. Written inside the same single-winner guarded update
+                    // as completion, so it is created exactly once and a retry can
+                    // never duplicate or overwrite it. Accounting/settlement only:
+                    // no money is transferred here.
+                    const laborAmount = repairRequest.quote ? Number(repairRequest.quote.laborAmount) : NaN;
+                    const technicianEarning = Number.isFinite(laborAmount) && laborAmount >= 0
+                        ? {
+                            amount: laborAmount,
+                            currency: String(repairRequest.quote.currency || 'BDT').toLowerCase(),
+                            status: 'pending',
+                            calculatedAt: now,
+                            paidAt: null,
+                            paidBy: null,
+                        }
+                        : null;
+
+                    const completionSet = {
+                        deliveryStatus: REPAIR_COMPLETED,
+                        'repair.status': 'completed',
+                        'repair.completion': completionDoc,
+                        customerReceiptConfirmation: { status: 'pending', confirmedAt: null, confirmedBy: null },
+                        updatedAt: now,
+                    };
+                    if (technicianEarning) completionSet.technicianEarning = technicianEarning;
+
                     // Guarded transition: still v2, still in progress, still
                     // this technician, repair still in_progress. Any concurrent
                     // completion / reassignment / status mutation makes this
@@ -436,14 +467,15 @@ class RepairController {
                             technicianId: repairRequest.technicianId,
                             'repair.status': 'in_progress',
                         },
-                        // customerReceiptConfirmation (Phase 8.9): a dedicated
-                        // post-completion handover object, initialized to
-                        // 'pending' the moment the technician completes. It is
-                        // NOT a deliveryStatus enum value (that migration stays
-                        // frozen) and never gates technician release below - the
-                        // customer acknowledges receipt separately via
-                        // POST /repair-requests/:id/confirm-receipt.
-                        { $set: { deliveryStatus: REPAIR_COMPLETED, 'repair.status': 'completed', 'repair.completion': completionDoc, customerReceiptConfirmation: { status: 'pending', confirmedAt: null, confirmedBy: null }, updatedAt: now } },
+                        // customerReceiptConfirmation (Phase 8.9) + technicianEarning
+                        // (Phase 8.11) are both written here in the same guarded
+                        // update (see completionSet above): the confirmation is a
+                        // post-completion handover object initialized to 'pending'
+                        // (NOT a deliveryStatus enum - that migration stays frozen,
+                        // and it never gates technician release), and the earning is
+                        // the labor-only accounting snapshot. Both are set exactly
+                        // once by the single winner.
+                        { $set: completionSet },
                         { session: mongoSession }
                     );
                     if (repairRequestUpdate.matchedCount === 0) {

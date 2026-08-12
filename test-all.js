@@ -4478,13 +4478,13 @@ async function testNotificationFoundation() {
         const expectedTypes = [
             'technician_application_submitted', 'technician_application_approved', 'technician_application_rejected',
             'technician_assigned', 'new_repair_assignment', 'technician_on_the_way',
-            'repair_in_progress', 'repair_completed', 'receipt_confirmed', 'payment_confirmed',
+            'repair_in_progress', 'repair_completed', 'receipt_confirmed', 'technician_earning_paid', 'payment_confirmed',
             'inspection_completed', 'quote_submitted', 'quote_approved', 'quote_rejected',
             'payment_completed', 'payment_completed_technician',
             'repair_started', 'repair_finished'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 18 event types exist', actualTypes.length === 18 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 19 event types exist', actualTypes.length === 19 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -12477,6 +12477,92 @@ async function testRepairWorkflow() {
                 logTest('81. Technician workStatus unaffected by receipt confirmation', r.statusCode === 200 && rider.workStatus === 'available');
             }
         }
+
+        // ================= Technician earning + settlement (Phase 8.11, 82-106) =================
+        // Earning = approved quote laborAmount (NO commission/percentage; parts +
+        // additional charges excluded). Accounting/settlement only - no transfer.
+        {
+            const RepairRequestController = require('./controllers/repairRequestController');
+            const earnController = new RepairRequestController(models, collections, fakeStorage);
+            const summaryFor = (email) => { const res = fakeRes(); return earnController.getTechnicianEarningsSummary({ decoded_email: email }, res).then(() => res); };
+            const markPaid = (pid, email) => { const res = fakeRes(); return earnController.markTechnicianEarningPaid({ params: { id: pid }, decoded_email: email }, res).then(() => res); };
+
+            {
+                // Creation on successful completion, derived from quote.laborAmount
+                // (fixture quote: labor 800, parts 3500, additional 200, total 4500).
+                const p = await startedParcel();
+                await completeWithEvidence(p.id);
+                const doc = await collections.repairRequests.findOne({ _id: p._id });
+                const e = doc.technicianEarning;
+                logTest('82. Completion creates a technician earning', !!e);
+                logTest('83. Earning amount === quote.laborAmount (800)', e.amount === 800 && e.amount === doc.quote.laborAmount);
+                logTest('84. partsAmount excluded from earning', e.amount !== doc.quote.partsAmount);
+                logTest('85. additionalCharges excluded from earning', e.amount !== doc.quote.additionalCharges);
+                logTest('86. totalAmount not used as earning', e.amount !== doc.quote.totalAmount);
+                logTest('87. Earning currency is bdt', e.currency === 'bdt');
+                logTest('88. Default earning status is pending', e.status === 'pending');
+                logTest('89. calculatedAt stored as a Date', e.calculatedAt instanceof Date);
+                logTest('90. paidAt initially null', e.paidAt === null);
+                logTest('91. paidBy initially null', e.paidBy === null);
+                // Retry completion does not duplicate/overwrite the earning.
+                const cAt = e.calculatedAt.getTime();
+                await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: [] });
+                const doc2 = await collections.repairRequests.findOne({ _id: p._id });
+                logTest('92. Completion retry does not overwrite/duplicate earning', doc2.technicianEarning.status === 'pending' && doc2.technicianEarning.calculatedAt.getTime() === cAt && doc2.technicianEarning.paidBy === null);
+            }
+
+            {
+                // Admin settlement + duplicate + role rejections on a real completion.
+                const p = await startedParcel();
+                await completeWithEvidence(p.id);
+                const r = await markPaid(p.id, adminEmail);
+                const doc = await collections.repairRequests.findOne({ _id: p._id });
+                logTest('93. Admin can mark technician earning paid (200)', r.statusCode === 200 && r.body.technicianEarning.status === 'paid');
+                logTest('94. paidAt stored as a Date', doc.technicianEarning.paidAt instanceof Date);
+                logTest('95. paidBy is the admin email', doc.technicianEarning.paidBy === adminEmail);
+                const beforeAt = doc.technicianEarning.paidAt.getTime();
+                const dup = await markPaid(p.id, adminEmail);
+                const doc2 = await collections.repairRequests.findOne({ _id: p._id });
+                logTest('96. Duplicate mark-paid rejected (409 ALREADY_PAID)', dup.statusCode === 409 && dup.body.code === 'TECHNICIAN_EARNING_ALREADY_PAID');
+                logTest('97. Paid earning not overwritten by duplicate', doc2.technicianEarning.paidAt.getTime() === beforeAt && doc2.technicianEarning.paidBy === adminEmail);
+                logTest('98. Technician cannot mark earning paid (403)', (await markPaid(p.id, techEmail)).statusCode === 403);
+                logTest('99. Customer cannot mark earning paid (403)', (await markPaid(p.id, ownerEmail)).statusCode === 403);
+            }
+
+            {
+                // Earnings summary (server-side aggregation, own-only) + historical fallback.
+                const earnTech = `rep-earn-${runId}@test.local`;
+                const otherEarnTech = `rep-earn-other-${runId}@test.local`;
+                createdUserEmails.push(earnTech); recipientEmails.push(earnTech);
+                await collections.users.insertOne({ email: earnTech, role: 'rider', createdAt: new Date() });
+                const tId = new ObjectId().toString();
+                const mkDoc = (marker, earning, laborAmount, tEmail) => ({
+                    schemaVersion: 2, trackingId: `TEST-REP-EARN-${marker}-${runId}`, senderEmail: ownerEmail,
+                    deviceName: 'D', product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
+                    technicianEmail: tEmail, technicianId: tId, deliveryStatus: REPAIR_COMPLETED,
+                    quote: { status: 'approved', laborAmount, partsAmount: 999, additionalCharges: 0, totalAmount: laborAmount + 999, currency: 'bdt' },
+                    createdAt: new Date(), updatedAt: new Date(),
+                    ...(earning ? { technicianEarning: earning } : {}),
+                });
+                const i1 = await collections.repairRequests.insertOne(mkDoc('PENDING', { amount: 800, currency: 'bdt', status: 'pending', calculatedAt: new Date(), paidAt: null, paidBy: null }, 800, earnTech));
+                const i2 = await collections.repairRequests.insertOne(mkDoc('PAID', { amount: 1200, currency: 'bdt', status: 'paid', calculatedAt: new Date(), paidAt: new Date(), paidBy: adminEmail }, 1200, earnTech));
+                const i3 = await collections.repairRequests.insertOne(mkDoc('HIST', null, 500, earnTech));
+                const iOther = await collections.repairRequests.insertOne(mkDoc('OTHER', { amount: 9999, currency: 'bdt', status: 'pending', calculatedAt: new Date(), paidAt: null, paidBy: null }, 9999, otherEarnTech));
+                createdParcelIds.push(i1.insertedId, i2.insertedId, i3.insertedId, iOther.insertedId);
+
+                const sum = await summaryFor(earnTech);
+                logTest('100. Summary is own-only (excludes another technician\'s earnings)', sum.statusCode === 200 && !JSON.stringify(sum.body).includes('9999'));
+                logTest('101. totalEarned sums own earnings incl. historical fallback (2500)', sum.body.totalEarned === 2500);
+                logTest('102. pendingAmount correct (800 + 500 fallback = 1300)', sum.body.pendingAmount === 1300);
+                logTest('103. paidAmount correct (1200)', sum.body.paidAmount === 1200);
+                logTest('104. completedRepairCount = own repair_completed count (3)', sum.body.completedRepairCount === 3);
+                logTest('105. Summary currency is bdt', sum.body.currency === 'bdt');
+
+                const histPaid = await markPaid(i3.insertedId.toString(), adminEmail);
+                const histDoc = await collections.repairRequests.findOne({ _id: i3.insertedId });
+                logTest('106. Historical completed repair: settle initializes earning from laborAmount', histPaid.statusCode === 200 && histDoc.technicianEarning.amount === 500 && histDoc.technicianEarning.status === 'paid' && histDoc.technicianEarning.paidBy === adminEmail);
+            }
+        }
     } finally {
         if (createdParcelIds.length) {
             await collections.repairEvidenceSessions.deleteMany({ requestId: { $in: createdParcelIds.map((x) => x.toString()) } });
@@ -13520,6 +13606,34 @@ async function testDamageProjectionHardening() {
         const techList = await getRider(techEmail);
         const techHist = (techList.body || []).find((p) => p.trackingId === `TEST-DP-HIST-${runId}`);
         logTest('11. Technician list never exposes assignmentHistory', !!techHist && !('assignmentHistory' in techHist));
+
+        // --- Completed Repairs filter (Phase 8.11, Part D 1-4). Canonical V2
+        // completed repairs are deliveryStatus 'repair_completed'; the endpoint
+        // scopes strictly to the caller's own technicianEmail. ---
+        const otherTechEmail = `dp-othertech-${runId}@test.local`;
+        const noJobsTechEmail = `dp-nojobs-${runId}@test.local`;
+        const mkCompleted = (marker, tEmail) => ({
+            schemaVersion: 2, trackingId: `TEST-DP-CMP-${marker}-${runId}`, senderEmail: customerEmail, technicianEmail: tEmail,
+            deviceName: `DEV-${marker}`, product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
+            deliveryStatus: 'repair_completed',
+            quote: { status: 'approved', laborAmount: 800, partsAmount: 3500, additionalCharges: 200, totalAmount: 4500, currency: 'bdt' },
+            createdAt: new Date(), updatedAt: new Date(),
+        });
+        const cmpMine = await collections.repairRequests.insertOne(mkCompleted('MINE', techEmail));
+        const cmpActive = await collections.repairRequests.insertOne({ ...mkCompleted('ACTIVE', techEmail), trackingId: `TEST-DP-ACT-${runId}`, deliveryStatus: 'repair_in_progress' });
+        const cmpOther = await collections.repairRequests.insertOne(mkCompleted('OTHER', otherTechEmail));
+        createdIds.push(cmpMine.insertedId, cmpActive.insertedId, cmpOther.insertedId);
+        emails.push(otherTechEmail, noJobsTechEmail);
+
+        const getCompleted = (email) => { const res = fakeRes(); return parcelController.getTechnicianRepairRequests({ query: { deliveryStatus: 'repair_completed' }, decoded_email: email }, res).then(() => res); };
+
+        const completedMine = await getCompleted(techEmail);
+        const mineRow = (completedMine.body || []).find((p) => p.trackingId === `TEST-DP-CMP-MINE-${runId}`);
+        logTest('12. Technician sees own repair_completed repairs (with BDT quote amount)', completedMine.statusCode === 200 && !!mineRow && mineRow.quote.totalAmount === 4500 && mineRow.quote.currency === 'bdt');
+        logTest('13. Technician cannot see another technician\'s completed repair', !(completedMine.body || []).some((p) => p.trackingId === `TEST-DP-CMP-OTHER-${runId}`));
+        logTest('14. Non-completed (in-progress) repair excluded from Completed Repairs', !(completedMine.body || []).some((p) => p.trackingId === `TEST-DP-ACT-${runId}`));
+        const completedNone = await getCompleted(noJobsTechEmail);
+        logTest('15. Technician with no completed repairs gets a controlled empty array', completedNone.statusCode === 200 && Array.isArray(completedNone.body) && completedNone.body.length === 0);
     } finally {
         if (createdIds.length) await collections.repairRequests.deleteMany({ _id: { $in: createdIds } });
         if (emails.length) await collections.users.deleteMany({ email: { $in: emails } });

@@ -39,6 +39,37 @@ const ADMIN_LIST_MAX_SEARCH_LENGTH = 100;
 // filterable request states).
 const ADMIN_LIST_VALID_STATUSES = ['pending-pickup', 'driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered', 'cancelled'];
 
+// Sanitized, technician-safe earning view (Phase 8.11). Prefers the persisted
+// technicianEarning; otherwise derives a DISPLAY-ONLY fallback from the approved
+// quote's laborAmount for canonical completed repairs created before the earning
+// field existed (never persisted, never auto-marked paid). Omits paidBy - the
+// settling admin's identity is not technician-facing. Returns null when no
+// canonical labor amount is resolvable (ambiguous record excluded).
+function technicianEarningView(rawRepairRequest) {
+    const e = rawRepairRequest && rawRepairRequest.technicianEarning;
+    if (e && Number.isFinite(Number(e.amount))) {
+        return {
+            amount: Number(e.amount),
+            currency: e.currency ?? null,
+            status: e.status === 'paid' ? 'paid' : 'pending',
+            calculatedAt: e.calculatedAt ?? null,
+            paidAt: e.paidAt ?? null,
+        };
+    }
+    const labor = rawRepairRequest && rawRepairRequest.quote ? Number(rawRepairRequest.quote.laborAmount) : NaN;
+    if (Number.isFinite(labor) && labor >= 0) {
+        return {
+            amount: labor,
+            currency: String(rawRepairRequest.quote.currency || 'bdt').toLowerCase(),
+            status: 'pending',
+            calculatedAt: null,
+            paidAt: null,
+            derived: true,
+        };
+    }
+    return null;
+}
+
 class RepairRequestController {
     constructor(models, collections, storageService = damageStorageService) {
         this.RepairRequest = models.RepairRequest;
@@ -92,7 +123,16 @@ class RepairRequestController {
             const { deliveryStatus } = req.query;
             const query = { technicianEmail: req.decoded_email };
 
-            if (deliveryStatus !== 'parcel_delivered') {
+            if (deliveryStatus === 'repair_completed') {
+                // Canonical V2 completed-repair filter (Phase 8.11) - the
+                // technician Completed Repairs page. A canonical repair is
+                // completed when its deliveryStatus is 'repair_completed' (set by
+                // repairController.completeRepair), NOT the legacy courier
+                // 'parcel_delivered'. Kept as a distinct explicit branch so the
+                // existing active-jobs ($nin) and legacy-delivered branches are
+                // untouched.
+                query.deliveryStatus = 'repair_completed';
+            } else if (deliveryStatus !== 'parcel_delivered') {
                 query.deliveryStatus = { $nin: ['parcel_delivered'] };
             } else {
                 query.deliveryStatus = deliveryStatus;
@@ -100,7 +140,17 @@ class RepairRequestController {
 
             // BL-032: same damage-image strip for the technician assigned-jobs list.
             const result = await this.RepairRequest.findAll(query);
-            res.send(result.map(projectSafeListRepairRequest));
+            const rows = result.map(projectSafeListRepairRequest);
+            // Completed Repairs view (Phase 8.11): re-attach the sanitized,
+            // paidBy-free technician earning (persisted or derived fallback) that
+            // the shared projection strips, so each completed row can show the
+            // technician's own earning + settlement status.
+            if (deliveryStatus === 'repair_completed') {
+                for (let i = 0; i < rows.length; i++) {
+                    rows[i].technicianEarning = technicianEarningView(result[i]);
+                }
+            }
+            res.send(rows);
         } catch (error) {
             res.status(500).send({ message: 'Error fetching technician repair requests', error: error.message });
         }
@@ -152,6 +202,14 @@ class RepairRequestController {
             // the UI reads only the top-level paymentStatus - so it is stripped
             // here too, alongside the inspection/quote/repair detail documents.
             const { inspection, quote, repair, assignmentHistory, payment, ...safeRepairRequest } = repairRequest;
+            // technicianEarning (Phase 8.11) is internal accounting - only an
+            // admin reads it through this endpoint (for the settlement UI +
+            // mark-paid action). The owner never sees it; the assigned technician
+            // reads their own earning through the dedicated Completed Repairs /
+            // earnings-summary endpoints instead.
+            if (!isAdmin && 'technicianEarning' in safeRepairRequest) {
+                delete safeRepairRequest.technicianEarning;
+            }
             res.send(stripDamageImages(safeRepairRequest));
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair request', error: error.message });
@@ -1749,6 +1807,134 @@ class RepairRequestController {
             });
         } catch (error) {
             res.status(500).send({ message: 'Error confirming receipt', code: 'RECEIPT_CONFIRMATION_FAILED' });
+        }
+    }
+
+    // Authenticated technician's own earnings summary (Phase 8.11). Server-side
+    // aggregation over the caller's own canonical completed repairs - never a
+    // client-supplied total. Amounts come from the persisted technicianEarning
+    // or the labor-only fallback (technicianEarningView); only canonical BDT
+    // earnings contribute to the money totals, while completedRepairCount counts
+    // every own repair_completed. Accounting only - no transfer.
+    async getTechnicianEarningsSummary(req, res) {
+        try {
+            const email = req.decoded_email;
+            const completed = await this.collections.repairRequests
+                .find({ technicianEmail: email, deliveryStatus: REPAIR_COMPLETED })
+                .toArray();
+            let totalEarned = 0;
+            let pendingAmount = 0;
+            let paidAmount = 0;
+            const completedRepairCount = completed.length;
+            for (const doc of completed) {
+                const earning = technicianEarningView(doc);
+                if (!earning || String(earning.currency || '').toLowerCase() !== 'bdt') continue;
+                const amount = Number(earning.amount) || 0;
+                totalEarned += amount;
+                if (earning.status === 'paid') paidAmount += amount;
+                else pendingAmount += amount;
+            }
+            res.send({ totalEarned, pendingAmount, paidAmount, completedRepairCount, currency: 'bdt' });
+        } catch (error) {
+            res.status(500).send({ message: 'Error fetching technician earnings summary', code: 'EARNINGS_SUMMARY_FAILED' });
+        }
+    }
+
+    // Admin-only manual settlement (Phase 8.11): records the technician earning
+    // for a completed repair as PAID. This is accounting/settlement state only -
+    // NO external money transfer occurs (no Stripe Connect / bank / wallet). The
+    // amount is authoritative server-side (existing pending earning, else the
+    // canonical quote laborAmount for a historical record); it is never accepted
+    // from the client. Idempotent single-winner guard: a duplicate settlement is
+    // a controlled 409 and never overwrites paidAt/paidBy.
+    async markTechnicianEarningPaid(req, res) {
+        try {
+            const id = req.params.id;
+            if (!ObjectId.isValid(id)) {
+                return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
+            }
+            // Admin-only, checked in-controller (defense in depth alongside the
+            // route's verifyAdmin) and BEFORE any request lookup, so a non-admin
+            // learns nothing about whether the request exists.
+            const caller = await this.User.findByEmail(req.decoded_email);
+            if (!caller || caller.role !== 'admin') {
+                return res.status(403).send({ message: 'forbidden access', code: 'ADMIN_REQUIRED' });
+            }
+            const repairRequest = await this.RepairRequest.findById(id);
+            if (!repairRequest) {
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+            }
+            if (repairRequest.deliveryStatus !== REPAIR_COMPLETED) {
+                return res.status(409).send({ message: 'the repair is not completed', code: 'REPAIR_NOT_COMPLETED' });
+            }
+            if (!repairRequest.technicianEmail || !repairRequest.technicianId) {
+                return res.status(409).send({ message: 'this repair has no assigned technician', code: 'REQUEST_NOT_ASSIGNED' });
+            }
+            const existing = repairRequest.technicianEarning;
+            if (existing && existing.status === 'paid') {
+                return res.status(409).send({ message: 'the technician earning has already been marked paid', code: 'TECHNICIAN_EARNING_ALREADY_PAID' });
+            }
+
+            let amount;
+            let currency;
+            let calculatedAt;
+            if (existing && Number.isFinite(Number(existing.amount))) {
+                amount = Number(existing.amount);
+                currency = existing.currency || 'bdt';
+                calculatedAt = existing.calculatedAt || new Date();
+            } else {
+                const labor = repairRequest.quote ? Number(repairRequest.quote.laborAmount) : NaN;
+                if (!Number.isFinite(labor) || labor < 0) {
+                    return res.status(409).send({ message: 'no technician earning can be resolved for this repair', code: 'TECHNICIAN_EARNING_UNAVAILABLE' });
+                }
+                amount = labor;
+                currency = String(repairRequest.quote.currency || 'bdt').toLowerCase();
+                calculatedAt = new Date();
+            }
+
+            const now = new Date();
+            const adminEmail = normalize(req.decoded_email);
+            const paidEarning = { amount, currency, status: 'paid', calculatedAt, paidAt: now, paidBy: adminEmail };
+
+            const updateResult = await this.collections.repairRequests.updateOne(
+                {
+                    _id: repairRequest._id,
+                    deliveryStatus: REPAIR_COMPLETED,
+                    $or: [
+                        { technicianEarning: { $exists: false } },
+                        { 'technicianEarning.status': { $ne: 'paid' } },
+                    ],
+                },
+                { $set: { technicianEarning: paidEarning } }
+            );
+            if (updateResult.matchedCount === 0) {
+                const latest = await this.RepairRequest.findById(id);
+                if (latest && latest.technicianEarning && latest.technicianEarning.status === 'paid') {
+                    return res.status(409).send({ message: 'the technician earning has already been marked paid', code: 'TECHNICIAN_EARNING_ALREADY_PAID' });
+                }
+                return res.status(409).send({ message: 'the technician earning could not be settled', code: 'TECHNICIAN_EARNING_SETTLE_FAILED' });
+            }
+
+            try {
+                await this.notifications.createNotification({
+                    recipientEmail: repairRequest.technicianEmail,
+                    recipientRole: 'rider',
+                    type: 'technician_earning_paid',
+                    entityType: 'repair_request',
+                    entityId: repairRequest._id.toString(),
+                    metadata: { trackingId: repairRequest.trackingId },
+                    actorEmail: adminEmail,
+                });
+            } catch (notifyError) {
+                console.error('technician_earning_paid notification failed (non-fatal):', notifyError.message);
+            }
+
+            return res.status(200).send({
+                message: 'technician earning marked as paid',
+                technicianEarning: paidEarning,
+            });
+        } catch (error) {
+            res.status(500).send({ message: 'Error settling technician earning', code: 'TECHNICIAN_EARNING_SETTLE_FAILED' });
         }
     }
 }
