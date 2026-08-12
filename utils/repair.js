@@ -85,9 +85,15 @@ function validateCompletionInput(body) {
         return { valid: false, code: 'INVALID_COMPLETION_SUMMARY', message: `summary must be ${COMPLETION_SUMMARY_MIN}-${COMPLETION_SUMMARY_MAX} characters` };
     }
 
-    const ids = body.evidenceImageIds;
-    if (!Array.isArray(ids) || ids.length < MIN_EVIDENCE_IMAGES || ids.length > MAX_EVIDENCE_IMAGES) {
-        return { valid: false, code: 'INVALID_COMPLETION_EVIDENCE', message: `evidenceImageIds must contain ${MIN_EVIDENCE_IMAGES}-${MAX_EVIDENCE_IMAGES} image ids` };
+    // Completion evidence is OPTIONAL in the current local release: cloud object
+    // storage is not provisioned, so requiring >=1 photo would block the entire
+    // repair-completion lifecycle. The uploader and every evidence API remain
+    // implemented; only the >=1 minimum is relaxed here. The upper bound, id
+    // shape, and uniqueness rules are unchanged, and an absent field is treated
+    // as "no photos". (Temporary business-rule relaxation - see MIN_EVIDENCE_IMAGES.)
+    const ids = body.evidenceImageIds === undefined ? [] : body.evidenceImageIds;
+    if (!Array.isArray(ids) || ids.length > MAX_EVIDENCE_IMAGES) {
+        return { valid: false, code: 'INVALID_COMPLETION_EVIDENCE', message: `evidenceImageIds must contain 0-${MAX_EVIDENCE_IMAGES} image ids` };
     }
     if (!ids.every(isValidEvidenceId)) {
         return { valid: false, code: 'INVALID_COMPLETION_EVIDENCE', message: 'evidenceImageIds must all be valid image ids' };

@@ -12234,13 +12234,22 @@ async function testRepairWorkflow() {
         // ================= Completion (17-35) =================
         logTest('17. Completion before start rejected', (await complete((await createRepairRequest()).id, techEmail, { summary: validSummary, evidenceImageIds: ['00000000-0000-4000-8000-000000000000'] })).body.code === 'REPAIR_NOT_IN_PROGRESS');
         {
+            // 18. Zero evidence is now ACCEPTED - completion evidence is optional
+            // in the current local release (cloud object storage not provisioned);
+            // the uploader and evidence APIs remain implemented. Uses its own
+            // started parcel so it does not disturb the rejection sub-tests below.
+            const p0 = await startedParcel();
+            const r0 = await complete(p0.id, techEmail, { summary: validSummary, evidenceImageIds: [] });
+            const doc0 = await collections.repairRequests.findOne({ _id: p0._id });
+            logTest('18. Zero evidence accepted (evidence optional)', r0.statusCode === 200 && r0.body.deliveryStatus === REPAIR_COMPLETED && Array.isArray(doc0.repair.completion.evidenceImages) && doc0.repair.completion.evidenceImages.length === 0);
+
             const p = await startedParcel();
-            logTest('18. No evidence rejected', (await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: [] })).body.code === 'INVALID_COMPLETION_EVIDENCE');
             const four = []; for (let i = 0; i < 4; i++) four.push(await uploadEvidence(p.id));
             logTest('19. More than 3 evidence rejected', (await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: four })).body.code === 'INVALID_COMPLETION_EVIDENCE');
             const one = await uploadEvidence(p.id);
             logTest('20. Duplicate evidence ids rejected', (await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: [one, one] })).body.code === 'INVALID_COMPLETION_EVIDENCE');
             logTest('21. Invalid evidence id rejected', (await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: ['not-a-uuid'] })).body.code === 'INVALID_COMPLETION_EVIDENCE');
+            logTest('21b. Summary still required with 0 photos', (await complete((await startedParcel()).id, techEmail, { summary: 'short', evidenceImageIds: [] })).body.code === 'INVALID_COMPLETION_SUMMARY');
         }
         {
             // 22. Foreign evidence (session for a different request) rejected.
@@ -12315,11 +12324,23 @@ async function testRepairWorkflow() {
             logTest('40. Rider assignment-eligible again (released, terminal status not active)', riderAfter.workStatus === 'available' && !ACTIVE_STATUSES.includes(REPAIR_COMPLETED));
         }
         {
-            // 38. Failed completion (no evidence) does not release the rider.
+            // 38. A REJECTED completion still does not release the rider. Zero
+            // evidence is no longer a rejection (completion evidence is optional
+            // now), so this uses a too-short summary to exercise the "rejected
+            // completion leaves the technician busy" guarantee.
             const { p, technicianEmail, technicianId } = await freshRiderParcel();
-            await complete(p.id, technicianEmail, { summary: validSummary, evidenceImageIds: [] });
+            await complete(p.id, technicianEmail, { summary: 'short', evidenceImageIds: [] });
             const rider = await collections.technicians.findOne({ _id: technicianId });
-            logTest('38. Failed completion does not release rider', rider.workStatus === 'in_delivery');
+            logTest('38. Rejected completion does not release rider', rider.workStatus === 'in_delivery');
+        }
+        {
+            // 38b. A SUCCESSFUL completion with 0 photos releases the rider -
+            // proves the optional-evidence path drives the full completion +
+            // technician-release chain end to end.
+            const { p, technicianEmail, technicianId } = await freshRiderParcel();
+            const r = await complete(p.id, technicianEmail, { summary: validSummary, evidenceImageIds: [] });
+            const rider = await collections.technicians.findOne({ _id: technicianId });
+            logTest('38b. Zero-photo completion releases rider', r.statusCode === 200 && rider.workStatus === 'available');
         }
         {
             // 39. Double (concurrent) completion releases exactly once.

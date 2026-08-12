@@ -150,7 +150,7 @@ Copy this block into your test log and tick as you go.
 - [ ] Submit quote
 - [ ] Start repair
 - [ ] Add a progress update
-- [ ] Complete repair with completion evidence
+- [ ] Complete repair (completion photos are optional in the current local release; completing with 0 photos must succeed)
 
 ### PUBLIC
 - [ ] Home
