@@ -45,6 +45,13 @@ function repairRequestRoutes(app, controllers) {
     // owner can actually cancel it.
     app.patch('/repair-requests/:id/cancel', verifyFBToken, ensureDatabaseReady, (req, res) => repairRequestController.cancelRepairRequest(req, res));
 
+    // Customer device-receipt confirmation (Phase 8.9) - a post-completion
+    // handover acknowledgement. Owner-only is enforced inside the controller
+    // (existence-preserving 404 for any non-owner), the same convention as
+    // cancel above; any authenticated caller may reach the route but only the
+    // request's own owner can actually confirm receipt.
+    app.post('/repair-requests/:id/confirm-receipt', verifyFBToken, ensureDatabaseReady, (req, res) => repairRequestController.confirmReceipt(req, res));
+
     // Technician assignment decision (Phase 8.2). Accept/reject are technician
     // operations - verifyTechnician gates role; the controller additionally enforces
     // that the caller is the CURRENTLY offered technician and that the request

@@ -141,6 +141,21 @@ const NOTIFICATION_EVENTS = {
         actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
         deduplicationKey: ({ entityId }) => `repair:${entityId}:completed`,
     },
+    receipt_confirmed: {
+        // Phase 8.9: the customer confirmed they received the repaired device.
+        // Addressed to the assigned technician (role 'rider') so they know the
+        // handover is acknowledged from the customer's side. Dedup key is
+        // per-request, so a repeated confirm attempt can never fan out twice.
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: ['trackingId'],
+        title: () => 'Customer confirmed device receipt',
+        message: ({ metadata }) => `The customer confirmed receiving the repaired device for request ${metadata.trackingId}.`,
+        actionUrl: () => '/dashboard/assigned-jobs',
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:receipt_confirmed`,
+    },
     inspection_completed: {
         entityType: 'repair_request',
         // Same reasoning as technician_assigned - the repair owner's real role

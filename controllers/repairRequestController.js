@@ -3,7 +3,7 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const { client } = require('../config/database');
 const { generateSecureTrackingId } = require('../utils/trackingId');
 const { logTracking } = require('../middleware/logging');
-const { VALID_STATUSES, ACTIVE_STATUSES, ASSIGNMENT_PENDING, isValidTransition } = require('../utils/repairRequestStatus');
+const { VALID_STATUSES, ACTIVE_STATUSES, ASSIGNMENT_PENDING, REPAIR_COMPLETED, isValidTransition } = require('../utils/repairRequestStatus');
 const { validateRejectionReason, buildPendingAssignmentEntry, projectAssignmentForRole } = require('../utils/assignmentDecision');
 const { stripDamageImages, projectSafeListRepairRequest } = require('../utils/repairRequestProjection');
 const { normalize } = require('../services/paymentProcessor');
@@ -1670,6 +1670,85 @@ class RepairRequestController {
             res.send({ message: 'Repair request cancelled successfully.', status: 'cancelled', alreadyCancelled: false });
         } catch (error) {
             res.status(500).send({ message: 'Error cancelling repair request' });
+        }
+    }
+
+    // Customer device-receipt confirmation (Phase 8.9). A POST-completion
+    // handover acknowledgement: the customer confirms they received the
+    // repaired device. Owner-only and existence-preserving - any non-owner
+    // (technician, admin, another customer) gets the same 404 as a nonexistent
+    // request, so this endpoint never reveals that someone else's request
+    // exists. It never changes deliveryStatus, never touches the repair
+    // sub-document, and never affects technician workStatus - technician
+    // release already happened at completion time.
+    async confirmReceipt(req, res) {
+        try {
+            const id = req.params.id;
+            if (!ObjectId.isValid(id)) {
+                return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
+            }
+
+            const repairRequest = await this.RepairRequest.findById(id);
+            // Owner-only, existence-preserving: a missing request AND a request
+            // owned by someone else are indistinguishable to the caller.
+            if (!repairRequest || normalize(repairRequest.senderEmail) !== normalize(req.decoded_email)) {
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+            }
+
+            const now = new Date();
+            const ownerEmail = normalize(repairRequest.senderEmail);
+            // Atomic single-winner guard: the update only matches when the
+            // repair is completed AND not already confirmed. This is the real
+            // race-resolver (two concurrent confirms produce exactly one
+            // winner), so the tracking event + notification below fire exactly
+            // once and never duplicate.
+            const updateResult = await this.collections.repairRequests.updateOne(
+                {
+                    _id: repairRequest._id,
+                    deliveryStatus: REPAIR_COMPLETED,
+                    $or: [
+                        { customerReceiptConfirmation: { $exists: false } },
+                        { 'customerReceiptConfirmation.status': { $ne: 'confirmed' } },
+                    ],
+                },
+                { $set: { customerReceiptConfirmation: { status: 'confirmed', confirmedAt: now, confirmedBy: ownerEmail } } }
+            );
+
+            if (updateResult.matchedCount === 0) {
+                const latest = await this.RepairRequest.findById(id);
+                if (latest && latest.customerReceiptConfirmation && latest.customerReceiptConfirmation.status === 'confirmed') {
+                    return res.status(409).send({ message: 'receipt has already been confirmed', code: 'ALREADY_CONFIRMED' });
+                }
+                return res.status(409).send({ message: 'the repair must be completed before you can confirm receipt', code: 'REPAIR_NOT_COMPLETED' });
+            }
+
+            // Best-effort audit + notification (never roll back an authoritative
+            // confirmation for a side-effect failure). Canonical, courier-free
+            // event name; the public tracking timeline deliberately never
+            // surfaces it, so confirmedBy stays private.
+            try {
+                await logTracking(this.collections.trackingEvents, repairRequest.trackingId, 'customer_receipt_confirmed');
+                if (repairRequest.technicianEmail) {
+                    await this.notifications.createNotification({
+                        recipientEmail: repairRequest.technicianEmail,
+                        recipientRole: 'rider',
+                        type: 'receipt_confirmed',
+                        entityType: 'repair_request',
+                        entityId: repairRequest._id.toString(),
+                        metadata: { trackingId: repairRequest.trackingId },
+                        actorEmail: null,
+                    });
+                }
+            } catch (sideEffectError) {
+                console.error('receipt-confirmation side effect failed (non-fatal):', sideEffectError.message);
+            }
+
+            return res.status(200).send({
+                message: 'receipt confirmed',
+                customerReceiptConfirmation: { status: 'confirmed', confirmedAt: now, confirmedBy: ownerEmail },
+            });
+        } catch (error) {
+            res.status(500).send({ message: 'Error confirming receipt', code: 'RECEIPT_CONFIRMATION_FAILED' });
         }
     }
 }

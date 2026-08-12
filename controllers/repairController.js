@@ -436,7 +436,14 @@ class RepairController {
                             technicianId: repairRequest.technicianId,
                             'repair.status': 'in_progress',
                         },
-                        { $set: { deliveryStatus: REPAIR_COMPLETED, 'repair.status': 'completed', 'repair.completion': completionDoc, updatedAt: now } },
+                        // customerReceiptConfirmation (Phase 8.9): a dedicated
+                        // post-completion handover object, initialized to
+                        // 'pending' the moment the technician completes. It is
+                        // NOT a deliveryStatus enum value (that migration stays
+                        // frozen) and never gates technician release below - the
+                        // customer acknowledges receipt separately via
+                        // POST /repair-requests/:id/confirm-receipt.
+                        { $set: { deliveryStatus: REPAIR_COMPLETED, 'repair.status': 'completed', 'repair.completion': completionDoc, customerReceiptConfirmation: { status: 'pending', confirmedAt: null, confirmedBy: null }, updatedAt: now } },
                         { session: mongoSession }
                     );
                     if (repairRequestUpdate.matchedCount === 0) {

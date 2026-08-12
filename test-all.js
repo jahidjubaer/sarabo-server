@@ -4478,13 +4478,13 @@ async function testNotificationFoundation() {
         const expectedTypes = [
             'technician_application_submitted', 'technician_application_approved', 'technician_application_rejected',
             'technician_assigned', 'new_repair_assignment', 'technician_on_the_way',
-            'repair_in_progress', 'repair_completed', 'payment_confirmed',
+            'repair_in_progress', 'repair_completed', 'receipt_confirmed', 'payment_confirmed',
             'inspection_completed', 'quote_submitted', 'quote_approved', 'quote_rejected',
             'payment_completed', 'payment_completed_technician',
             'repair_started', 'repair_finished'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 17 event types exist', actualTypes.length === 17 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 18 event types exist', actualTypes.length === 18 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -12409,6 +12409,74 @@ async function testRepairWorkflow() {
             logTest('62. Legacy behavior unchanged: repair read rejected', (await getRep(legacy.id, ownerEmail)).body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
         }
         logTest('64. No production storage contact (all objects in the fake bucket)', fakeBucket._objects.size > 0 && [...fakeBucket._objects.keys()].every((k) => k.startsWith('repair-requests/')));
+
+        // ================= Customer receipt confirmation (Phase 8.9, 65-81) =================
+        // Post-completion handover acknowledgement via
+        // POST /repair-requests/:id/confirm-receipt (repairRequestController.confirmReceipt).
+        {
+            const RepairRequestController = require('./controllers/repairRequestController');
+            const rrController = new RepairRequestController(models, collections, fakeStorage);
+            const confirmReceipt = (pid, email) => { const res = fakeRes(); return rrController.confirmReceipt({ params: { id: pid }, body: {}, decoded_email: email }, res).then(() => res); };
+
+            await makeRequest({ hostname: 'localhost', port: 3000, path: '/repair-requests/000000000000000000000000/confirm-receipt', method: 'POST' }, 401, '65. Unauthenticated receipt confirmation rejected (401)');
+
+            {
+                // Completion initializes the confirmation object to pending and
+                // never gates technician release (proved elsewhere).
+                const p = await startedParcel();
+                await completeWithEvidence(p.id);
+                const doc = await collections.repairRequests.findOne({ _id: p._id });
+                const c = doc.customerReceiptConfirmation;
+                logTest('66. Completion initializes receipt confirmation to pending', !!c && c.status === 'pending' && c.confirmedAt === null && c.confirmedBy === null);
+            }
+            {
+                // Valid owner confirms a completed repair - success + persistence
+                // + idempotency + audit + notification, all in one flow.
+                const p = await startedParcel();
+                await completeWithEvidence(p.id);
+                const before = await collections.repairRequests.findOne({ _id: p._id });
+                const beforeCompletion = JSON.stringify(before.repair.completion);
+                const r = await confirmReceipt(p.id, ownerEmail);
+                const doc = await collections.repairRequests.findOne({ _id: p._id });
+                const c = doc.customerReceiptConfirmation;
+                logTest('67. Owner confirms completed repair (200)', r.statusCode === 200 && r.body.customerReceiptConfirmation.status === 'confirmed');
+                logTest('68. Confirmation object persisted as confirmed', c.status === 'confirmed');
+                logTest('69. confirmedAt stored as a Date', c.confirmedAt instanceof Date);
+                logTest('70. confirmedBy is the canonical customer email', c.confirmedBy === ownerEmail);
+                logTest('71. Repair completion metadata unchanged after confirm', JSON.stringify(doc.repair.completion) === beforeCompletion && doc.deliveryStatus === REPAIR_COMPLETED && doc.repair.status === 'completed');
+                logTest('72. customer_receipt_confirmed tracking event once', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: 'customer_receipt_confirmed' })) === 1);
+                const notif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:receipt_confirmed` }).toArray();
+                logTest('73. Technician notified of receipt confirmation once', notif.length === 1 && notif[0].recipientEmail === techEmail);
+                logTest('74. Duplicate confirmation rejected (409 ALREADY_CONFIRMED)', (await confirmReceipt(p.id, ownerEmail)).body.code === 'ALREADY_CONFIRMED');
+                logTest('75. No duplicate tracking event on repeat confirm', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: 'customer_receipt_confirmed' })) === 1);
+            }
+            {
+                // Before completion -> controlled rejection, receipt stays absent.
+                const p = await startedParcel();
+                const r = await confirmReceipt(p.id, ownerEmail);
+                logTest('76. Confirm before completion rejected (REPAIR_NOT_COMPLETED)', r.statusCode === 409 && r.body.code === 'REPAIR_NOT_COMPLETED');
+            }
+            {
+                // Authorization: every non-owner gets an existence-preserving 404,
+                // and none of them mutate the pending confirmation.
+                const p = await startedParcel();
+                await completeWithEvidence(p.id);
+                logTest('77. Wrong customer cannot confirm (privacy-safe 404)', (await confirmReceipt(p.id, `rep-stranger-${runId}@test.local`)).statusCode === 404);
+                logTest('78. Technician cannot confirm (privacy-safe 404)', (await confirmReceipt(p.id, techEmail)).statusCode === 404);
+                logTest('79. Admin cannot confirm (privacy-safe 404)', (await confirmReceipt(p.id, adminEmail)).statusCode === 404);
+                const doc = await collections.repairRequests.findOne({ _id: p._id });
+                logTest('80. Rejected confirmations leave receipt pending', doc.customerReceiptConfirmation.status === 'pending');
+            }
+            {
+                // Technician workStatus is unaffected by receipt confirmation
+                // (the technician was already released at completion time).
+                const { p, technicianEmail, technicianId } = await freshRiderParcel();
+                await complete(p.id, technicianEmail, { summary: validSummary, evidenceImageIds: [] });
+                const r = await confirmReceipt(p.id, ownerEmail);
+                const rider = await collections.technicians.findOne({ _id: technicianId });
+                logTest('81. Technician workStatus unaffected by receipt confirmation', r.statusCode === 200 && rider.workStatus === 'available');
+            }
+        }
     } finally {
         if (createdParcelIds.length) {
             await collections.repairEvidenceSessions.deleteMany({ requestId: { $in: createdParcelIds.map((x) => x.toString()) } });
