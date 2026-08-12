@@ -9,7 +9,7 @@ const { ensureDatabaseReady } = require('../middleware/database');
 // /notifications/:id/read (3 path segments) were deliberately given
 // different segment counts, so Express cannot structurally match one
 // pattern against the other's URL shape regardless of registration order -
-// unlike the historical /parcels/rider vs /parcels/:id collision (both 2
+// unlike the historical /repair-requests/technician vs /repair-requests/:id collision (both 2
 // segments) that routes/repairRequests.js's own ordering comment guards against.
 // Specific-path routes are still registered before the generic :id-shaped
 // route below, matching that same defensive convention.

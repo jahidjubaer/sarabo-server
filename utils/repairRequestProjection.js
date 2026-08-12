@@ -2,9 +2,9 @@
 //
 // The raw `damage.images[]` array carries internal Storage metadata -
 // storageKey, the (short-lived) url, mimeType, size, and uploadedByRole - which
-// must never leave a general parcel read (GET /parcels, GET /parcels/:id, the
+// must never leave a general parcel read (GET /repair-requests, GET /repair-requests/:id, the
 // technician assigned-jobs list). Damage images are read ONLY through the
-// dedicated, authorized GET /parcels/:id/damage-images endpoint, which returns
+// dedicated, authorized GET /repair-requests/:id/damage-images endpoint, which returns
 // a freshly-signed, role-projected view. This helper replaces the raw array
 // with a safe aggregate ({ description, imageCount }) so callers can still show
 // the problem description and a count without ever receiving a storageKey.
@@ -31,7 +31,7 @@ function stripDamageImages(parcel) {
 // notes, the submitting technician's id, the customer's decision reason, and
 // submission timestamps - is internal and never belongs on a general list. The
 // full quote is read only through the dedicated, role-projected
-// GET /parcels/:id/quote. Pure: builds a fresh object.
+// GET /repair-requests/:id/quote. Pure: builds a fresh object.
 function summarizeQuoteForList(quote) {
     return {
         status: quote.status ?? null,
@@ -40,18 +40,18 @@ function summarizeQuoteForList(quote) {
     };
 }
 
-// Safe projection for a GENERAL parcel LIST item (GET /parcels, GET
-// /parcels/rider). Beyond the BL-032 damage-image strip and the Phase 8.2
+// Safe projection for a GENERAL parcel LIST item (GET /repair-requests, GET
+// /repair-requests/technician). Beyond the BL-032 damage-image strip and the Phase 8.2
 // assignmentHistory strip, this removes the detail sub-documents that carried
 // technician-only and provider-internal data onto general lists (Phase 8.4
 // MEDIUM debt / Phase 8.5):
 //
 //   - inspection: internalNotes (explicitly customer-private), the submitting
 //     technician's email/id, the diagnosis, and the estimate. Read only through
-//     the role-projected GET /parcels/:id/inspection.
+//     the role-projected GET /repair-requests/:id/inspection.
 //   - repair:     completion evidence storage metadata (imageId/mimeType/size),
 //     progress-update ids, and rider identifiers. Read only through
-//     GET /parcels/:id/repair.
+//     GET /repair-requests/:id/repair.
 //   - quote:      the full pricing breakdown, notes, submitter identity, and
 //     decision reason - reduced to the agreed-price summary above.
 //   - payment:    the Stripe paymentIntentId and provider name. The top-level

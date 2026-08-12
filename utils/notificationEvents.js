@@ -79,7 +79,7 @@ const NOTIFICATION_EVENTS = {
     technician_assigned: {
         entityType: 'parcel',
         // The repair request's owner is whoever is authenticated when they
-        // submit it (POST /parcels only requires verifyFBToken - see
+        // submit it (POST /repair-requests only requires verifyFBToken - see
         // routes/repairRequests.js), so this is the one event whose recipient's
         // real role is not fixed to a single value. recipientRoles is a
         // fixed allowlist, not a caller-supplied option.
@@ -107,7 +107,7 @@ const NOTIFICATION_EVENTS = {
     },
     technician_on_the_way: {
         entityType: 'parcel',
-        // Same reasoning as technician_assigned - POST /parcels only
+        // Same reasoning as technician_assigned - POST /repair-requests only
         // requires authentication (routes/repairRequests.js), so the repair
         // owner's real role is not fixed to a single value.
         recipientRoles: ['user', 'rider', 'admin'],
@@ -144,7 +144,7 @@ const NOTIFICATION_EVENTS = {
     inspection_completed: {
         entityType: 'parcel',
         // Same reasoning as technician_assigned - the repair owner's real role
-        // is not fixed to a single value (POST /parcels only requires
+        // is not fixed to a single value (POST /repair-requests only requires
         // authentication), so a fixed recipientRoles allowlist is used.
         recipientRoles: ['user', 'rider', 'admin'],
         priority: 'normal',
@@ -196,7 +196,7 @@ const NOTIFICATION_EVENTS = {
     payment_confirmed: {
         entityType: 'parcel',
         // Same reasoning as technician_assigned/technician_on_the_way/
-        // repair_in_progress/repair_completed - POST /parcels only requires
+        // repair_in_progress/repair_completed - POST /repair-requests only requires
         // authentication (routes/repairRequests.js), so the repair owner's real
         // role is not fixed to a single value.
         recipientRoles: ['user', 'rider', 'admin'],

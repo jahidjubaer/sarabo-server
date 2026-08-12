@@ -27,7 +27,7 @@
 //
 // Never prints MONGO_URI or any other secret - only the resolved,
 // already-validated database name and computed counts/labels ever reach
-// stdout. Never touches users/parcels/riders/payments/notifications - only
+// stdout. Never touches users/repair-requests/technicians/payments/notifications - only
 // the serviceDefinitions collection.
 
 const { ServiceDefinitionModel, validateServiceDefinitionInput, buildDocumentFromInput, WRITABLE_TOP_LEVEL_FIELDS } = require('../models/ServiceDefinition');

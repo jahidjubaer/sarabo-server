@@ -2,7 +2,7 @@
 // decision logic plus the minimal live database reads it genuinely needs
 // (caller's linked role, caller's rider record) - never calls Firebase
 // Storage, never mutates any document. Reused by exactly one endpoint today
-// (GET /parcels/:id/damage-images) so access rules never get re-derived in
+// (GET /repair-requests/:id/damage-images) so access rules never get re-derived in
 // a second controller branch.
 //
 // Never trusts a client-supplied role, rider id, or email - every identity

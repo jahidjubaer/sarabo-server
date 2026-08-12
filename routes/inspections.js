@@ -7,12 +7,12 @@ const { ensureDatabaseReady } = require('../middleware/database');
 // assignment+lifecycle+role revalidation all happen inside the controller,
 // inside the write transaction, never delegated to generic role middleware
 // that cannot re-check assignment at commit time. Three-segment paths so
-// Express never structurally confuses them with GET/PATCH /parcels/:id.
+// Express never structurally confuses them with GET/PATCH /repair-requests/:id.
 function inspectionRoutes(app, controllers) {
     const inspectionController = controllers.inspection;
 
-    app.post('/parcels/:id/inspection', verifyFBToken, ensureDatabaseReady, (req, res) => inspectionController.submitInspection(req, res));
-    app.get('/parcels/:id/inspection', verifyFBToken, ensureDatabaseReady, (req, res) => inspectionController.getInspection(req, res));
+    app.post('/repair-requests/:id/inspection', verifyFBToken, ensureDatabaseReady, (req, res) => inspectionController.submitInspection(req, res));
+    app.get('/repair-requests/:id/inspection', verifyFBToken, ensureDatabaseReady, (req, res) => inspectionController.getInspection(req, res));
 }
 
 module.exports = inspectionRoutes;

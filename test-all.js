@@ -173,7 +173,7 @@ function makeRequest(options, expectedStatus, testName) {
     });
 }
 
-// Every /parcels/*/status route requires a real Firebase-verified token,
+// Every /repair-requests/*/status route requires a real Firebase-verified token,
 // which this script has no way to mint. These tests instead call the parcel
 // controller directly against the same local dev database the server above
 // uses, simulating `req.decoded_email` exactly as the verifyFBToken
@@ -405,7 +405,7 @@ async function testInitialRequestStatus() {
         // Same query the admin "Assign Technicians" page issues.
         const pendingResults = await models.RepairRequest.findAll({ deliveryStatus: 'pending-pickup' });
         const foundInPending = pendingResults.some(p => p._id.toString() === id);
-        logTest('Admin pending-pickup filter (GET /parcels?deliveryStatus=pending-pickup) returns the new request', foundInPending);
+        logTest('Admin pending-pickup filter (GET /repair-requests?deliveryStatus=pending-pickup) returns the new request', foundInPending);
 
         // Must be a real, approved technician document now that
         // assignTechnicianToRepairRequest validates technicianId as an ObjectId and looks the
@@ -952,9 +952,9 @@ async function testStripeWebhook() {
         'POST /stripe-webhook (invalid signature, real Stripe SDK on live server)'
     );
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/parcels', method: 'GET' },
+        { hostname: 'localhost', port: 3000, path: '/repair-requests', method: 'GET' },
         401,
-        'GET /parcels still parses/behaves normally after webhook route registration'
+        'GET /repair-requests still parses/behaves normally after webhook route registration'
     );
 
     const { connectDatabase, collections } = require('./config/database');
@@ -2151,7 +2151,7 @@ async function testPublicTracking() {
 }
 
 // Confirms Phase 2.5 Unit 1 (customer repair request cancellation):
-// PATCH /parcels/:id/cancel is a soft, ownership-enforced, eligibility-gated
+// PATCH /repair-requests/:id/cancel is a soft, ownership-enforced, eligibility-gated
 // state transition (services/cancellationPolicy.js), never a document
 // deletion; assignment and payment completion are guarded atomically against
 // a concurrent cancellation (and vice versa); an active checkout session is
@@ -2164,19 +2164,19 @@ async function testRequestCancellation() {
     // HTTP-level: confirm the route itself requires authentication.
     await makeRequest(
         {
-            hostname: 'localhost', port: 3000, path: '/parcels/000000000000000000000000/cancel', method: 'PATCH',
+            hostname: 'localhost', port: 3000, path: '/repair-requests/000000000000000000000000/cancel', method: 'PATCH',
             headers: { 'Content-Type': 'application/json' }
         },
         401,
-        'PATCH /parcels/:id/cancel (no auth)'
+        'PATCH /repair-requests/:id/cancel (no auth)'
     );
     await makeRequest(
         {
-            hostname: 'localhost', port: 3000, path: '/parcels/000000000000000000000000/cancel', method: 'PATCH',
+            hostname: 'localhost', port: 3000, path: '/repair-requests/000000000000000000000000/cancel', method: 'PATCH',
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer invalid_token_12345' }
         },
         401,
-        'PATCH /parcels/:id/cancel (invalid token)'
+        'PATCH /repair-requests/:id/cancel (invalid token)'
     );
 
     const { connectDatabase, collections } = require('./config/database');
@@ -2982,7 +2982,7 @@ async function testTechnicianAssignment() {
 
 // Phase 3.0 Unit 2: Fix Critical Authorization and Data-Exposure
 // Vulnerabilities. Exercises the four P0 fixes: POST /users no longer trusts
-// a caller-supplied identity/role, GET /users and GET /riders are now
+// a caller-supplied identity/role, GET /users and GET /technicians are now
 // admin-only, and GET /payments always scopes non-admin callers to their own
 // identity instead of defaulting to "everything" when the email query is
 // omitted. Role-gated middleware (verifyAdmin) is invoked directly against
@@ -3150,23 +3150,23 @@ async function testP0AuthorizationFixes() {
             'routes/users.js defines exactly one GET /users route, now admin-gated'
         );
 
-        // ===== GET /riders =====
+        // ===== GET /technicians =====
 
         // --- 16, 17, 18, 19. Anonymous/customer/technician/admin. ---
         await makeRequest(
-            { hostname: 'localhost', port: 3000, path: '/riders', method: 'GET' },
+            { hostname: 'localhost', port: 3000, path: '/technicians', method: 'GET' },
             401,
-            'GET /riders (no auth) rejected'
+            'GET /technicians (no auth) rejected'
         );
 
         mw = await callVerifyAdmin(CUSTOMER_EMAIL);
-        logTest('GET /riders: customer rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
+        logTest('GET /technicians: customer rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
 
         mw = await callVerifyAdmin(RIDER_EMAIL);
-        logTest('GET /riders: technician rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
+        logTest('GET /technicians: technician rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
 
         mw = await callVerifyAdmin(ADMIN_EMAIL);
-        logTest('GET /riders: admin allowed through verifyAdmin', mw.nextCalled === true);
+        logTest('GET /technicians: admin allowed through verifyAdmin', mw.nextCalled === true);
 
         // --- 20, 21, 22, 23. Response field allow-list. ---
         const ridersRes = await callGetAllRiders(ADMIN_EMAIL, {});
@@ -3179,7 +3179,7 @@ async function testP0AuthorizationFixes() {
         ]);
         const allFieldsAllowed = ridersRes.body.every(r => Object.keys(r).every(k => ALLOWED_RIDER_FIELDS.has(k)));
         logTest(
-            'GET /riders response contains only the approved field allow-list (nid/address are present only because the admin ApproveTechnicians review view needs them; nothing outside this list is ever returned)',
+            'GET /technicians response contains only the approved field allow-list (nid/address are present only because the admin ApproveTechnicians review view needs them; nothing outside this list is ever returned)',
             ridersRes.statusCode === 200 && allFieldsAllowed
         );
 
@@ -3368,22 +3368,22 @@ async function testTechnicianApprovalTransaction() {
         // --- 1. Anonymous PATCH rejected (real HTTP, real middleware chain). ---
         await makeRequest(
             {
-                hostname: 'localhost', port: 3000, path: '/riders/000000000000000000000000', method: 'PATCH',
+                hostname: 'localhost', port: 3000, path: '/technicians/000000000000000000000000', method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ status: 'approved' })
             },
             401,
-            'PATCH /riders/:id (no auth) rejected'
+            'PATCH /technicians/:id (no auth) rejected'
         );
 
         // --- 2. Non-admin rejected by the shared verifyAdmin middleware (same
         // function already gates this exact route - see routes/technicians.js). ---
         let mw = await callVerifyAdmin(CUSTOMER_EMAIL);
-        logTest('PATCH /riders/:id: customer rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
+        logTest('PATCH /technicians/:id: customer rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
         mw = await callVerifyAdmin(RIDER_EMAIL);
-        logTest('PATCH /riders/:id: technician rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
+        logTest('PATCH /technicians/:id: technician rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
         mw = await callVerifyAdmin(ADMIN_EMAIL);
-        logTest('PATCH /riders/:id: admin allowed through verifyAdmin', mw.nextCalled === true);
+        logTest('PATCH /technicians/:id: admin allowed through verifyAdmin', mw.nextCalled === true);
 
         // --- 3. Invalid technician id. ---
         let res = await callUpdateRiderStatus('not-a-valid-object-id', { status: 'approved' });
@@ -3847,12 +3847,12 @@ async function testRepairCompletionTransaction() {
         // --- 1. Anonymous PATCH rejected (real HTTP, real middleware chain). ---
         await makeRequest(
             {
-                hostname: 'localhost', port: 3000, path: '/parcels/000000000000000000000000/status', method: 'PATCH',
+                hostname: 'localhost', port: 3000, path: '/repair-requests/000000000000000000000000/status', method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ deliveryStatus: 'parcel_delivered' })
             },
             401,
-            'PATCH /parcels/:id/status (no auth) rejected'
+            'PATCH /repair-requests/:id/status (no auth) rejected'
         );
 
         // --- 2, 3. Authorization: unrelated customer and unrelated technician. ---
@@ -4187,7 +4187,7 @@ async function testRepairCompletionTransaction() {
 }
 
 // Phase 4.0 Unit 1: Admin Manage Repair Requests. Exercises the new
-// GET /admin/parcels list - authorization (real HTTP anonymous rejection,
+// GET /admin/repair-requests list - authorization (real HTTP anonymous rejection,
 // verifyAdmin role gating), pagination defaults/limits/invalid-input
 // handling, safe search (including regex-metacharacter escaping and length
 // capping), status/payment filters (valid, invalid, combined), response
@@ -4269,20 +4269,20 @@ async function testAdminParcelsList() {
 
         // --- 1. Anonymous rejected (real HTTP, real middleware chain). ---
         await makeRequest(
-            { hostname: 'localhost', port: 3000, path: '/admin/parcels', method: 'GET' },
+            { hostname: 'localhost', port: 3000, path: '/admin/repair-requests', method: 'GET' },
             401,
-            'GET /admin/parcels (no auth) rejected'
+            'GET /admin/repair-requests (no auth) rejected'
         );
 
         // --- 2, 3, 4. Role enforcement via the real verifyAdmin middleware. ---
         let mw = await callVerifyAdmin(CUSTOMER_EMAIL);
-        logTest('GET /admin/parcels: customer rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
+        logTest('GET /admin/repair-requests: customer rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
 
         mw = await callVerifyAdmin(RIDER_EMAIL);
-        logTest('GET /admin/parcels: technician rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
+        logTest('GET /admin/repair-requests: technician rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
 
         mw = await callVerifyAdmin(ADMIN_EMAIL);
-        logTest('GET /admin/parcels: admin allowed through verifyAdmin', mw.nextCalled === true);
+        logTest('GET /admin/repair-requests: admin allowed through verifyAdmin', mw.nextCalled === true);
 
         // --- 5. Admin request succeeds end-to-end. ---
         let res = await callGetAdminParcels({ search: marker });
@@ -4852,7 +4852,7 @@ async function testNotificationFoundation() {
         // --- Phase 5.2 Unit 4 lifecycle role-contract corrections (55-60) -
         // technician_on_the_way/repair_in_progress/repair_completed are now
         // multi-role for the same reason technician_assigned already is:
-        // POST /parcels only requires authentication, so the repair owner
+        // POST /repair-requests only requires authentication, so the repair owner
         // can genuinely be user, rider, or admin. ---
         const lifecycleMultiRoleTypes = ['technician_on_the_way', 'repair_in_progress', 'repair_completed'];
         let allLifecycleAcceptUser = true;
@@ -6886,7 +6886,7 @@ async function testDatabaseNameValidation() {
         logTest('8.7B: test harness refuses a production database name', expectThrows(resolveDatabaseName));
 
         // Canonical Mongo collection names (snake_case Sarabo domain), and NO
-        // collection is ever created under the inherited riders/parcels names.
+        // collection is ever created under the inherited riders/repair-requests names.
         setEnv({ NODE_ENV: 'test', MONGO_DB_NAME: 'sarabo_test_selection_check' });
         const { collections: nameCheck } = freshDatabaseModule();
         const collectionNames = Object.values(nameCheck).map(c => c.collectionName);
@@ -7100,9 +7100,9 @@ async function testHealthAndObservability() {
     // 12. Existing API behavior remains unchanged - representative spot check
     // (broader coverage already provided by every other section in this suite).
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/parcels', method: 'GET' },
+        { hostname: 'localhost', port: 3000, path: '/repair-requests', method: 'GET' },
         401,
-        '12. Existing API behavior unchanged (GET /parcels still 401 without auth)'
+        '12. Existing API behavior unchanged (GET /repair-requests still 401 without auth)'
     );
 
     console.log('');
@@ -7815,7 +7815,7 @@ async function testServiceTaxonomyFoundation() {
 // Phase 6.3 Unit 2 - Service Definitions and Server-Owned Pricing Foundation.
 // Test-database safety (Phase L): never uses the real/shared RIDER_EMAIL or
 // CUSTOMER_EMAIL fixture accounts (this section never touches
-// riders/users/parcels/notifications at all - only serviceDefinitions),
+// riders/users/repair-requests/notifications at all - only serviceDefinitions),
 // every synthetic document this section creates is deleted in `finally`
 // (tracked by _id, or by its exact known productCategorySlug/
 // repairCategorySlug compound key), and section 19/26-32's fake
@@ -8801,7 +8801,7 @@ async function testRepairRequestV2() {
         const getByIdRes = fakeRes();
         await parcelController.getRepairRequestById({ params: { id: v2Res.body.insertedId.toString() }, decoded_email: customerEmail }, getByIdRes);
         logTest(
-            '56b. Existing GET /parcels/:id detail path does not throw on a v2 document and returns it to its owner',
+            '56b. Existing GET /repair-requests/:id detail path does not throw on a v2 document and returns it to its owner',
             getByIdRes.statusCode === 200 && getByIdRes.body.schemaVersion === 2 && getByIdRes.body.product.categorySlug === 'smartphone'
         );
 
@@ -10910,7 +10910,7 @@ async function testAuthorizedDamageImageAccess() {
         const routesSourceCode = routesSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
         logTest(
             '68. GET damage-images list route is wired with verifyFBToken/ensureDatabaseReady only (live role resolution, not route-level admin/rider gating)',
-            /app\.get\(\s*\n?\s*'\/parcels\/:id\/damage-images'/.test(routesSourceCode) && !/verifyAdmin/.test(routesSourceCode) && !/verifyTechnician/.test(routesSourceCode)
+            /app\.get\(\s*\n?\s*'\/repair-requests\/:id\/damage-images'/.test(routesSourceCode) && !/verifyAdmin/.test(routesSourceCode) && !/verifyTechnician/.test(routesSourceCode)
         );
 
         // ---- Regression (69) ----
@@ -11629,7 +11629,7 @@ async function testQuoteWorkflow() {
         async function submittedParcel() { const p = await createRepairRequest(); await submit(p.id, techEmail, validQuote()); return p; }
 
         // ================= Submit authorization (1-10) =================
-        await makeRequest({ hostname: 'localhost', port: 3000, path: '/parcels/507f1f77bcf86cd799439011/quote', method: 'POST' }, 401, '1. Unauthenticated quote submit rejected (401)');
+        await makeRequest({ hostname: 'localhost', port: 3000, path: '/repair-requests/507f1f77bcf86cd799439011/quote', method: 'POST' }, 401, '1. Unauthenticated quote submit rejected (401)');
         {
             const p = await createRepairRequest();
             logTest('2. Customer cannot submit quote', (await submit(p.id, ownerEmail, validQuote())).body.code === 'TECHNICIAN_ROLE_REQUIRED');
@@ -12175,7 +12175,7 @@ async function testRepairWorkflow() {
         async function completeWithEvidence(pid) { const eid = await uploadEvidence(pid); return complete(pid, techEmail, { summary: validSummary, evidenceImageIds: [eid] }); }
 
         // ================= Start (1-9) =================
-        await makeRequest({ hostname: 'localhost', port: 3000, path: '/parcels/507f1f77bcf86cd799439011/repair/start', method: 'POST' }, 401, '1. Unauthenticated start rejected (401)');
+        await makeRequest({ hostname: 'localhost', port: 3000, path: '/repair-requests/507f1f77bcf86cd799439011/repair/start', method: 'POST' }, 401, '1. Unauthenticated start rejected (401)');
         {
             const p = await createRepairRequest();
             logTest('2. Customer cannot start repair', (await start(p.id, ownerEmail)).body.code === 'TECHNICIAN_ROLE_REQUIRED');
@@ -12420,12 +12420,12 @@ async function testSafeRepairDeletion() {
 
     // --- 1, 2. Route auth: no token / invalid token are rejected at the edge. ---
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/parcels/000000000000000000000000', method: 'DELETE', headers: { 'Content-Type': 'application/json' } },
-        401, 'DELETE /parcels/:id (no auth)'
+        { hostname: 'localhost', port: 3000, path: '/repair-requests/000000000000000000000000', method: 'DELETE', headers: { 'Content-Type': 'application/json' } },
+        401, 'DELETE /repair-requests/:id (no auth)'
     );
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/parcels/000000000000000000000000', method: 'DELETE', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer invalid_token_12345' } },
-        401, 'DELETE /parcels/:id (invalid token)'
+        { hostname: 'localhost', port: 3000, path: '/repair-requests/000000000000000000000000', method: 'DELETE', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer invalid_token_12345' } },
+        401, 'DELETE /repair-requests/:id (invalid token)'
     );
 
     const { connectDatabase, collections } = require('./config/database');
@@ -12709,9 +12709,9 @@ async function testSafeRepairDeletion() {
         // --- 46. All Storage keys ever touched used the fake bucket (no production contact). ---
         logTest('46. No production Storage contact (all fake-bucket keys are request-namespaced)', [...fakeBucket._objects.keys()].every((k) => k.startsWith('repair-requests/')));
 
-        // --- 47. Route source: DELETE /parcels/:id keeps verifyFBToken but is no longer verifyAdmin-gated. ---
+        // --- 47. Route source: DELETE /repair-requests/:id keeps verifyFBToken but is no longer verifyAdmin-gated. ---
         const routesSrc = fs.readFileSync(path.join(__dirname, 'routes', 'repairRequests.js'), 'utf8');
-        const deleteLine = routesSrc.split('\n').find((l) => l.includes("app.delete('/parcels/:id'"));
+        const deleteLine = routesSrc.split('\n').find((l) => l.includes("app.delete('/repair-requests/:id'"));
         logTest('47. DELETE route keeps verifyFBToken and drops verifyAdmin (owner-or-admin decided in controller)', !!deleteLine && deleteLine.includes('verifyFBToken') && !deleteLine.includes('verifyAdmin'));
 
         // --- 48. Sibling B (untouched control) is still present before cleanup. ---
@@ -12859,12 +12859,12 @@ async function runAllTests() {
     console.log('-'.repeat(60));
     const protectedEndpoints = [
         { path: '/users', name: 'GET /users' },
-        { path: '/parcels', name: 'GET /parcels' },
-        { path: '/riders', name: 'GET /riders' },
+        { path: '/repair-requests', name: 'GET /repair-requests' },
+        { path: '/technicians', name: 'GET /technicians' },
         { path: '/payments', name: 'GET /payments' },
-        { path: '/parcels/delivery-status/stats', name: 'GET /parcels/delivery-status/stats' },
-        { path: '/riders/delivery-per-day', name: 'GET /riders/delivery-per-day' },
-        { path: '/admin/parcels', name: 'GET /admin/parcels' },
+        { path: '/repair-requests/delivery-status/stats', name: 'GET /repair-requests/delivery-status/stats' },
+        { path: '/technicians/delivery-per-day', name: 'GET /technicians/delivery-per-day' },
+        { path: '/admin/repair-requests', name: 'GET /admin/repair-requests' },
     ];
 
     for (const endpoint of protectedEndpoints) {
@@ -12913,26 +12913,26 @@ async function runAllTests() {
     console.log('5. Testing Parcel-Specific Endpoints');
     console.log('-'.repeat(60));
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/parcels/507f1f77bcf86cd799439011', method: 'GET' },
+        { hostname: 'localhost', port: 3000, path: '/repair-requests/507f1f77bcf86cd799439011', method: 'GET' },
         401,
-        'GET /parcels/:id (no auth)'
+        'GET /repair-requests/:id (no auth)'
     );
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/parcels/rider', method: 'GET' },
+        { hostname: 'localhost', port: 3000, path: '/repair-requests/technician', method: 'GET' },
         401,
-        'GET /parcels/rider (no auth)'
+        'GET /repair-requests/technician (no auth)'
     );
     await makeRequest(
         {
             hostname: 'localhost',
             port: 3000,
-            path: '/parcels',
+            path: '/repair-requests',
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ test: 'data' })
         },
         401,
-        'POST /parcels (no auth)'
+        'POST /repair-requests (no auth)'
     );
     console.log('');
 
@@ -12968,9 +12968,9 @@ async function runAllTests() {
     console.log('8. Testing Route Ordering');
     console.log('-'.repeat(60));
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/parcels/123/status', method: 'PATCH' },
+        { hostname: 'localhost', port: 3000, path: '/repair-requests/123/status', method: 'PATCH' },
         401,
-        'PATCH /parcels/:id/status (should match specific route, not generic)'
+        'PATCH /repair-requests/:id/status (should match specific route, not generic)'
     );
     console.log('');
 
@@ -13062,6 +13062,7 @@ async function runAllTests() {
     await testInspectionListProjectionTightening();
     await testTechnicianMatchingProfileFlow();
     await testCP3IdentityFieldContract();
+    await testCP4RouteContract();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
@@ -13086,6 +13087,93 @@ async function runAllTests() {
         console.log('⚠️  Some tests failed. Please review the output above.');
         process.exit(1);
     }
+}
+
+// ---------------------------------------------------------------------------
+// CP4 API Route Contract (Phase 8.7C Checkpoint 4)
+//
+// Proves the external HTTP route contract migrated from the inherited courier
+// families (/riders, /parcels, /admin/parcels) to canonical Sarabo families
+// (/technicians, /repair-requests, /admin/repair-requests) with NO dual-route
+// support: old paths are simply unmounted (Express default 404), canonical
+// paths resolve through their real auth/business handlers. Pure HTTP against
+// the live server; no DB fixtures.
+async function testCP4RouteContract() {
+    console.log('\n=== CP4 API Route Contract (Phase 8.7C CP4) ===');
+    const ID = '000000000000000000000000';
+
+    // Old route families must be GONE (unmounted -> 404), never dual-mounted.
+    const oldRoutes = [
+        { method: 'GET', path: '/riders' },
+        { method: 'POST', path: '/riders' },
+        { method: 'GET', path: '/riders/delivery-per-day' },
+        { method: 'PATCH', path: `/riders/${ID}` },
+        { method: 'PATCH', path: `/riders/${ID}/expertise` },
+        { method: 'GET', path: '/parcels' },
+        { method: 'POST', path: '/parcels' },
+        { method: 'GET', path: '/parcels/rider' },
+        { method: 'GET', path: '/parcels/delivery-status/stats' },
+        { method: 'GET', path: `/parcels/${ID}` },
+        { method: 'GET', path: `/parcels/${ID}/eligible-technicians` },
+        { method: 'POST', path: `/parcels/${ID}/assignment/accept` },
+        { method: 'POST', path: `/parcels/${ID}/assignment/reject` },
+        { method: 'GET', path: `/parcels/${ID}/quote` },
+        { method: 'GET', path: `/parcels/${ID}/inspection` },
+        { method: 'GET', path: `/parcels/${ID}/repair` },
+        { method: 'GET', path: `/parcels/${ID}/damage-images` },
+        { method: 'DELETE', path: `/parcels/${ID}` },
+        { method: 'GET', path: '/admin/parcels' },
+    ];
+    for (const r of oldRoutes) {
+        await makeRequest(
+            { hostname: 'localhost', port: 3000, path: r.path, method: r.method },
+            404,
+            `CP4 old route unmounted: ${r.method} ${r.path} -> 404`
+        );
+    }
+
+    // Canonical routes must be MOUNTED and reach their real handlers. The
+    // auth-gated ones answer 401 without a token (the gate ran = route exists);
+    // the public technician-application intake answers 400 (validation ran =
+    // route exists, controller reached).
+    const canonicalAuthGated = [
+        { method: 'GET', path: '/technicians' },
+        { method: 'GET', path: '/technicians/delivery-per-day' },
+        { method: 'PATCH', path: `/technicians/${ID}` },
+        { method: 'GET', path: '/repair-requests' },
+        { method: 'POST', path: '/repair-requests' },
+        { method: 'GET', path: '/repair-requests/technician' },
+        { method: 'GET', path: `/repair-requests/${ID}` },
+        { method: 'GET', path: '/repair-requests/delivery-status/stats' },
+        { method: 'GET', path: `/repair-requests/${ID}/eligible-technicians` },
+        { method: 'POST', path: `/repair-requests/${ID}/assignment/accept` },
+        { method: 'POST', path: `/repair-requests/${ID}/assignment/reject` },
+        { method: 'GET', path: `/repair-requests/${ID}/quote` },
+        { method: 'GET', path: `/repair-requests/${ID}/inspection` },
+        { method: 'GET', path: `/repair-requests/${ID}/repair` },
+        { method: 'GET', path: `/repair-requests/${ID}/damage-images` },
+        { method: 'PATCH', path: `/repair-requests/${ID}/cancel` },
+        { method: 'DELETE', path: `/repair-requests/${ID}` },
+        { method: 'GET', path: '/admin/repair-requests' },
+    ];
+    for (const r of canonicalAuthGated) {
+        await makeRequest(
+            { hostname: 'localhost', port: 3000, path: r.path, method: r.method },
+            401,
+            `CP4 canonical route mounted (auth-gated): ${r.method} ${r.path} -> 401`
+        );
+    }
+    // Public technician-application intake: mounted, reaches validation (400),
+    // never 404.
+    await makeRequest(
+        {
+            hostname: 'localhost', port: 3000, path: '/technicians', method: 'POST',
+            headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+        },
+        400,
+        'CP4 canonical route mounted (public): POST /technicians -> 400 (validation reached)'
+    );
+    console.log('');
 }
 
 // ---------------------------------------------------------------------------
@@ -13225,10 +13313,10 @@ async function testCP3IdentityFieldContract() {
 // ---------------------------------------------------------------------------
 // Damage Projection Hardening (Phase 8.3 / BL-032)
 //
-// Proves the general parcel reads (GET /parcels/:id, GET /parcels, GET
-// /parcels/rider) never leak raw damage-image Storage metadata (storageKey,
+// Proves the general parcel reads (GET /repair-requests/:id, GET /repair-requests, GET
+// /repair-requests/technician) never leak raw damage-image Storage metadata (storageKey,
 // url, mimeType) - only a safe { description, imageCount } aggregate. Images
-// stay available exclusively through the dedicated GET /parcels/:id/damage-images
+// stay available exclusively through the dedicated GET /repair-requests/:id/damage-images
 // endpoint (unchanged). Self-contained via direct inserts.
 // ---------------------------------------------------------------------------
 async function testDamageProjectionHardening() {
@@ -13306,23 +13394,23 @@ async function testDamageProjectionHardening() {
 
         // --- getRepairRequestById (owner / technician / admin) ---
         let res = await getById(customerEmail);
-        logTest('3. Customer GET /parcels/:id exposes no raw damage image metadata', res.statusCode === 200 && damageIsSafe(res.body.damage) && res.body.damage.imageCount === 2);
+        logTest('3. Customer GET /repair-requests/:id exposes no raw damage image metadata', res.statusCode === 200 && damageIsSafe(res.body.damage) && res.body.damage.imageCount === 2);
         res = await getById(techEmail);
-        logTest('4. Technician GET /parcels/:id exposes no raw damage image metadata', res.statusCode === 200 && damageIsSafe(res.body.damage));
+        logTest('4. Technician GET /repair-requests/:id exposes no raw damage image metadata', res.statusCode === 200 && damageIsSafe(res.body.damage));
         res = await getById(adminEmail);
-        logTest('5. Admin GET /parcels/:id exposes no raw damage image metadata', res.statusCode === 200 && damageIsSafe(res.body.damage));
+        logTest('5. Admin GET /repair-requests/:id exposes no raw damage image metadata', res.statusCode === 200 && damageIsSafe(res.body.damage));
         res = await getById(otherEmail);
         logTest('6. Unauthorized caller still gets 403 (behavior preserved)', res.statusCode === 403);
 
         // --- getAllRepairRequests (customer list) ---
         res = await getAll(customerEmail);
         const mine = (res.body || []).find((p) => p.trackingId === `TEST-DP-${runId}`);
-        logTest('7. Customer GET /parcels list exposes no raw damage image metadata', res.statusCode === 200 && !!mine && damageIsSafe(mine.damage));
+        logTest('7. Customer GET /repair-requests list exposes no raw damage image metadata', res.statusCode === 200 && !!mine && damageIsSafe(mine.damage));
 
         // --- getTechnicianRepairRequests (technician list) ---
         res = await getRider(techEmail);
         const job = (res.body || []).find((p) => p.trackingId === `TEST-DP-${runId}`);
-        logTest('8. Technician GET /parcels/rider list exposes no raw damage image metadata', res.statusCode === 200 && !!job && damageIsSafe(job.damage));
+        logTest('8. Technician GET /repair-requests/technician list exposes no raw damage image metadata', res.statusCode === 200 && !!job && damageIsSafe(job.damage));
 
         // --- overall: no storageKey/url anywhere in any general read body ---
         logTest('9. No storageKey/url string leaks in any general read body', !leaksSecret(await getById(customerEmail).then((r) => r.body)) && !JSON.stringify(mine).includes('storageKey') && !JSON.stringify(job).includes('repair-requests/'));
@@ -13352,8 +13440,8 @@ async function testDamageProjectionHardening() {
 // ---------------------------------------------------------------------------
 // Inspection / Quote / Repair List Projection Tightening (Phase 8.5)
 //
-// The Phase 8.4 audit flagged that general LIST reads (GET /parcels, GET
-// /parcels/rider) still carried the full inspection/quote/repair sub-documents -
+// The Phase 8.4 audit flagged that general LIST reads (GET /repair-requests, GET
+// /repair-requests/technician) still carried the full inspection/quote/repair sub-documents -
 // including inspection.internalNotes (customer-private), the submitting
 // technician's identity, the quote's full pricing breakdown + decision reason,
 // repair completion-evidence storage metadata, and the payment paymentIntentId.
@@ -13470,12 +13558,12 @@ async function testInspectionListProjectionTightening() {
         // --- 1. Customer list: no inspection.internalNotes / detail sub-docs ---
         let res = await getAll(customerEmail);
         const custItem = (res.body || []).find((p) => p.trackingId === `TEST-ILP-${runId}`);
-        logTest('1. Customer GET /parcels list carries no inspection sub-document or internalNotes', res.statusCode === 200 && !!custItem && !('inspection' in custItem) && !JSON.stringify(custItem).includes('INTERNAL-NOTES-SECRET'));
+        logTest('1. Customer GET /repair-requests list carries no inspection sub-document or internalNotes', res.statusCode === 200 && !!custItem && !('inspection' in custItem) && !JSON.stringify(custItem).includes('INTERNAL-NOTES-SECRET'));
 
         // --- 2. Technician list: no internalNotes (dedicated endpoint is the only path) ---
         res = await getRider(techEmail);
         const techItem = (res.body || []).find((p) => p.trackingId === `TEST-ILP-${runId}`);
-        logTest('2. Technician GET /parcels/rider list carries no internalNotes/inspection sub-document', res.statusCode === 200 && !!techItem && !('inspection' in techItem) && !JSON.stringify(techItem).includes('INTERNAL-NOTES-SECRET'));
+        logTest('2. Technician GET /repair-requests/technician list carries no internalNotes/inspection sub-document', res.statusCode === 200 && !!techItem && !('inspection' in techItem) && !JSON.stringify(techItem).includes('INTERNAL-NOTES-SECRET'));
 
         // --- 3. No storage/payment/quote internals leak on any general list item ---
         logTest('3a. Customer list item leaks no storage/payment/quote/diagnosis internals', itemSafe(custItem));
@@ -13498,10 +13586,10 @@ async function testInspectionListProjectionTightening() {
 
         // --- 6. Dedicated single-request read: sub-documents stripped, contract intact ---
         res = await getById(customerEmail);
-        logTest('6a. GET /parcels/:id (owner) strips inspection/quote/repair/payment sub-documents', res.statusCode === 200 && !('inspection' in res.body) && !('quote' in res.body) && !('repair' in res.body) && !('payment' in res.body) && !leaks(res.body));
+        logTest('6a. GET /repair-requests/:id (owner) strips inspection/quote/repair/payment sub-documents', res.statusCode === 200 && !('inspection' in res.body) && !('quote' in res.body) && !('repair' in res.body) && !('payment' in res.body) && !leaks(res.body));
         const otherRes = fakeRes();
         await parcelController.getRepairRequestById({ params: { id }, decoded_email: 'ilp-nobody@test.local' }, otherRes);
-        logTest('6b. GET /parcels/:id authorization unchanged (unauthorized caller still 403)', otherRes.statusCode === 403);
+        logTest('6b. GET /repair-requests/:id authorization unchanged (unauthorized caller still 403)', otherRes.statusCode === 403);
         // The stored document itself is never mutated - dedicated endpoints still read the full data.
         const stored = await collections.repairRequests.findOne({ _id: ins.insertedId });
         logTest('6c. Projection does not mutate the stored document (dedicated endpoints unaffected)', stored.inspection.internalNotes === 'INTERNAL-NOTES-SECRET do not show customer' && stored.quote.laborAmount === 2000 && stored.payment.paymentIntentId === 'pi_SECRET_paymentintent');
@@ -13516,7 +13604,7 @@ async function testInspectionListProjectionTightening() {
         // is paginated to ADMIN_LIST_DEFAULT_LIMIT, newest-first).
         res = await getAdmin(adminEmail, { search: `TEST-ILP-${runId}` });
         const adminItem = ((res.body && res.body.data) || []).find((p) => p.trackingId === `TEST-ILP-${runId}`);
-        logTest('8. Admin /admin/parcels list exposes only allow-listed fields (no inspection/quote/repair/payment internals)', res.statusCode === 200 && !!adminItem && !('inspection' in adminItem) && !('quote' in adminItem) && !('repair' in adminItem) && !('payment' in adminItem) && !leaks(adminItem));
+        logTest('8. Admin /admin/repair-requests list exposes only allow-listed fields (no inspection/quote/repair/payment internals)', res.statusCode === 200 && !!adminItem && !('inspection' in adminItem) && !('quote' in adminItem) && !('repair' in adminItem) && !('payment' in adminItem) && !leaks(adminItem));
 
         // --- pure helper: existence markers + summary, no mutation ---
         const pure = projectSafeListParcel(richDoc);
@@ -13980,7 +14068,7 @@ async function testTechnicianAssignmentDecisions() {
         await reject(pPriv.id, techEmail, 'Sensitive internal rejection reason not for customers.');
         // general GET must not expose assignmentHistory to anyone
         res = await getParcel(pPriv.id, customerEmail);
-        logTest('24. General GET /parcels/:id never exposes assignmentHistory', res.statusCode === 200 && res.body.assignmentHistory === undefined);
+        logTest('24. General GET /repair-requests/:id never exposes assignmentHistory', res.statusCode === 200 && res.body.assignmentHistory === undefined);
         // getAssignment: customer projection is neutral (no reason/history)
         res = await getAssignment(pPriv.id, customerEmail);
         logTest('25. Customer assignment projection exposes no rejection reason or history', res.statusCode === 200 && res.body.assignmentHistory === undefined && !JSON.stringify(res.body).includes('Sensitive internal rejection reason'));

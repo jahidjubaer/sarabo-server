@@ -7,7 +7,7 @@ const VALID_STATUSES = ['driver_assigned', 'rider_arriving', 'parcel_picked_up',
 // Technician inspection completion (Phase 6.4 Unit 4). Deliberately NOT part
 // of VALID_STATUSES: that list is the set of client-settable transition
 // targets updateRepairRequestStatus accepts, and inspection_completed must never be
-// reachable through the generic PATCH /parcels/:id/status path - it is set
+// reachable through the generic PATCH /repair-requests/:id/status path - it is set
 // only by the dedicated, atomic inspection-submission endpoint (see
 // controllers/inspectionController.js). It is, however, an ACTIVE status
 // below: a technician who has completed an inspection is still holding the
@@ -17,7 +17,7 @@ const INSPECTION_COMPLETED = 'inspection_completed';
 
 // Quote workflow (Phase 6.4 Unit 5). Same design as INSPECTION_COMPLETED:
 // deliberately NOT part of VALID_STATUSES (so the generic PATCH
-// /parcels/:id/status can neither reach nor leave them - they are written
+// /repair-requests/:id/status can neither reach nor leave them - they are written
 // only by the dedicated, atomic quote endpoints, see
 // controllers/quoteController.js), but all three ARE active below: a repair
 // request with a submitted/approved/rejected quote is still held by its
@@ -30,7 +30,7 @@ const QUOTE_REJECTED = 'quote_rejected';
 
 // Approved-quote payment completed (Phase 6.4 Unit 6). Same design as the
 // statuses above: deliberately NOT in VALID_STATUSES (the generic PATCH
-// /parcels/:id/status can never reach or leave it), reached only through the
+// /repair-requests/:id/status can never reach or leave it), reached only through the
 // trusted Stripe payment-completion pipeline (services/paymentProcessor.js),
 // but IS active below - a paid-but-not-yet-repaired request still occupies its
 // technician, who stays busy until the repair workflow runs.
@@ -38,7 +38,7 @@ const PAYMENT_COMPLETED = 'payment_completed';
 
 // Repair progress + completion (Phase 6.4 Unit 7). Both are set ONLY by the
 // dedicated repair endpoints (controllers/repairController.js), never through
-// the generic PATCH /parcels/:id/status path (neither is in VALID_STATUSES).
+// the generic PATCH /repair-requests/:id/status path (neither is in VALID_STATUSES).
 // repair_in_progress IS active - the technician is actively repairing and
 // stays busy. repair_completed is the TERMINAL state for an active assignment:
 // the repair is done and the technician has been released, so it is
@@ -49,7 +49,7 @@ const REPAIR_COMPLETED = 'repair_completed';
 
 // Technician assignment decision (Phase 8.2). A V2 request an admin has
 // offered to a technician who has NOT yet accepted. Deliberately NOT part of
-// VALID_STATUSES: the generic PATCH /parcels/:id/status can neither set it nor
+// VALID_STATUSES: the generic PATCH /repair-requests/:id/status can neither set it nor
 // leave it (assignment_pending has no ALLOWED_TRANSITIONS entry below, and
 // driver_assigned has no inbound generic transition), so the ONLY authorities
 // for the assignment_pending -> driver_assigned (accept) and assignment_pending

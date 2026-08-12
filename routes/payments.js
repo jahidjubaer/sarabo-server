@@ -16,8 +16,8 @@ function paymentRoutes(app, controllers) {
     // ignored - the client never supplies an amount, currency, or status.
     // Eligibility is a read (not gated); creating the checkout is a
     // customer-exclusive mutation and is gated (Phase 8.1).
-    app.get('/parcels/:id/payment-eligibility', verifyFBToken, ensureDatabaseReady, (req, res) => paymentController.checkV2PaymentEligibility(req, res));
-    app.post('/parcels/:id/checkout-session', verifyFBToken, ensureDatabaseReady, verifyEmailVerified, (req, res) => paymentController.createV2CheckoutSession(req, res));
+    app.get('/repair-requests/:id/payment-eligibility', verifyFBToken, ensureDatabaseReady, (req, res) => paymentController.checkV2PaymentEligibility(req, res));
+    app.post('/repair-requests/:id/checkout-session', verifyFBToken, ensureDatabaseReady, verifyEmailVerified, (req, res) => paymentController.createV2CheckoutSession(req, res));
 
     // Handle payment success - requires auth; the caller's sessionId is
     // verified server-side against Stripe and MongoDB, never trusted alone.

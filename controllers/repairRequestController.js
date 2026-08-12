@@ -128,7 +128,7 @@ class RepairRequestController {
             // through this raw-parcel endpoint - it carries technician
             // internalNotes and submitter identity that must never reach the
             // customer here. All inspection reads go through the dedicated,
-            // role-projected GET /parcels/:id/inspection (see
+            // role-projected GET /repair-requests/:id/inspection (see
             // controllers/inspectionController.js), exactly as damage images
             // are served only through their own authorized endpoint. Only the
             // inspection field is stripped; deliveryStatus (which may be
@@ -142,11 +142,11 @@ class RepairRequestController {
             // preserved.
             // assignmentHistory (Phase 8.2) carries rider/admin identities and
             // rejection reasons - never served here. It is read only through the
-            // dedicated, role-projected GET /parcels/:id/assignment. Current
+            // dedicated, role-projected GET /repair-requests/:id/assignment. Current
             // active-assignment fields (technicianName/technicianEmail) remain as before.
             // Phase 8.3 / BL-032: damage.images (raw storageKey/url/mimeType) is
             // reduced to a safe { description, imageCount } aggregate here -
-            // images are served only through GET /parcels/:id/damage-images.
+            // images are served only through GET /repair-requests/:id/damage-images.
             // Phase 8.5: the payment sub-document (Stripe paymentIntentId +
             // provider) is a payment-provider internal never read by any client -
             // the UI reads only the top-level paymentStatus - so it is stripped
@@ -169,7 +169,7 @@ class RepairRequestController {
 
     // Admin-only complete request-management view: paginated, searchable,
     // filterable, and explicitly projected (see Parcel.findPaginated) so it
-    // never depends on the generic GET /parcels contract that MyRequests and
+    // never depends on the generic GET /repair-requests contract that MyRequests and
     // AssignTechnicians already rely on. Every query parameter is validated
     // against a fixed allow-list before being used to build the MongoDB
     // filter - nothing from the client is ever passed through as a raw

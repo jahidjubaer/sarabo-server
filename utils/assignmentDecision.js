@@ -36,7 +36,7 @@ function buildPendingAssignmentEntry({ assignmentId, technicianId, technicianEma
     };
 }
 
-// Role-aware projection of the assignment state for GET /parcels/:id/assignment.
+// Role-aware projection of the assignment state for GET /repair-requests/:id/assignment.
 // - admin: current assignment + full history (with rejection reasons + identity)
 // - assigned technician: current assignment + their own decision state
 // - customer/other: ONLY a neutral current-assignment view (display name if

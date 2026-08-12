@@ -8,7 +8,7 @@ const { validateTechnicianExpertise, normalizeTechnicianExpertise } = require('.
 
 // Explicit allow-list for the (unauthenticated) technician-application body
 // (Phase 8.7A mass-assignment protection). ONLY these applicant-supplied
-// profile fields are ever persisted from POST /riders. Operational and
+// profile fields are ever persisted from POST /technicians. Operational and
 // authoritative fields are never taken from the client: `status` is forced to
 // 'pending' by the Rider model, `workStatus` is initialized server-side only on
 // approval, `role` lives on the users collection and changes only through the
