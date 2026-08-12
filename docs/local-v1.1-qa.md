@@ -57,7 +57,7 @@ account and the seeded role row so the app resolves the role after login.
 
 ## 3. Deterministic QA Seed
 
-The seed lives at `scripts/seed-qa-parcels.js` (server) and is exposed as an npm
+The seed lives at `scripts/seed-qa-repair-requests.js` (server) and is exposed as an npm
 script. It is **development-only, deterministic, idempotent, and strictly
 namespaced** — every document it touches has a `QA-` tracking prefix or a
 `@sarabo.local` email, so it never affects real data.
@@ -66,16 +66,16 @@ namespaced** — every document it touches has a `QA-` tracking prefix or a
 # From sarabo-server/
 
 # Dry run (default) — prints what it WOULD do, writes nothing:
-npm run seed:qa-parcels
+npm run seed:qa-repair-requests
 
 # Write / refresh the QA users + parcels (safe to re-run; idempotent upserts):
-npm run seed:qa-parcels -- --confirm-seed
+npm run seed:qa-repair-requests -- --confirm-seed
 
 # Delete the QA namespace, then reseed fresh (a clean slate for a new pass):
-npm run seed:qa-parcels -- --reset --confirm-seed
+npm run seed:qa-repair-requests -- --reset --confirm-seed
 
 # Preview the namespaced cleanup without deleting:
-npm run seed:qa-parcels -- --reset
+npm run seed:qa-repair-requests -- --reset
 ```
 
 **Safety controls** (identical belt-and-suspenders design to

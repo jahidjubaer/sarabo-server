@@ -23,7 +23,7 @@ const PAYMENT_CURRENCY = 'usd';
 // Taka - the currency the quote itself is persisted in (utils/quote.js stores
 // QUOTE_CURRENCY = 'BDT'). This is deliberately a SEPARATE constant from the
 // legacy PAYMENT_CURRENCY above, never a global switch: legacy requests keep
-// paying in USD from parcel.cost, V2 requests pay in BDT from
+// paying in USD from repair request.cost, V2 requests pay in BDT from
 // quote.totalAmount, and the two paths never share a currency. BDT is a
 // Stripe-supported presentment currency for this account and, unlike the
 // lowest legacy cost tier, an approved repair quote is always well above

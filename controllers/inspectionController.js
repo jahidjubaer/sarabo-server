@@ -3,7 +3,7 @@ const { client } = require('../config/database');
 const { logTracking } = require('../middleware/logging');
 const { createNotificationService } = require('../services/notificationService');
 const { isV2RepairRequest } = require('../utils/repairRequestSchema');
-const { INSPECTION_COMPLETED } = require('../utils/parcelStatus');
+const { INSPECTION_COMPLETED } = require('../utils/repairRequestStatus');
 const {
     validateInspectionInput,
     buildInspectionDocument,
@@ -33,16 +33,16 @@ class InspectionController {
         this.notifications = createNotificationService(models);
     }
 
-    // Resolves the caller's relationship to a (possibly null) parcel. Role is
+    // Resolves the caller's relationship to a (possibly null) repair request. Role is
     // the DB-authoritative role, never a client claim.
-    async resolveAccess(parcel, email) {
+    async resolveAccess(repairRequest, email) {
         const currentUser = await this.User.findByEmail(email);
         const role = currentUser ? currentUser.role : 'user';
         return {
             role,
-            isOwner: !!parcel && parcel.senderEmail === email,
+            isOwner: !!repairRequest && repairRequest.senderEmail === email,
             isAdmin: role === 'admin',
-            isAssignedByEmail: !!parcel && parcel.technicianEmail === email
+            isAssignedByEmail: !!repairRequest && repairRequest.technicianEmail === email
         };
     }
 
@@ -54,13 +54,13 @@ class InspectionController {
             }
 
             const email = req.decoded_email;
-            const parcel = await this.RepairRequest.findById(id);
-            const access = await this.resolveAccess(parcel, email);
-            const canSee = parcel && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
+            const repairRequest = await this.RepairRequest.findById(id);
+            const access = await this.resolveAccess(repairRequest, email);
+            const canSee = repairRequest && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
 
             // Existence-oracle boundary: nonexistent, or a caller with no
             // relationship to the request, both look identical.
-            if (!parcel || !canSee) {
+            if (!repairRequest || !canSee) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
 
@@ -70,15 +70,15 @@ class InspectionController {
                 return res.status(403).send({ message: 'only the assigned technician can submit an inspection', code: 'TECHNICIAN_ROLE_REQUIRED' });
             }
 
-            if (!isV2RepairRequest(parcel)) {
+            if (!isV2RepairRequest(repairRequest)) {
                 return res.status(400).send({ message: 'inspection is only available for newer (v2) repair requests', code: 'LEGACY_REQUEST_NOT_SUPPORTED' });
             }
 
-            if (parcel.inspection && parcel.inspection.status === 'submitted') {
+            if (repairRequest.inspection && repairRequest.inspection.status === 'submitted') {
                 return res.status(409).send({ message: 'an inspection has already been submitted for this request', code: 'INSPECTION_ALREADY_SUBMITTED' });
             }
 
-            if (parcel.deliveryStatus !== 'parcel_picked_up') {
+            if (repairRequest.deliveryStatus !== 'parcel_picked_up') {
                 return res.status(409).send({ message: 'inspection can only be submitted after the technician has picked up the device', code: 'INSPECTION_NOT_ALLOWED' });
             }
 
@@ -88,7 +88,7 @@ class InspectionController {
             }
 
             // The owner's real role at notification time (never hardcoded).
-            const ownerRole = (await this.User.findRoleByEmail(parcel.senderEmail)) || 'user';
+            const ownerRole = (await this.User.findRoleByEmail(repairRequest.senderEmail)) || 'user';
 
             const mongoSession = client.startSession();
             let conflictCode = null;
@@ -111,7 +111,7 @@ class InspectionController {
 
                     const now = new Date();
                     inspectionDoc = buildInspectionDocument(validation.normalized, {
-                        submittedByRiderId: parcel.technicianId ? new ObjectId(parcel.technicianId) : null,
+                        submittedByTechnicianId: repairRequest.technicianId ? new ObjectId(repairRequest.technicianId) : null,
                         submittedByEmail: email,
                         now
                     });
@@ -123,11 +123,11 @@ class InspectionController {
                     // makes this match zero documents.
                     const updateResult = await this.collections.repairRequests.updateOne(
                         {
-                            _id: parcel._id,
+                            _id: repairRequest._id,
                             schemaVersion: 2,
                             deliveryStatus: 'parcel_picked_up',
                             technicianEmail: email,
-                            technicianId: parcel.technicianId,
+                            technicianId: repairRequest.technicianId,
                             $or: [
                                 { 'inspection.status': { $exists: false } },
                                 { 'inspection.status': { $ne: 'submitted' } }
@@ -140,10 +140,10 @@ class InspectionController {
                     if (updateResult.matchedCount === 0) {
                         // Derive the most precise, still-safe reason from a
                         // fresh in-transaction read.
-                        const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
+                        const fresh = await this.collections.repairRequests.findOne({ _id: repairRequest._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
                         else if (fresh.inspection && fresh.inspection.status === 'submitted') conflictCode = 'INSPECTION_ALREADY_SUBMITTED';
-                        else if (fresh.technicianEmail !== email || fresh.technicianId !== parcel.technicianId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
+                        else if (fresh.technicianEmail !== email || fresh.technicianId !== repairRequest.technicianId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
                         else conflictCode = 'INSPECTION_NOT_ALLOWED';
                         throw new Error('inspection submission guard failed');
                     }
@@ -152,7 +152,7 @@ class InspectionController {
                     // rolled back with everything else on any failure, and its
                     // free-text detail is only the status words, never
                     // diagnosis/notes/estimate data.
-                    await logTracking(this.collections.trackingEvents, parcel.trackingId, INSPECTION_COMPLETED, mongoSession);
+                    await logTracking(this.collections.trackingEvents, repairRequest.trackingId, INSPECTION_COMPLETED, mongoSession);
 
                     // Customer notification, transactionally coupled and
                     // deduplicated by the unique deduplicationKey index. Its
@@ -160,12 +160,12 @@ class InspectionController {
                     // estimate amounts (see utils/notificationEvents.js).
                     await this.notifications.createNotification({
                         session: mongoSession,
-                        recipientEmail: parcel.senderEmail,
+                        recipientEmail: repairRequest.senderEmail,
                         recipientRole: ownerRole,
                         type: 'inspection_completed',
-                        entityType: 'parcel',
-                        entityId: parcel._id.toString(),
-                        metadata: { trackingId: parcel.trackingId },
+                        entityType: 'repair_request',
+                        entityId: repairRequest._id.toString(),
+                        metadata: { trackingId: repairRequest.trackingId },
                         // Deliberately null - the inspection notification must
                         // carry no technician identity at all (Phase N), and
                         // this event's copy/dedup/actionUrl never use an actor.
@@ -218,23 +218,23 @@ class InspectionController {
             }
 
             const email = req.decoded_email;
-            const parcel = await this.RepairRequest.findById(id);
-            const access = await this.resolveAccess(parcel, email);
-            const canRead = parcel && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
+            const repairRequest = await this.RepairRequest.findById(id);
+            const access = await this.resolveAccess(repairRequest, email);
+            const canRead = repairRequest && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
 
             // Existence-oracle boundary, identical to submit.
-            if (!parcel || !canRead) {
+            if (!repairRequest || !canRead) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
 
-            if (!isV2RepairRequest(parcel)) {
+            if (!isV2RepairRequest(repairRequest)) {
                 return res.status(400).send({ message: 'inspection is only available for newer (v2) repair requests', code: 'LEGACY_REQUEST_NOT_SUPPORTED' });
             }
 
             // internalNotes are visible only to admins and the assigned
             // technician - never to the customer/owner.
             const includeInternalNotes = access.isAdmin || (access.role === 'rider' && access.isAssignedByEmail);
-            const view = buildInspectionView(parcel.inspection, { includeInternalNotes });
+            const view = buildInspectionView(repairRequest.inspection, { includeInternalNotes });
             return res.send({ inspection: view });
         } catch (error) {
             return res.status(500).send({ message: 'Error fetching inspection', code: 'INTERNAL_ERROR' });

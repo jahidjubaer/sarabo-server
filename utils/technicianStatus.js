@@ -24,9 +24,9 @@ const ROLE_FOR_STATUS = {
     rejected: 'user'
 };
 
-function isValidRiderTransition(currentStatus, nextStatus) {
+function isValidTechnicianTransition(currentStatus, nextStatus) {
     const allowedNext = ALLOWED_TRANSITIONS[currentStatus];
     return Array.isArray(allowedNext) && allowedNext.includes(nextStatus);
 }
 
-module.exports = { RECOGNIZED_STATUSES, REQUESTABLE_STATUSES, ROLE_FOR_STATUS, isValidRiderTransition };
+module.exports = { RECOGNIZED_STATUSES, REQUESTABLE_STATUSES, ROLE_FOR_STATUS, isValidTechnicianTransition };

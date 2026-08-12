@@ -1,8 +1,8 @@
-// Safe projection helpers for general parcel reads (Phase 8.3 / BL-032).
+// Safe projection helpers for general repair request reads (Phase 8.3 / BL-032).
 //
 // The raw `damage.images[]` array carries internal Storage metadata -
 // storageKey, the (short-lived) url, mimeType, size, and uploadedByRole - which
-// must never leave a general parcel read (GET /repair-requests, GET /repair-requests/:id, the
+// must never leave a general repair request read (GET /repair-requests, GET /repair-requests/:id, the
 // technician assigned-jobs list). Damage images are read ONLY through the
 // dedicated, authorized GET /repair-requests/:id/damage-images endpoint, which returns
 // a freshly-signed, role-projected view. This helper replaces the raw array
@@ -10,15 +10,15 @@
 // the problem description and a count without ever receiving a storageKey.
 //
 // Pure: does not mutate its input.
-function stripDamageImages(parcel) {
-    if (!parcel || !parcel.damage || typeof parcel.damage !== 'object') {
-        return parcel;
+function stripDamageImages(repairRequest) {
+    if (!repairRequest || !repairRequest.damage || typeof repairRequest.damage !== 'object') {
+        return repairRequest;
     }
-    const images = Array.isArray(parcel.damage.images) ? parcel.damage.images : [];
+    const images = Array.isArray(repairRequest.damage.images) ? repairRequest.damage.images : [];
     return {
-        ...parcel,
+        ...repairRequest,
         damage: {
-            description: parcel.damage.description ?? null,
+            description: repairRequest.damage.description ?? null,
             imageCount: images.length,
         },
     };
@@ -40,7 +40,7 @@ function summarizeQuoteForList(quote) {
     };
 }
 
-// Safe projection for a GENERAL parcel LIST item (GET /repair-requests, GET
+// Safe projection for a GENERAL repair request LIST item (GET /repair-requests, GET
 // /repair-requests/technician). Beyond the BL-032 damage-image strip and the Phase 8.2
 // assignmentHistory strip, this removes the detail sub-documents that carried
 // technician-only and provider-internal data onto general lists (Phase 8.4
@@ -50,7 +50,7 @@ function summarizeQuoteForList(quote) {
 //     technician's email/id, the diagnosis, and the estimate. Read only through
 //     the role-projected GET /repair-requests/:id/inspection.
 //   - repair:     completion evidence storage metadata (imageId/mimeType/size),
-//     progress-update ids, and rider identifiers. Read only through
+//     progress-update ids, and technician identifiers. Read only through
 //     GET /repair-requests/:id/repair.
 //   - quote:      the full pricing breakdown, notes, submitter identity, and
 //     decision reason - reduced to the agreed-price summary above.
@@ -62,8 +62,8 @@ function summarizeQuoteForList(quote) {
 // heuristic keeps the same information it always relied on without receiving any
 // sub-document body. Active-assignment fields (technicianName/technicianEmail) and every
 // top-level status/cost field are untouched. Pure: does not mutate its input.
-function projectSafeListParcel(parcel) {
-    const safe = stripDamageImages(parcel);
+function projectSafeListRepairRequest(repairRequest) {
+    const safe = stripDamageImages(repairRequest);
     if (!safe || typeof safe !== 'object') {
         return safe;
     }
@@ -81,4 +81,4 @@ function projectSafeListParcel(parcel) {
     return projected;
 }
 
-module.exports = { stripDamageImages, projectSafeListParcel, summarizeQuoteForList };
+module.exports = { stripDamageImages, projectSafeListRepairRequest, summarizeQuoteForList };

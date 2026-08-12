@@ -108,7 +108,7 @@ class UserController {
     //   - promoting a user to 'rider' requires an existing, approved
     //     technician application for that exact email - this is the narrow
     //     BL-005 guard: a generic role edit must never produce
-    //     users.role = 'rider' with no corresponding riders document
+    //     users.role = 'rider' with no corresponding technicians document
     // Identity for the acting admin comes only from req.decoded_email (the
     // verified token) - never from the request body/query/params.
     async updateUserRole(req, res) {
@@ -218,14 +218,14 @@ class UserController {
 
                     if (normalizedRole === 'rider') {
                         const email = normalize(targetUser.email);
-                        const riderDoc = email
+                        const technicianDoc = email
                             ? await this.collections.technicians.findOne({ email }, { session: mongoSession })
                             : null;
-                        if (!riderDoc) {
+                        if (!technicianDoc) {
                             outcome = { httpStatus: 409, code: 'RIDER_RECORD_NOT_FOUND', message: 'no technician application exists for this user' };
                             return;
                         }
-                        if (riderDoc.status !== 'approved') {
+                        if (technicianDoc.status !== 'approved') {
                             outcome = { httpStatus: 409, code: 'RIDER_NOT_APPROVED', message: 'technician application for this user is not approved' };
                             return;
                         }

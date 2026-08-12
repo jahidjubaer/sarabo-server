@@ -30,23 +30,23 @@ class DamageUploadController {
     }
 
     // Shared entry guard for all three endpoints: validates the request id,
-    // resolves the parcel, enforces ownership, and rejects legacy requests.
+    // resolves the repair request, enforces ownership, and rejects legacy requests.
     // A non-owner and a genuinely missing request receive the identical
     // 404 REQUEST_NOT_FOUND response (Phase N existence-oracle policy) -
     // never a 403 that would confirm the request exists. Writes the
     // response and returns null when the caller should stop; returns the
-    // parcel otherwise.
-    async _loadOwnedV2Parcel(req, res, requestId) {
+    // repair request otherwise.
+    async _loadOwnedV2RepairRequest(req, res, requestId) {
         if (!ObjectId.isValid(requestId)) {
             res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             return null;
         }
-        const parcel = await this.RepairRequest.findById(requestId);
-        if (!parcel) {
+        const repairRequest = await this.RepairRequest.findById(requestId);
+        if (!repairRequest) {
             res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             return null;
         }
-        const ownerEmail = normalize(parcel.senderEmail);
+        const ownerEmail = normalize(repairRequest.senderEmail);
         const callerEmail = normalize(req.decoded_email);
         if (ownerEmail !== callerEmail) {
             res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
@@ -54,11 +54,11 @@ class DamageUploadController {
         }
         // Never inferred from field presence - schemaVersion is the single
         // source of truth (see utils/repairRequestSchema.js).
-        if (!isV2RepairRequest(parcel)) {
+        if (!isV2RepairRequest(repairRequest)) {
             res.status(409).send({ message: 'damage image upload is only available for schemaVersion 2 requests', code: 'LEGACY_REQUEST_NOT_SUPPORTED' });
             return null;
         }
-        return parcel;
+        return repairRequest;
     }
 
     _sendStorageError(res, error) {
@@ -83,14 +83,14 @@ class DamageUploadController {
     async createUploadSession(req, res) {
         try {
             const requestId = req.params.id;
-            const parcel = await this._loadOwnedV2Parcel(req, res, requestId);
-            if (!parcel) return;
+            const repairRequest = await this._loadOwnedV2RepairRequest(req, res, requestId);
+            if (!repairRequest) return;
 
-            if (!isDamageEvidenceEditable(parcel)) {
+            if (!isDamageEvidenceEditable(repairRequest)) {
                 return res.status(409).send({ message: 'damage evidence can no longer be modified for this request', code: 'DAMAGE_IMAGES_LOCKED' });
             }
 
-            const currentCount = this.RepairRequest.countDamageImages(parcel);
+            const currentCount = this.RepairRequest.countDamageImages(repairRequest);
             if (currentCount >= MAX_DAMAGE_IMAGES) {
                 return res.status(409).send({ message: 'this request already has the maximum number of damage images', code: 'DAMAGE_IMAGE_LIMIT_REACHED' });
             }
@@ -167,8 +167,8 @@ class DamageUploadController {
     async finalizeUpload(req, res) {
         try {
             const requestId = req.params.id;
-            const parcel = await this._loadOwnedV2Parcel(req, res, requestId);
-            if (!parcel) return;
+            const repairRequest = await this._loadOwnedV2RepairRequest(req, res, requestId);
+            if (!repairRequest) return;
 
             const uploadSessionId = req.body && req.body.uploadSessionId;
             if (typeof uploadSessionId !== 'string' || uploadSessionId.trim().length === 0) {
@@ -185,12 +185,12 @@ class DamageUploadController {
             }
 
             if (uploadSession.status === 'finalized') {
-                const existingImage = this.RepairRequest.findDamageImage(parcel, uploadSession.storageKey);
+                const existingImage = this.RepairRequest.findDamageImage(repairRequest, uploadSession.storageKey);
                 if (existingImage) {
                     return res.status(200).send({ message: 'already finalized', image: this._serializeImage(uploadSession._id, existingImage) });
                 }
                 // Corrupted/unexpected state (finalized session, no
-                // matching parcel entry) - fail safely rather than
+                // matching repair request entry) - fail safely rather than
                 // silently succeed with fabricated data.
                 return res.status(409).send({ message: 'upload session was already finalized', code: 'UPLOAD_SESSION_ALREADY_FINALIZED' });
             }
@@ -203,10 +203,10 @@ class DamageUploadController {
                 return res.status(409).send({ message: 'upload session has expired', code: 'UPLOAD_SESSION_EXPIRED' });
             }
 
-            // Re-read fresh: the parcel's editable state may have changed
+            // Re-read fresh: the repair request's editable state may have changed
             // between session creation and this call (e.g. a technician was
             // assigned in the meantime).
-            if (!isDamageEvidenceEditable(parcel)) {
+            if (!isDamageEvidenceEditable(repairRequest)) {
                 return res.status(409).send({ message: 'damage evidence can no longer be modified for this request', code: 'DAMAGE_IMAGES_LOCKED' });
             }
 
@@ -247,12 +247,12 @@ class DamageUploadController {
                         requestId: requestId, storageKey: uploadSession.storageKey, image: imageEntry, session: mongoSession
                     });
                     if (attachResult.matchedCount === 0) {
-                        const freshParcel = await this.collections.repairRequests.findOne({ _id: new ObjectId(requestId) }, { session: mongoSession });
-                        if (!freshParcel) {
+                        const freshRepairRequest = await this.collections.repairRequests.findOne({ _id: new ObjectId(requestId) }, { session: mongoSession });
+                        if (!freshRepairRequest) {
                             outcome = { code: 'REQUEST_NOT_FOUND', httpStatus: 404 };
                             return;
                         }
-                        const existing = this.RepairRequest.findDamageImage(freshParcel, uploadSession.storageKey);
+                        const existing = this.RepairRequest.findDamageImage(freshRepairRequest, uploadSession.storageKey);
                         outcome = existing
                             ? { code: 'DAMAGE_IMAGE_ALREADY_ATTACHED', httpStatus: 409 }
                             : { code: 'DAMAGE_IMAGE_LIMIT_REACHED', httpStatus: 409 };
@@ -266,7 +266,7 @@ class DamageUploadController {
                     if (finalizeResult.matchedCount === 0) {
                         // Session state changed between the pre-transaction
                         // read and here (concurrent finalize, or it just
-                        // expired) - abort so the parcel push above is
+                        // expired) - abort so the repair request push above is
                         // rolled back too. Nothing partial survives.
                         throw Object.assign(new Error('upload session changed during finalization'), { code: 'UPLOAD_SESSION_CONFLICT', httpStatus: 409 });
                     }
@@ -295,8 +295,8 @@ class DamageUploadController {
     async removeImage(req, res) {
         try {
             const requestId = req.params.id;
-            const parcel = await this._loadOwnedV2Parcel(req, res, requestId);
-            if (!parcel) return;
+            const repairRequest = await this._loadOwnedV2RepairRequest(req, res, requestId);
+            if (!repairRequest) return;
 
             const imageId = req.params.imageId;
             if (typeof imageId !== 'string' || imageId.trim().length === 0) {
@@ -309,11 +309,11 @@ class DamageUploadController {
                 return res.status(404).send({ message: 'damage image not found', code: 'DAMAGE_IMAGE_NOT_FOUND' });
             }
 
-            if (!isDamageEvidenceEditable(parcel)) {
+            if (!isDamageEvidenceEditable(repairRequest)) {
                 return res.status(409).send({ message: 'damage evidence can no longer be modified for this request', code: 'DAMAGE_IMAGES_LOCKED' });
             }
 
-            const existingImage = this.RepairRequest.findDamageImage(parcel, uploadSession.storageKey);
+            const existingImage = this.RepairRequest.findDamageImage(repairRequest, uploadSession.storageKey);
             if (!existingImage) {
                 // Already removed (repeated-removal retry) - safe, idempotent
                 // success, not an error.
@@ -360,17 +360,17 @@ class DamageUploadController {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
 
-            const parcel = await this.RepairRequest.findById(requestId);
-            if (!parcel) {
+            const repairRequest = await this.RepairRequest.findById(requestId);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
 
-            const access = await resolveImageAccess({ parcel, callerEmail: req.decoded_email, models: this.models });
+            const access = await resolveImageAccess({ repairRequest, callerEmail: req.decoded_email, models: this.models });
             if (!access.allowed) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
 
-            if (!isV2RepairRequest(parcel)) {
+            if (!isV2RepairRequest(repairRequest)) {
                 return res.status(409).send({ message: 'damage image access is only available for schemaVersion 2 requests', code: 'LEGACY_REQUEST_NOT_SUPPORTED' });
             }
 
@@ -378,7 +378,7 @@ class DamageUploadController {
             // by a shared proxy or reused past their own short expiry.
             res.set('Cache-Control', 'private, no-store');
 
-            const attachedImages = (parcel.damage && Array.isArray(parcel.damage.images)) ? parcel.damage.images : [];
+            const attachedImages = (repairRequest.damage && Array.isArray(repairRequest.damage.images)) ? repairRequest.damage.images : [];
             if (attachedImages.length === 0) {
                 return res.status(200).send({
                     requestId: requestId, accessRole: access.accessRole,

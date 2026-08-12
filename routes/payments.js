@@ -4,14 +4,14 @@ const { ensureDatabaseReady } = require('../middleware/database');
 function paymentRoutes(app, controllers) {
     const paymentController = controllers.payment;
 
-    // Create checkout session - requires auth and looks up the parcel to
+    // Create checkout session - requires auth and looks up the repair request to
     // verify ownership, payment eligibility, and the trusted stored amount.
     // Customer-exclusive payment mutation - gated by verifyEmailVerified
     // (Phase 8.1).
     app.post('/payment-checkout-session', verifyFBToken, ensureDatabaseReady, verifyEmailVerified, (req, res) => paymentController.createCheckoutSession(req, res));
 
     // Repair Request v2 approved-quote payments (Phase 6.4 Unit 6). Both are
-    // parcel-scoped and owner-only; the server derives amount + currency
+    // repair request-scoped and owner-only; the server derives amount + currency
     // entirely from the persisted approved quote (BDT). The POST body is
     // ignored - the client never supplies an amount, currency, or status.
     // Eligibility is a read (not gated); creating the checkout is a

@@ -3,9 +3,9 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const { client } = require('../config/database');
 const { generateSecureTrackingId } = require('../utils/trackingId');
 const { logTracking } = require('../middleware/logging');
-const { VALID_STATUSES, ACTIVE_STATUSES, ASSIGNMENT_PENDING, isValidTransition } = require('../utils/parcelStatus');
+const { VALID_STATUSES, ACTIVE_STATUSES, ASSIGNMENT_PENDING, isValidTransition } = require('../utils/repairRequestStatus');
 const { validateRejectionReason, buildPendingAssignmentEntry, projectAssignmentForRole } = require('../utils/assignmentDecision');
-const { stripDamageImages, projectSafeListParcel } = require('../utils/repairRequestProjection');
+const { stripDamageImages, projectSafeListRepairRequest } = require('../utils/repairRequestProjection');
 const { normalize } = require('../services/paymentProcessor');
 const { createNotificationService } = require('../services/notificationService');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
@@ -32,7 +32,7 @@ const ADMIN_LIST_DEFAULT_LIMIT = 10;
 const ADMIN_LIST_MAX_LIMIT = 50;
 const ADMIN_LIST_MAX_SEARCH_LENGTH = 100;
 // Every status the admin request-management filter accepts - deliberately
-// the same set utils/parcelStatus.js's VALID_STATUSES plus the two values
+// the same set utils/repairRequestStatus.js's VALID_STATUSES plus the two values
 // that can never appear in that list (the implicit initial 'pending-pickup'
 // and the terminal 'cancelled', neither of which is a client-settable
 // transition target for updateRepairRequestStatus, but both of which are real,
@@ -81,7 +81,7 @@ class RepairRequestController {
             // aggregate on the list too - a general list must never carry raw
             // storageKey/url metadata for any request it returns.
             const result = await this.RepairRequest.findAll(query);
-            res.send(result.map(projectSafeListParcel));
+            res.send(result.map(projectSafeListRepairRequest));
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair requests', error: error.message });
         }
@@ -100,7 +100,7 @@ class RepairRequestController {
 
             // BL-032: same damage-image strip for the technician assigned-jobs list.
             const result = await this.RepairRequest.findAll(query);
-            res.send(result.map(projectSafeListParcel));
+            res.send(result.map(projectSafeListRepairRequest));
         } catch (error) {
             res.status(500).send({ message: 'Error fetching technician repair requests', error: error.message });
         }
@@ -109,23 +109,23 @@ class RepairRequestController {
     async getRepairRequestById(req, res) {
         try {
             const id = req.params.id;
-            const parcel = await this.RepairRequest.findById(id);
+            const repairRequest = await this.RepairRequest.findById(id);
             
-            if (!parcel) {
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'repair request not found' });
             }
             
             const currentUser = await this.User.findByEmail(req.decoded_email);
-            const isOwner = parcel.senderEmail === req.decoded_email;
-            const isAssignedRider = parcel.technicianEmail === req.decoded_email;
+            const isOwner = repairRequest.senderEmail === req.decoded_email;
+            const isAssignedTechnician = repairRequest.technicianEmail === req.decoded_email;
             const isAdmin = currentUser && currentUser.role === 'admin';
             
-            if (!isOwner && !isAssignedRider && !isAdmin) {
+            if (!isOwner && !isAssignedTechnician && !isAdmin) {
                 return res.status(403).send({ message: 'forbidden access' });
             }
 
             // The inspection sub-document (Phase 6.4 Unit 4) is never served
-            // through this raw-parcel endpoint - it carries technician
+            // through this raw-repair request endpoint - it carries technician
             // internalNotes and submitter identity that must never reach the
             // customer here. All inspection reads go through the dedicated,
             // role-projected GET /repair-requests/:id/inspection (see
@@ -134,13 +134,13 @@ class RepairRequestController {
             // inspection field is stripped; deliveryStatus (which may be
             // inspection_completed) is preserved.
             // The inspection, quote, and repair sub-documents (Phase 6.4 Units
-            // 4-7) are never served through this raw-parcel endpoint - they are
+            // 4-7) are never served through this raw-repair request endpoint - they are
             // read only through their own dedicated, role-projected endpoints
             // (inspectionController / quoteController / repairController), which
             // strip internal submitter identity, storage keys, and signed URLs.
             // deliveryStatus (which may be a quote_*/payment/repair_* state) is
             // preserved.
-            // assignmentHistory (Phase 8.2) carries rider/admin identities and
+            // assignmentHistory (Phase 8.2) carries technician/admin identities and
             // rejection reasons - never served here. It is read only through the
             // dedicated, role-projected GET /repair-requests/:id/assignment. Current
             // active-assignment fields (technicianName/technicianEmail) remain as before.
@@ -151,8 +151,8 @@ class RepairRequestController {
             // provider) is a payment-provider internal never read by any client -
             // the UI reads only the top-level paymentStatus - so it is stripped
             // here too, alongside the inspection/quote/repair detail documents.
-            const { inspection, quote, repair, assignmentHistory, payment, ...safeParcel } = parcel;
-            res.send(stripDamageImages(safeParcel));
+            const { inspection, quote, repair, assignmentHistory, payment, ...safeRepairRequest } = repairRequest;
+            res.send(stripDamageImages(safeRepairRequest));
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair request', error: error.message });
         }
@@ -168,7 +168,7 @@ class RepairRequestController {
     }
 
     // Admin-only complete request-management view: paginated, searchable,
-    // filterable, and explicitly projected (see Parcel.findPaginated) so it
+    // filterable, and explicitly projected (see RepairRequest.findPaginated) so it
     // never depends on the generic GET /repair-requests contract that MyRequests and
     // AssignTechnicians already rely on. Every query parameter is validated
     // against a fixed allow-list before being used to build the MongoDB
@@ -210,7 +210,7 @@ class RepairRequestController {
                     { trackingId: pattern },
                     { senderEmail: pattern },
                     { senderName: pattern },
-                    { parcelName: pattern }
+                    { deviceName: pattern }
                 ];
             }
 
@@ -222,9 +222,9 @@ class RepairRequestController {
                 sort: { createdAt: sortDirection }
             });
 
-            const enrichedData = data.map(parcel => ({
-                ...parcel,
-                canAssign: canAssignRequest(parcel)
+            const enrichedData = data.map(repairRequest => ({
+                ...repairRequest,
+                canAssign: canAssignRequest(repairRequest)
             }));
 
             const totalPages = Math.max(Math.ceil(totalItems / limit), 1);
@@ -261,10 +261,10 @@ class RepairRequestController {
         }
 
         try {
-            const parcel = req.body;
-            parcel.createdAt = new Date();
-            parcel.senderEmail = req.decoded_email;
-            parcel.deliveryStatus = 'pending-pickup';
+            const repairRequest = req.body;
+            repairRequest.createdAt = new Date();
+            repairRequest.senderEmail = req.decoded_email;
+            repairRequest.deliveryStatus = 'pending-pickup';
 
             // Collision retry: astronomically unlikely at 128 bits of
             // randomness, but the unique index on trackingId
@@ -275,9 +275,9 @@ class RepairRequestController {
             const MAX_TRACKING_ID_ATTEMPTS = 5;
             let result;
             for (let attempt = 1; attempt <= MAX_TRACKING_ID_ATTEMPTS; attempt++) {
-                parcel.trackingId = generateSecureTrackingId();
+                repairRequest.trackingId = generateSecureTrackingId();
                 try {
-                    result = await this.RepairRequest.create(parcel);
+                    result = await this.RepairRequest.create(repairRequest);
                     break;
                 } catch (error) {
                     if (error.code === 11000 && attempt < MAX_TRACKING_ID_ATTEMPTS) continue;
@@ -285,7 +285,7 @@ class RepairRequestController {
                 }
             }
 
-            logTracking(this.collections.trackingEvents, parcel.trackingId, 'parcel_created');
+            logTracking(this.collections.trackingEvents, repairRequest.trackingId, 'repair_request_created');
 
             res.send(result);
         } catch (error) {
@@ -400,7 +400,7 @@ class RepairRequestController {
                 }
             }
 
-            logTracking(this.collections.trackingEvents, document.trackingId, 'parcel_created');
+            logTracking(this.collections.trackingEvents, document.trackingId, 'repair_request_created');
 
             res.send(result);
         } catch (error) {
@@ -409,7 +409,7 @@ class RepairRequestController {
     }
 
     // Admin-only, read-only eligible-technician recommendations (Phase 6.3
-    // Unit 5). Never mutates any record - no rider/parcel write, no
+    // Unit 5). Never mutates any record - no technician/repair request write, no
     // notification, no tracking write, no assignment claim. Advisory only:
     // the assignment transaction (a future unit) independently revalidates
     // eligibility at commit time, exactly as it already does for approval
@@ -434,16 +434,16 @@ class RepairRequestController {
                 return res.status(400).send({ message: paginationCheck.message, code: paginationCheck.code });
             }
 
-            const parcel = await this.RepairRequest.findById(requestId);
-            if (!parcel) {
+            const repairRequest = await this.RepairRequest.findById(requestId);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
 
             // Taxonomy always comes from the request's own persisted
-            // snapshot - never guessed from legacy fields (parcelName,
+            // snapshot - never guessed from legacy fields (deviceName,
             // receiverRegion, license, bike) for a legacy request, which is
             // rejected outright instead.
-            const taxonomyResult = deriveRequestTaxonomy(parcel);
+            const taxonomyResult = deriveRequestTaxonomy(repairRequest);
             if (!taxonomyResult.valid) {
                 return res.status(409).send({ message: taxonomyResult.message, code: taxonomyResult.code });
             }
@@ -465,14 +465,14 @@ class RepairRequestController {
             // default path never needs to see them, since they could never
             // be eligible regardless of anything else.
             const candidates = await this.Technician.findEligibilityCandidates({ approvedOnly: !diagnostic });
-            const candidateIds = candidates.map((rider) => rider._id.toString());
-            const candidateEmails = candidates.map((rider) => normalize(rider.email)).filter(Boolean);
+            const candidateIds = candidates.map((technician) => technician._id.toString());
+            const candidateEmails = candidates.map((technician) => normalize(technician.email)).filter(Boolean);
 
             // Every per-candidate fact is fetched in exactly one set-based
             // query/aggregation each - never one query per candidate.
-            const [activeRiderIds, completedCounts, linkedUserDocs] = await Promise.all([
-                this.RepairRequest.findRiderIdsWithDeliveryStatuses(candidateIds, ACTIVE_STATUSES),
-                this.RepairRequest.aggregateCompletedCountsByRider(candidateIds, 'parcel_delivered'),
+            const [activeTechnicianIds, completedCounts, linkedUserDocs] = await Promise.all([
+                this.RepairRequest.findTechnicianIdsWithDeliveryStatuses(candidateIds, ACTIVE_STATUSES),
+                this.RepairRequest.aggregateCompletedCountsByTechnician(candidateIds, 'parcel_delivered'),
                 candidateEmails.length
                     ? this.collections.users.find({ email: { $in: candidateEmails } }, { projection: { email: 1, role: 1, _id: 0 } }).toArray()
                     : []
@@ -482,26 +482,26 @@ class RepairRequestController {
             const eligible = [];
             const ineligible = [];
 
-            for (const rider of candidates) {
-                const riderRole = roleByEmail.get(normalize(rider.email)) || null;
-                const evaluation = evaluateTechnician(rider, {
+            for (const technician of candidates) {
+                const technicianRole = roleByEmail.get(normalize(technician.email)) || null;
+                const evaluation = evaluateTechnician(technician, {
                     requestTaxonomy: taxonomyResult,
                     serviceDefinition,
-                    activeRiderIds,
-                    riderRole
+                    activeTechnicianIds,
+                    technicianRole
                 });
 
                 if (evaluation.eligible) {
-                    const serviceAreaMatch = deriveServiceAreaMatch(taxonomyResult, rider);
-                    const completedRepairCount = completedCounts.get(rider._id.toString()) || 0;
+                    const serviceAreaMatch = deriveServiceAreaMatch(taxonomyResult, technician);
+                    const completedRepairCount = completedCounts.get(technician._id.toString()) || 0;
                     const scoreResult = scoreTechnician({
                         matchedExpertiseEntry: evaluation.matchedExpertiseEntry,
                         serviceAreaMatch,
                         completedRepairCount
                     });
-                    eligible.push(buildEligibleTechnicianEntry(rider, evaluation, scoreResult, serviceAreaMatch, completedRepairCount));
+                    eligible.push(buildEligibleTechnicianEntry(technician, evaluation, scoreResult, serviceAreaMatch, completedRepairCount));
                 } else if (diagnostic) {
-                    ineligible.push(buildIneligibleTechnicianEntry(rider, evaluation));
+                    ineligible.push(buildIneligibleTechnicianEntry(technician, evaluation));
                 }
             }
 
@@ -509,7 +509,7 @@ class RepairRequestController {
             const { pageItems, pagination } = paginate(sortedEligible, { page: paginationCheck.page, limit: paginationCheck.limit });
 
             const response = {
-                requestId: parcel._id.toString(),
+                requestId: repairRequest._id.toString(),
                 eligibilityVersion: ELIGIBILITY_VERSION,
                 requestSummary: {
                     productCategorySlug: taxonomyResult.productCategorySlug,
@@ -550,36 +550,36 @@ class RepairRequestController {
                 return res.status(400).send({ message: 'invalid repair status', code: 'INVALID_REPAIR_STATUS' });
             }
 
-            const parcel = await this.RepairRequest.findById(id);
-            if (!parcel) {
+            const repairRequest = await this.RepairRequest.findById(id);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
 
             const currentUser = await this.User.findByEmail(req.decoded_email);
-            const isRider = currentUser && currentUser.role === 'rider';
+            const isTechnician = currentUser && currentUser.role === 'rider';
             const isAdmin = currentUser && currentUser.role === 'admin';
-            const isAssignedRider = parcel.technicianEmail === req.decoded_email;
+            const isAssignedTechnician = repairRequest.technicianEmail === req.decoded_email;
 
             // Only the assigned technician or admins can update the repair request status
-            if (!isAdmin && !(isRider && isAssignedRider)) {
-                return res.status(403).send({ message: 'forbidden access', code: isRider ? 'NOT_ASSIGNED_TECHNICIAN' : 'FORBIDDEN' });
+            if (!isAdmin && !(isTechnician && isAssignedTechnician)) {
+                return res.status(403).send({ message: 'forbidden access', code: isTechnician ? 'NOT_ASSIGNED_TECHNICIAN' : 'FORBIDDEN' });
             }
 
             // The completion transition has its own transactional path - see
             // completeRepairRequest. Everything below only ever applies to the
             // earlier, technician-only steps of the lifecycle.
             if (requestedStatus === 'parcel_delivered') {
-                return this.completeRepairRequest(res, parcel, req.decoded_email);
+                return this.completeRepairRequest(res, repairRequest, req.decoded_email);
             }
 
-            if (requestedStatus === parcel.deliveryStatus) {
+            if (requestedStatus === repairRequest.deliveryStatus) {
                 // Idempotent re-submission of the current status: nothing to
                 // persist, and no tracking log (or lifecycle notification)
                 // should be duplicated for it.
                 return res.send({ message: 'status unchanged', matchedCount: 1, modifiedCount: 0 });
             }
 
-            if (!isValidTransition(parcel.deliveryStatus, requestedStatus)) {
+            if (!isValidTransition(repairRequest.deliveryStatus, requestedStatus)) {
                 return res.status(409).send({ message: 'invalid status transition', code: 'STATUS_TRANSITION_NOT_ALLOWED' });
             }
 
@@ -587,7 +587,7 @@ class RepairRequestController {
             // between the read above and this write - the query condition
             // itself is the race-resolver, not the read-then-write check.
             const result = await this.collections.repairRequests.updateOne(
-                { _id: parcel._id, deliveryStatus: parcel.deliveryStatus },
+                { _id: repairRequest._id, deliveryStatus: repairRequest.deliveryStatus },
                 { $set: { deliveryStatus: requestedStatus } }
             );
 
@@ -599,7 +599,7 @@ class RepairRequestController {
             // trackingId, never a client-supplied value - trusting the body
             // here would let a caller write a tracking event under an
             // arbitrary/unrelated trackingId.
-            logTracking(this.collections.trackingEvents, parcel.trackingId, requestedStatus);
+            logTracking(this.collections.trackingEvents, repairRequest.trackingId, requestedStatus);
 
             // Best-effort lifecycle notification - only reached after a
             // genuine, newly-committed transition (never on the no-op or
@@ -609,9 +609,9 @@ class RepairRequestController {
             // transition into an error response - see
             // notifyRepairOwnerBestEffort.
             if (requestedStatus === 'rider_arriving') {
-                await this.notifyRepairOwnerBestEffort({ parcel, type: 'technician_on_the_way', actorEmail: req.decoded_email });
+                await this.notifyRepairOwnerBestEffort({ repairRequest, type: 'technician_on_the_way', actorEmail: req.decoded_email });
             } else if (requestedStatus === 'parcel_picked_up') {
-                await this.notifyRepairOwnerBestEffort({ parcel, type: 'repair_in_progress', actorEmail: req.decoded_email });
+                await this.notifyRepairOwnerBestEffort({ repairRequest, type: 'repair_in_progress', actorEmail: req.decoded_email });
             }
 
             res.send(result);
@@ -625,36 +625,36 @@ class RepairRequestController {
     // - never for repair_completed, which joins completeRepairRequest's own
     // transaction instead. Resolves both the repair owner's real current
     // role and the authenticated actor's real current role from the users
-    // collection (never trusted from the parcel document, request body, or
+    // collection (never trusted from the repair request document, request body, or
     // a hardcoded assumption, never defaulted); if either lookup fails, or
     // the notification insert itself fails, the failure is logged and
     // swallowed here so the already-successful status transition above is
     // never turned into an error response.
-    async notifyRepairOwnerBestEffort({ parcel, type, actorEmail }) {
+    async notifyRepairOwnerBestEffort({ repairRequest, type, actorEmail }) {
         try {
-            const resolvedOwnerRole = await this.User.findRoleByEmail(parcel.senderEmail);
+            const resolvedOwnerRole = await this.User.findRoleByEmail(repairRequest.senderEmail);
             if (!resolvedOwnerRole) {
-                console.error('Repair owner role could not be resolved for lifecycle notification (non-fatal):', type, parcel._id.toString());
+                console.error('Repair owner role could not be resolved for lifecycle notification (non-fatal):', type, repairRequest._id.toString());
                 return;
             }
             // The endpoint's own authorization already permits either the
-            // assigned rider or an admin to trigger this transition - the
+            // assigned technician or an admin to trigger this transition - the
             // persisted actorRole must reflect whichever one actually
             // authenticated, never an assumed/hardcoded value.
             const resolvedActorRole = await this.User.findRoleByEmail(actorEmail);
             if (resolvedActorRole !== 'rider' && resolvedActorRole !== 'admin') {
-                console.error('Actor role could not be resolved as rider/admin for lifecycle notification (non-fatal):', type, parcel._id.toString());
+                console.error('Actor role could not be resolved as technician/admin for lifecycle notification (non-fatal):', type, repairRequest._id.toString());
                 return;
             }
             await this.notifications.createNotification({
-                recipientEmail: parcel.senderEmail,
+                recipientEmail: repairRequest.senderEmail,
                 recipientRole: resolvedOwnerRole,
                 type,
-                entityType: 'parcel',
-                entityId: parcel._id.toString(),
+                entityType: 'repair_request',
+                entityId: repairRequest._id.toString(),
                 actorEmail,
                 actorRole: resolvedActorRole,
-                metadata: { trackingId: parcel.trackingId }
+                metadata: { trackingId: repairRequest.trackingId }
             });
         } catch (error) {
             console.error('Best-effort repair lifecycle notification failed (non-fatal):', type, error.message);
@@ -670,11 +670,11 @@ class RepairRequestController {
     // after the request had already committed as delivered, the request was
     // left "completed" while the technician stayed in_delivery, with no way
     // for a retry to repair it. The assigned technician is always the one
-    // recorded on the repair request itself (parcel.technicianId) - a
+    // recorded on the repair request itself (repair request.technicianId) - a
     // client-supplied technicianId is never trusted to select who gets reset.
-    async completeRepairRequest(res, parcel, actorEmail) {
+    async completeRepairRequest(res, repairRequest, actorEmail) {
         try {
-            if (!parcel.technicianId || !ObjectId.isValid(parcel.technicianId)) {
+            if (!repairRequest.technicianId || !ObjectId.isValid(repairRequest.technicianId)) {
                 return res.status(409).send({ message: 'this request has no valid assigned technician', code: 'REQUEST_NOT_ASSIGNED' });
             }
 
@@ -689,17 +689,17 @@ class RepairRequestController {
             let outcome = null;
             try {
                 await mongoSession.withTransaction(async () => {
-                    const freshParcel = await this.collections.repairRequests.findOne(
-                        { _id: parcel._id },
+                    const freshRepairRequest = await this.collections.repairRequests.findOne(
+                        { _id: repairRequest._id },
                         { session: mongoSession }
                     );
-                    if (!freshParcel) {
+                    if (!freshRepairRequest) {
                         outcome = { httpStatus: 404, code: 'REQUEST_NOT_FOUND', message: 'repair request not found' };
                         return;
                     }
 
-                    const currentStatus = freshParcel.deliveryStatus;
-                    const technicianId = freshParcel.technicianId;
+                    const currentStatus = freshRepairRequest.deliveryStatus;
+                    const technicianId = freshRepairRequest.technicianId;
 
                     if (!technicianId || !ObjectId.isValid(technicianId)) {
                         outcome = { httpStatus: 409, code: 'REQUEST_NOT_ASSIGNED', message: 'this request has no valid assigned technician' };
@@ -746,15 +746,15 @@ class RepairRequestController {
 
                     // The repair request's owner is resolved from the real
                     // users collection state inside this same transaction -
-                    // never trusted from the parcel document itself, and
+                    // never trusted from the repair request document itself, and
                     // never defaulted. Resolved before any guarded write
                     // below, so a missing/invalid owner account aborts
-                    // completion before anything commits: no parcel
+                    // completion before anything commits: no repair request
                     // completion, no technician reset, no tracking write, no
                     // notification. Mirrors the same outcome-object pattern
                     // as every other pre-write conflict above (nothing was
                     // written yet, so no throw/rollback is needed).
-                    const resolvedOwnerRole = await this.User.findRoleByEmail(freshParcel.senderEmail, { session: mongoSession });
+                    const resolvedOwnerRole = await this.User.findRoleByEmail(freshRepairRequest.senderEmail, { session: mongoSession });
                     if (!resolvedOwnerRole) {
                         outcome = { httpStatus: 409, code: 'REPAIR_OWNER_ROLE_UNRESOLVED', message: 'repair request owner account could not be verified' };
                         return;
@@ -763,7 +763,7 @@ class RepairRequestController {
                     // The authenticated actor's real current role is
                     // resolved the same way, inside the same transaction -
                     // this endpoint's own authorization already permits
-                    // either the assigned rider or an admin to complete a
+                    // either the assigned technician or an admin to complete a
                     // repair, so the persisted actorRole must reflect
                     // whichever one actually authenticated, never an
                     // assumed/hardcoded value. Resolved before any guarded
@@ -778,12 +778,12 @@ class RepairRequestController {
                     // attempt on the same request - re-verifies the status is
                     // still what was just read, not just a read-then-write
                     // check.
-                    const parcelUpdateResult = await this.collections.repairRequests.updateOne(
-                        { _id: freshParcel._id, deliveryStatus: 'parcel_picked_up' },
+                    const repairRequestUpdateResult = await this.collections.repairRequests.updateOne(
+                        { _id: freshRepairRequest._id, deliveryStatus: 'parcel_picked_up' },
                         { $set: { deliveryStatus: 'parcel_delivered' } },
                         { session: mongoSession }
                     );
-                    if (parcelUpdateResult.matchedCount === 0) {
+                    if (repairRequestUpdateResult.matchedCount === 0) {
                         outcome = { httpStatus: 409, code: 'COMPLETION_CONFLICT', message: 'this request was updated concurrently' };
                         return;
                     }
@@ -804,20 +804,20 @@ class RepairRequestController {
                         {
                             technicianId: technician._id.toString(),
                             deliveryStatus: { $in: ACTIVE_STATUSES },
-                            _id: { $ne: freshParcel._id }
+                            _id: { $ne: freshRepairRequest._id }
                         },
                         { session: mongoSession }
                     );
 
-                    const riderUpdateResult = await this.collections.technicians.updateOne(
+                    const technicianUpdateResult = await this.collections.technicians.updateOne(
                         { _id: technician._id },
                         { $set: { workStatus: otherActiveAssignment ? technician.workStatus : 'available' } },
                         { session: mongoSession }
                     );
-                    if (riderUpdateResult.matchedCount === 0) {
+                    if (technicianUpdateResult.matchedCount === 0) {
                         // The technician document vanished between the read
                         // above and this write - abort the whole transaction
-                        // (including the parcel update above) rather than
+                        // (including the repair request update above) rather than
                         // leave the request completed with no matching
                         // technician reset.
                         throw Object.assign(new Error('technician reset failed during completion'), { code: 'COMPLETION_FAILED' });
@@ -825,9 +825,9 @@ class RepairRequestController {
 
                     const trackingResult = await this.collections.trackingEvents.insertOne(
                         {
-                            trackingId: freshParcel.trackingId,
+                            trackingId: freshRepairRequest.trackingId,
                             status: 'parcel_delivered',
-                            details: 'parcel delivered',
+                            details: 'repair completed',
                             createdAt: new Date()
                         },
                         { session: mongoSession }
@@ -837,19 +837,19 @@ class RepairRequestController {
                     }
 
                     // Notification joins this same transaction - a failure
-                    // here aborts the parcel completion, technician reset,
+                    // here aborts the repair request completion, technician reset,
                     // and tracking log above exactly like any other guarded
                     // write in this transaction.
                     await this.notifications.createNotification({
                         session: mongoSession,
-                        recipientEmail: freshParcel.senderEmail,
+                        recipientEmail: freshRepairRequest.senderEmail,
                         recipientRole: resolvedOwnerRole,
                         type: 'repair_completed',
-                        entityType: 'parcel',
-                        entityId: freshParcel._id.toString(),
+                        entityType: 'repair_request',
+                        entityId: freshRepairRequest._id.toString(),
                         actorEmail,
                         actorRole: resolvedActorRole,
-                        metadata: { trackingId: freshParcel.trackingId }
+                        metadata: { trackingId: freshRepairRequest.trackingId }
                     });
 
                     outcome = { success: true };
@@ -875,7 +875,7 @@ class RepairRequestController {
     // workStatus update, and the assignment tracking log are one
     // transactionally consistent operation - all three commit together or
     // none do. Previously these were three independent writes; if
-    // Rider.updateWorkStatus or the tracking insert failed after the parcel
+    // Technician.updateWorkStatus or the tracking insert failed after the repair request
     // update had already committed, the request ended up assigned with no
     // matching technician/tracking state and the caller saw a misleading
     // 500. Cheap validation (ObjectId shape, existence, approval) happens
@@ -894,8 +894,8 @@ class RepairRequestController {
                 return res.status(400).send({ message: 'invalid technician id', code: 'INVALID_TECHNICIAN_ID' });
             }
 
-            const parcel = await this.RepairRequest.findById(requestId);
-            if (!parcel) {
+            const repairRequest = await this.RepairRequest.findById(requestId);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
 
@@ -907,16 +907,16 @@ class RepairRequestController {
                 return res.status(409).send({ message: 'technician is not approved', code: 'TECHNICIAN_NOT_APPROVED' });
             }
 
-            // A request to (re-)assign a technician to a parcel they are
+            // A request to (re-)assign a technician to a repair request they are
             // *already* the assigned technician for is not a new-assignment
             // scenario BL-004 is about - it's the pre-existing redundant-
             // reassignment case, which the transaction below already
-            // rejects correctly (REQUEST_ALREADY_ASSIGNED, via the parcel no
+            // rejects correctly (REQUEST_ALREADY_ASSIGNED, via the repair request no
             // longer being pending-pickup). Skipping the two checks below in
             // that one case preserves that existing, more specific reason
             // instead of masking it behind a workStatus check that's true
-            // only because of this exact parcel.
-            const isAlreadyThisTechnician = parcel.technicianId === technician._id.toString();
+            // only because of this exact repair request.
+            const isAlreadyThisTechnician = repairRequest.technicianId === technician._id.toString();
             if (!isAlreadyThisTechnician) {
                 if (technician.workStatus !== 'available') {
                     return res.status(409).send({ message: 'technician is not currently available', code: 'RIDER_UNAVAILABLE' });
@@ -926,13 +926,13 @@ class RepairRequestController {
                 // drift left workStatus 'available' while some other
                 // request still records this technician as its active
                 // assignment. This is not the race-safety mechanism itself
-                // (the guarded rider update inside the transaction below
+                // (the guarded technician update inside the transaction below
                 // is) - it only produces a faster, clearer rejection in the
                 // common non-concurrent case.
                 const existingActiveAssignment = await this.collections.repairRequests.findOne({
                     technicianId: technician._id.toString(),
                     deliveryStatus: { $in: ACTIVE_STATUSES },
-                    _id: { $ne: parcel._id }
+                    _id: { $ne: repairRequest._id }
                 });
                 if (existingActiveAssignment) {
                     return res.status(409).send({ message: 'technician already has an active assignment', code: 'RIDER_ALREADY_ASSIGNED' });
@@ -946,13 +946,13 @@ class RepairRequestController {
                 await mongoSession.withTransaction(async () => {
                     // The repair request's owner is resolved from the real
                     // users collection state inside this same transaction -
-                    // never trusted from the parcel document itself or any
+                    // never trusted from the repair request document itself or any
                     // request body value, and never defaulted. Resolved
                     // before any guarded write below, so a missing/invalid
                     // owner account aborts before anything is committed: no
                     // assignment, no technician workload change, no tracking
                     // write, no notification.
-                    const resolvedOwnerRole = await this.User.findRoleByEmail(parcel.senderEmail, { session: mongoSession });
+                    const resolvedOwnerRole = await this.User.findRoleByEmail(repairRequest.senderEmail, { session: mongoSession });
                     if (!resolvedOwnerRole) {
                         throw Object.assign(
                             new Error('repair request owner role could not be resolved'),
@@ -960,12 +960,12 @@ class RepairRequestController {
                         );
                     }
 
-                    // Re-verifies the active-parcel defense above inside this
+                    // Re-verifies the active-repair request defense above inside this
                     // transaction's own snapshot, immediately before any
                     // write - closes the window between the preliminary
                     // check and here. The actual concurrency guarantee
-                    // against two *different* parcels racing for the *same*
-                    // technician still comes from the guarded rider update
+                    // against two *different* repair requests racing for the *same*
+                    // technician still comes from the guarded technician update
                     // below (workStatus: 'available' in its filter), not
                     // from this query - a plain read can't by itself
                     // prevent a race the way a conditional write can.
@@ -973,7 +973,7 @@ class RepairRequestController {
                         {
                             technicianId: technician._id.toString(),
                             deliveryStatus: { $in: ACTIVE_STATUSES },
-                            _id: { $ne: parcel._id }
+                            _id: { $ne: repairRequest._id }
                         },
                         { session: mongoSession }
                     );
@@ -998,11 +998,11 @@ class RepairRequestController {
                     // assignment. Skipped for the redundant
                     // reassign-to-same-technician case above so that its
                     // existing, more specific REQUEST_ALREADY_ASSIGNED
-                    // outcome (via the parcel update guard below) is never
+                    // outcome (via the repair request update guard below) is never
                     // masked by a new eligibility rejection.
                     let v2ExpertiseGuard = null;
-                    if (!isAlreadyThisTechnician && isV2RepairRequest(parcel)) {
-                        const requestTaxonomy = deriveRequestTaxonomy(parcel);
+                    if (!isAlreadyThisTechnician && isV2RepairRequest(repairRequest)) {
+                        const requestTaxonomy = deriveRequestTaxonomy(repairRequest);
                         if (!requestTaxonomy.valid) {
                             throw Object.assign(new Error(requestTaxonomy.message), { code: requestTaxonomy.code, httpStatus: 409 });
                         }
@@ -1013,7 +1013,7 @@ class RepairRequestController {
                             throw Object.assign(new Error(definitionValidation.message), { code: definitionValidation.code, httpStatus: 409 });
                         }
 
-                        const riderRole = await this.User.findRoleByEmail(technician.email, { session: mongoSession });
+                        const technicianRole = await this.User.findRoleByEmail(technician.email, { session: mongoSession });
 
                         // No other active assignment for this technician was
                         // already independently confirmed above - passing an
@@ -1023,8 +1023,8 @@ class RepairRequestController {
                         const evaluation = evaluateTechnician(technician, {
                             requestTaxonomy,
                             serviceDefinition,
-                            activeRiderIds: new Set(),
-                            riderRole
+                            activeTechnicianIds: new Set(),
+                            technicianRole
                         });
 
                         if (!evaluation.eligible) {
@@ -1035,7 +1035,7 @@ class RepairRequestController {
                         }
 
                         // The exact expertise array just validated becomes
-                        // part of the rider claim's own guard condition below
+                        // part of the technician claim's own guard condition below
                         // (mirrors models/Technician.js#replaceExpertise's "guard
                         // on every field read, not just the field being
                         // changed" pattern) - closes the race where a
@@ -1063,7 +1063,7 @@ class RepairRequestController {
                     // no assignmentHistory). The offered technician is reserved
                     // (workStatus -> in_delivery below) either way, preserving
                     // double-booking protection.
-                    const assignedAsV2 = isV2RepairRequest(parcel);
+                    const assignedAsV2 = isV2RepairRequest(repairRequest);
                     const assignedStatus = assignedAsV2 ? ASSIGNMENT_PENDING : 'driver_assigned';
                     const assignmentSet = {
                         deliveryStatus: assignedStatus,
@@ -1084,9 +1084,9 @@ class RepairRequestController {
                             })
                         };
                     }
-                    const parcelUpdateResult = await this.collections.repairRequests.updateOne(
+                    const repairRequestUpdateResult = await this.collections.repairRequests.updateOne(
                         {
-                            _id: parcel._id,
+                            _id: repairRequest._id,
                             $or: [
                                 { deliveryStatus: { $exists: false } },
                                 { deliveryStatus: 'pending-pickup' }
@@ -1096,7 +1096,7 @@ class RepairRequestController {
                         { session: mongoSession }
                     );
 
-                    if (parcelUpdateResult.matchedCount === 0) {
+                    if (repairRequestUpdateResult.matchedCount === 0) {
                         conflict = true;
                         return;
                     }
@@ -1105,56 +1105,56 @@ class RepairRequestController {
                     // availability atomically at write time, not just at the
                     // preliminary reads above (BL-004). This single
                     // conditional update is the actual concurrency guarantee
-                    // against two different parcels racing for the same
+                    // against two different repair requests racing for the same
                     // technician: MongoDB only lets one of two concurrent
                     // transactions match+modify this document while
                     // workStatus is still 'available', so a losing
                     // concurrent request always sees matchedCount 0 here.
-                    const riderUpdateFilter = { _id: technician._id, status: 'approved', workStatus: 'available' };
+                    const technicianUpdateFilter = { _id: technician._id, status: 'approved', workStatus: 'available' };
                     if (v2ExpertiseGuard !== null) {
-                        riderUpdateFilter.expertise = v2ExpertiseGuard;
+                        technicianUpdateFilter.expertise = v2ExpertiseGuard;
                     }
-                    const riderUpdateResult = await this.collections.technicians.updateOne(
-                        riderUpdateFilter,
+                    const technicianUpdateResult = await this.collections.technicians.updateOne(
+                        technicianUpdateFilter,
                         { $set: { workStatus: 'in_delivery' } },
                         { session: mongoSession }
                     );
 
-                    if (riderUpdateResult.matchedCount === 0) {
+                    if (technicianUpdateResult.matchedCount === 0) {
                         // The technician stopped being approved/available
                         // between the preliminary checks and this write -
                         // most commonly a genuine concurrent assignment to
                         // the same technician winning this race. Throwing
                         // (rather than just flagging and returning) is
-                        // required here, not optional - the parcel update
+                        // required here, not optional - the repair request update
                         // above already applied within this same
                         // transaction, and only a thrown error causes
                         // withTransaction to abort/roll it back too, rather
-                        // than committing a parcel marked assigned to a
+                        // than committing a repair request marked assigned to a
                         // technician whose own state was never actually
                         // claimed.
                         throw Object.assign(new Error('technician became unavailable during assignment'), { code: 'ASSIGNMENT_CONFLICT' });
                     }
 
-                    await logTracking(this.collections.trackingEvents, parcel.trackingId, assignedStatus, mongoSession);
+                    await logTracking(this.collections.trackingEvents, repairRequest.trackingId, assignedStatus, mongoSession);
 
                     // Both notifications join the same transaction - a
-                    // failure creating either one aborts the parcel
+                    // failure creating either one aborts the repair request
                     // assignment, the technician workload update, and the
                     // tracking log above exactly like any other guarded
                     // write here. recipientRole for the customer copy is
                     // whatever the owner's real role actually is (user,
-                    // rider, or admin), never hardcoded.
+                    // technician, or admin), never hardcoded.
                     await this.notifications.createNotification({
                         session: mongoSession,
-                        recipientEmail: parcel.senderEmail,
+                        recipientEmail: repairRequest.senderEmail,
                         recipientRole: resolvedOwnerRole,
                         type: 'technician_assigned',
-                        entityType: 'parcel',
+                        entityType: 'repair_request',
                         entityId: requestId,
                         actorEmail: req.decoded_email,
                         actorRole: 'admin',
-                        metadata: { trackingId: parcel.trackingId }
+                        metadata: { trackingId: repairRequest.trackingId }
                     });
 
                     await this.notifications.createNotification({
@@ -1162,11 +1162,11 @@ class RepairRequestController {
                         recipientEmail: technician.email,
                         recipientRole: 'rider',
                         type: 'new_repair_assignment',
-                        entityType: 'parcel',
+                        entityType: 'repair_request',
                         entityId: requestId,
                         actorEmail: req.decoded_email,
                         actorRole: 'admin',
-                        metadata: { trackingId: parcel.trackingId }
+                        metadata: { trackingId: repairRequest.trackingId }
                     });
                 });
             } finally {
@@ -1192,7 +1192,7 @@ class RepairRequestController {
                 return res.status(409).send({ message: 'this request can no longer be assigned', code: 'ASSIGNMENT_NOT_ALLOWED' });
             }
 
-            res.send({ acknowledged: true, matchedCount: 1, modifiedCount: 1, deliveryStatus: isV2RepairRequest(parcel) ? ASSIGNMENT_PENDING : 'driver_assigned' });
+            res.send({ acknowledged: true, matchedCount: 1, modifiedCount: 1, deliveryStatus: isV2RepairRequest(repairRequest) ? ASSIGNMENT_PENDING : 'driver_assigned' });
         } catch (error) {
             if (error.code === 'REPAIR_OWNER_ROLE_UNRESOLVED') {
                 console.error('Assignment transaction aborted: repair request owner role could not be resolved');
@@ -1203,7 +1203,7 @@ class RepairRequestController {
                 // availability state changed between the preliminary checks
                 // and the guarded write, almost always because a concurrent
                 // assignment to the same technician committed first. The
-                // transaction above has already rolled back the parcel
+                // transaction above has already rolled back the repair request
                 // claim, so nothing partial is left behind.
                 return res.status(409).send({ message: 'technician is no longer available for assignment', code: 'ASSIGNMENT_CONFLICT' });
             }
@@ -1231,7 +1231,7 @@ class RepairRequestController {
     // offered technician, only while assignment_pending. The guarded updateOne
     // (deliveryStatus assignment_pending + technicianEmail in the filter) is the
     // race-resolver: exactly one concurrent accept/reject wins; a loser sees
-    // matchedCount 0 and gets ASSIGNMENT_ALREADY_DECIDED. No rider workStatus
+    // matchedCount 0 and gets ASSIGNMENT_ALREADY_DECIDED. No technician workStatus
     // change (they stay in_delivery). Tracking is best-effort after the commit.
     async acceptAssignment(req, res) {
         try {
@@ -1239,20 +1239,20 @@ class RepairRequestController {
             if (!ObjectId.isValid(id)) {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
-            const parcel = await this.RepairRequest.findById(id);
-            if (!parcel) {
+            const repairRequest = await this.RepairRequest.findById(id);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
-            if (normalize(parcel.technicianEmail) !== normalize(req.decoded_email)) {
+            if (normalize(repairRequest.technicianEmail) !== normalize(req.decoded_email)) {
                 return res.status(403).send({ message: 'you are not the assigned technician', code: 'NOT_ASSIGNED_TECHNICIAN' });
             }
-            if (parcel.deliveryStatus !== ASSIGNMENT_PENDING) {
+            if (repairRequest.deliveryStatus !== ASSIGNMENT_PENDING) {
                 return res.status(409).send({ message: 'this assignment is not awaiting a decision', code: 'ASSIGNMENT_NOT_PENDING' });
             }
 
             const now = new Date();
             const result = await this.collections.repairRequests.updateOne(
-                { _id: parcel._id, deliveryStatus: ASSIGNMENT_PENDING, technicianEmail: parcel.technicianEmail },
+                { _id: repairRequest._id, deliveryStatus: ASSIGNMENT_PENDING, technicianEmail: repairRequest.technicianEmail },
                 {
                     $set: {
                         deliveryStatus: 'driver_assigned',
@@ -1266,7 +1266,7 @@ class RepairRequestController {
                 return res.status(409).send({ message: 'this assignment has already been decided', code: 'ASSIGNMENT_ALREADY_DECIDED' });
             }
 
-            logTracking(this.collections.trackingEvents, parcel.trackingId, 'driver_assigned');
+            logTracking(this.collections.trackingEvents, repairRequest.trackingId, 'driver_assigned');
             return res.send({ success: true, deliveryStatus: 'driver_assigned' });
         } catch (error) {
             console.error('Accept assignment failed:', error.message);
@@ -1277,9 +1277,9 @@ class RepairRequestController {
     // Technician REJECTS an offered assignment with a reason (Phase 8.2). Only
     // the currently offered technician, only while assignment_pending, reason
     // validated (5-500 chars). Transactionally: release the request back to
-    // pending-pickup (reassignable), clear the active rider fields, mark the
+    // pending-pickup (reassignable), clear the active technician fields, mark the
     // pending history entry rejected (reason retained for admin audit), and
-    // release the rider back to available. The guarded parcel update is the
+    // release the technician back to available. The guarded repair request update is the
     // race-resolver - exactly one concurrent decision wins. The request is
     // never deleted or cancelled.
     async rejectAssignment(req, res) {
@@ -1292,25 +1292,25 @@ class RepairRequestController {
             if (!reasonCheck.valid) {
                 return res.status(400).send({ message: reasonCheck.message, code: reasonCheck.code });
             }
-            const parcel = await this.RepairRequest.findById(id);
-            if (!parcel) {
+            const repairRequest = await this.RepairRequest.findById(id);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
-            if (normalize(parcel.technicianEmail) !== normalize(req.decoded_email)) {
+            if (normalize(repairRequest.technicianEmail) !== normalize(req.decoded_email)) {
                 return res.status(403).send({ message: 'you are not the assigned technician', code: 'NOT_ASSIGNED_TECHNICIAN' });
             }
-            if (parcel.deliveryStatus !== ASSIGNMENT_PENDING) {
+            if (repairRequest.deliveryStatus !== ASSIGNMENT_PENDING) {
                 return res.status(409).send({ message: 'this assignment is not awaiting a decision', code: 'ASSIGNMENT_NOT_PENDING' });
             }
 
-            const technicianId = parcel.technicianId;
+            const technicianId = repairRequest.technicianId;
             const now = new Date();
             const mongoSession = client.startSession();
             let alreadyDecided = false;
             try {
                 await mongoSession.withTransaction(async () => {
-                    const parcelResult = await this.collections.repairRequests.updateOne(
-                        { _id: parcel._id, deliveryStatus: ASSIGNMENT_PENDING, technicianEmail: parcel.technicianEmail },
+                    const repairRequestResult = await this.collections.repairRequests.updateOne(
+                        { _id: repairRequest._id, deliveryStatus: ASSIGNMENT_PENDING, technicianEmail: repairRequest.technicianEmail },
                         {
                             $set: {
                                 deliveryStatus: 'pending-pickup',
@@ -1322,7 +1322,7 @@ class RepairRequestController {
                         },
                         { arrayFilters: [{ 'cur.decision': 'pending' }], session: mongoSession }
                     );
-                    if (parcelResult.matchedCount === 0) {
+                    if (repairRequestResult.matchedCount === 0) {
                         alreadyDecided = true;
                         return;
                     }
@@ -1351,7 +1351,7 @@ class RepairRequestController {
             // public timeline status, so the rejection is never exposed to the
             // customer (who only ever sees the neutral assignment_pending state
             // and, on reassignment, another assignment_pending).
-            logTracking(this.collections.trackingEvents, parcel.trackingId, 'assignment_rejected');
+            logTracking(this.collections.trackingEvents, repairRequest.trackingId, 'assignment_rejected');
             return res.send({ success: true, deliveryStatus: 'pending-pickup' });
         } catch (error) {
             console.error('Reject assignment failed:', error.message);
@@ -1359,7 +1359,7 @@ class RepairRequestController {
         }
     }
 
-    // Role-aware assignment read (Phase 8.2). The general parcel GET does NOT
+    // Role-aware assignment read (Phase 8.2). The general repair request GET does NOT
     // serialize assignmentHistory to non-admins; this endpoint returns a
     // projection scoped to the caller's role (admin: full history + reasons;
     // assigned technician: their own decision; customer/owner: neutral current
@@ -1370,19 +1370,19 @@ class RepairRequestController {
             if (!ObjectId.isValid(id)) {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
-            const parcel = await this.RepairRequest.findById(id);
-            if (!parcel) {
+            const repairRequest = await this.RepairRequest.findById(id);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
             const caller = await this.User.findByEmail(req.decoded_email);
             const isAdmin = !!caller && caller.role === 'admin';
-            const isAssignedTechnician = normalize(parcel.technicianEmail) === normalize(req.decoded_email);
-            const isOwner = normalize(parcel.senderEmail) === normalize(req.decoded_email);
+            const isAssignedTechnician = normalize(repairRequest.technicianEmail) === normalize(req.decoded_email);
+            const isOwner = normalize(repairRequest.senderEmail) === normalize(req.decoded_email);
             if (!isAdmin && !isAssignedTechnician && !isOwner) {
                 return res.status(403).send({ message: 'forbidden access', code: 'FORBIDDEN' });
             }
             const role = isAdmin ? 'admin' : (isAssignedTechnician ? 'assigned-technician' : 'customer');
-            return res.send(projectAssignmentForRole(parcel, role));
+            return res.send(projectAssignmentForRole(repairRequest, role));
         } catch (error) {
             console.error('Get assignment failed:', error.message);
             return res.status(500).send({ message: 'Error reading assignment', code: 'ASSIGNMENT_READ_FAILED' });
@@ -1390,7 +1390,7 @@ class RepairRequestController {
     }
 
     // Safe hard deletion (Phase 6.5 Unit 8). Replaces the old unguarded raw
-    // delete, which removed only the parcel document and orphaned every
+    // delete, which removed only the repair request document and orphaned every
     // damage/evidence Storage object, upload session, checkout row, and (worst
     // of all) payment record. A request is deletable ONLY at the very first
     // lifecycle stage - the caller must be the owner or an admin, the request
@@ -1404,11 +1404,11 @@ class RepairRequestController {
             return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
         }
 
-        let parcel;
+        let repairRequest;
         let isAdmin = false;
         try {
-            parcel = await this.RepairRequest.findById(id);
-            if (!parcel) {
+            repairRequest = await this.RepairRequest.findById(id);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
             const caller = await this.User.findByEmail(req.decoded_email);
@@ -1422,7 +1422,7 @@ class RepairRequestController {
         // an unknown id would - deletion never confirms a request's existence
         // to a caller with no authority over it (existence-oracle safety).
         const callerEmail = normalize(req.decoded_email);
-        const ownerEmail = normalize(parcel.senderEmail);
+        const ownerEmail = normalize(repairRequest.senderEmail);
         const isOwner = !!ownerEmail && ownerEmail === callerEmail;
         if (!isOwner && !isAdmin) {
             return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
@@ -1443,12 +1443,12 @@ class RepairRequestController {
 
         // Safe deletion is scoped to newer (v2) repair requests only - legacy
         // courier-era records are never removed through this path.
-        if (!isV2RepairRequest(parcel)) {
+        if (!isV2RepairRequest(repairRequest)) {
             return res.status(409).send({ message: 'only newer (v2) repair requests can be deleted', code: 'REQUEST_DELETE_NOT_ALLOWED' });
         }
 
         // Financial/checkout state is confirmed against the real collections,
-        // never inferred from parcel.paymentStatus alone - a payment or active
+        // never inferred from repair request.paymentStatus alone - a payment or active
         // checkout row is authoritative and blocks deletion.
         let hasAnyPayment;
         let hasActiveCheckout;
@@ -1461,26 +1461,26 @@ class RepairRequestController {
             return res.status(500).send({ message: 'Error deleting repair request', code: 'REQUEST_DELETE_FAILED' });
         }
 
-        const eligibility = getDeletionEligibility(parcel, { hasAnyPayment, hasActiveCheckout });
+        const eligibility = getDeletionEligibility(repairRequest, { hasAnyPayment, hasActiveCheckout });
         if (!eligibility.eligible) {
             return res.status(409).send({ message: eligibility.reason, code: eligibility.code });
         }
 
         // Collect every Storage object key tied to this request BEFORE any DB
-        // delete. Once the parcel document and its session rows are gone the
+        // delete. Once the repair request document and its session rows are gone the
         // keys are unrecoverable, so they must be gathered first and only
         // purged from Storage AFTER the DB transaction has committed - never
         // the reverse (which could destroy an object while the request lives).
         const storageKeys = new Set();
-        if (parcel.damage && Array.isArray(parcel.damage.images)) {
-            for (const img of parcel.damage.images) {
+        if (repairRequest.damage && Array.isArray(repairRequest.damage.images)) {
+            for (const img of repairRequest.damage.images) {
                 if (img && img.storageKey) storageKeys.add(img.storageKey);
             }
         }
-        if (parcel.repair && parcel.repair.completion && Array.isArray(parcel.repair.completion.evidenceImages)) {
+        if (repairRequest.repair && repairRequest.repair.completion && Array.isArray(repairRequest.repair.completion.evidenceImages)) {
             // Defensive: an eligible (pre-repair) request never has completion
             // evidence, but never assume - gather it if somehow present.
-            for (const ev of parcel.repair.completion.evidenceImages) {
+            for (const ev of repairRequest.repair.completion.evidenceImages) {
                 if (ev && ev.storageKey) storageKeys.add(ev.storageKey);
             }
         }
@@ -1496,12 +1496,12 @@ class RepairRequestController {
         }
 
         // Atomic delete of the request and every exact request-scoped record in
-        // one transaction. The guarded parcel delete's filter is the real
+        // one transaction. The guarded repair request delete's filter is the real
         // race-resolver: if an assignment / payment / inspection / quote /
         // repair landed after the eligibility read above, deletedCount is 0 and
         // the whole transaction aborts, leaving the now-progressed request fully
         // intact. Sessions/checkout/tracking rows are only ever removed once
-        // that guarded parcel delete has actually matched.
+        // that guarded repair request delete has actually matched.
         const storageKeyList = [...storageKeys];
         const mongoSession = client.startSession();
         try {
@@ -1531,8 +1531,8 @@ class RepairRequestController {
                 await this.collections.damageUploadSessions.deleteMany({ requestId: id }, { session: mongoSession });
                 await this.collections.repairEvidenceSessions.deleteMany({ requestId: id }, { session: mongoSession });
                 await this.collections.checkoutSessions.deleteMany({ requestId: id }, { session: mongoSession });
-                if (parcel.trackingId) {
-                    await this.collections.trackingEvents.deleteMany({ trackingId: parcel.trackingId }, { session: mongoSession });
+                if (repairRequest.trackingId) {
+                    await this.collections.trackingEvents.deleteMany({ trackingId: repairRequest.trackingId }, { session: mongoSession });
                 }
             });
         } catch (error) {
@@ -1577,12 +1577,12 @@ class RepairRequestController {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
 
-            const parcel = await this.RepairRequest.findById(id);
-            if (!parcel) {
+            const repairRequest = await this.RepairRequest.findById(id);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
 
-            const ownerEmail = normalize(parcel.senderEmail);
+            const ownerEmail = normalize(repairRequest.senderEmail);
             const callerEmail = normalize(req.decoded_email);
             if (ownerEmail !== callerEmail) {
                 return res.status(403).send({ message: 'forbidden access', code: 'NOT_REQUEST_OWNER' });
@@ -1605,9 +1605,9 @@ class RepairRequestController {
             }
 
             // A completed payment record is authoritative even if
-            // parcel.paymentStatus is somehow inconsistent with it.
+            // repair request.paymentStatus is somehow inconsistent with it.
             const existingPayment = await this.collections.payments.findOne({ requestId: id });
-            const eligibility = getCancellationEligibility(parcel, { hasCompletedPayment: !!existingPayment });
+            const eligibility = getCancellationEligibility(repairRequest, { hasCompletedPayment: !!existingPayment });
 
             if (!eligibility.eligible) {
                 if (eligibility.alreadyCancelled) {
@@ -1626,7 +1626,7 @@ class RepairRequestController {
             // completion, not the read-then-write eligibility check above.
             const updateResult = await this.collections.repairRequests.updateOne(
                 {
-                    _id: parcel._id,
+                    _id: repairRequest._id,
                     $or: [
                         { deliveryStatus: { $exists: false } },
                         { deliveryStatus: 'pending-pickup' }
@@ -1648,17 +1648,17 @@ class RepairRequestController {
                 return res.status(409).send({ message: 'this request can no longer be cancelled', code: 'CANCELLATION_NOT_ALLOWED' });
             }
 
-            logTracking(this.collections.trackingEvents, parcel.trackingId, 'cancelled');
+            logTracking(this.collections.trackingEvents, repairRequest.trackingId, 'cancelled');
 
-            // Release any active checkout session for this parcel so an old
+            // Release any active checkout session for this repair request so an old
             // checkout URL can never be reused to reach a valid paid state.
-            const cancelledRow = await this.checkoutSessions.cancelByParcelId(parcel._id.toString());
+            const cancelledRow = await this.checkoutSessions.cancelByRequestId(repairRequest._id.toString());
             if (cancelledRow && cancelledRow.sessionId) {
                 try {
                     await stripe.checkout.sessions.expire(cancelledRow.sessionId);
                 } catch (stripeError) {
                     // Best-effort only - our own checkoutSessions row and the
-                    // parcel's cancelled status are already authoritative
+                    // repair request's cancelled status are already authoritative
                     // regardless of whether Stripe's own expiry call
                     // succeeds (e.g. the session may already be
                     // expired/completed on Stripe's side, which throws here

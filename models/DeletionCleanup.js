@@ -2,12 +2,12 @@
 // deleted repair request, holding the exact Firebase Storage object keys that
 // still need to be purged AFTER the request's DB records are gone. It is
 // created inside the same transaction that deletes the request, so the trusted
-// storage keys are captured durably BEFORE the source metadata (parcel damage
+// storage keys are captured durably BEFORE the source metadata (repair request damage
 // images, upload/evidence sessions) disappears - a crashed or failed Storage
 // pass can then always be retried from this record instead of orphaning
 // objects forever.
 //
-// `_id` IS the requestId (the deleted parcel's ObjectId string). Using it as
+// `_id` IS the requestId (the deleted repair request's ObjectId string). Using it as
 // the primary key makes the record uniquely keyed by requestId for free - two
 // concurrent deletes of the same request can never create two cleanup records,
 // and a retry is naturally idempotent. Storage keys are ALWAYS collected from

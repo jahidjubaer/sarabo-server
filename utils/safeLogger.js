@@ -43,7 +43,7 @@ function safePath(value) {
 
 // Prefers the matched route's template (e.g. "/public/trackings/:trackingId")
 // over the concrete request path whenever Express has already resolved one,
-// so a dynamic segment (a tracking code, a parcel id) is never logged in
+// so a dynamic segment (a tracking code, a repair request id) is never logged in
 // place of its safe template. req.path and req.route.path are both
 // pathname-only already (Express strips the query string before setting
 // either) - this deliberately never touches req.originalUrl/req.url, which

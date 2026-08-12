@@ -181,9 +181,9 @@ function validateInspectionInput(body) {
 
 // Builds the persisted inspection sub-document from ALREADY-validated,
 // normalized input plus server-owned identity fields. Every authority field
-// (status, submittedAt, submittedByRiderId, submittedByEmail, version,
+// (status, submittedAt, submittedByTechnicianId, submittedByEmail, version,
 // currency) is set here by the server, never copied from the client.
-function buildInspectionDocument(normalized, { submittedByRiderId, submittedByEmail, now }) {
+function buildInspectionDocument(normalized, { submittedByTechnicianId, submittedByEmail, now }) {
     return {
         status: 'submitted',
         diagnosis: {
@@ -206,7 +206,7 @@ function buildInspectionDocument(normalized, { submittedByRiderId, submittedByEm
         },
         internalNotes: normalized.internalNotes,
         submittedAt: now,
-        submittedByRiderId,
+        submittedByTechnicianId,
         submittedByEmail,
         version: INSPECTION_VERSION
     };
@@ -220,8 +220,8 @@ function emptyInspectionView() {
 
 // Role-projected read view. Customer/owner and anyone else authorized to read
 // gets the assessment but never internalNotes, submittedByEmail, or
-// submittedByRiderId. Only admins and the assigned technician additionally
-// receive internalNotes. No internal identifier (submittedByEmail/RiderId) is
+// submittedByTechnicianId. Only admins and the assigned technician additionally
+// receive internalNotes. No internal identifier (submittedByEmail/TechnicianId) is
 // ever returned to anyone through this view.
 function buildInspectionView(inspection, { includeInternalNotes }) {
     if (!inspection || inspection.status !== 'submitted') {

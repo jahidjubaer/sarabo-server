@@ -24,7 +24,7 @@ class PaymentController {
         this.RepairRequest = models.RepairRequest;
         this.User = models.User;
         this.collections = collections;
-        // Same notification-service construction parcelController.js already
+        // Same notification-service construction repairRequestController.js already
         // uses - injected into the payment processor rather than required
         // from within services/paymentProcessor.js itself, since
         // services/notificationService.js requires paymentProcessor.js back
@@ -34,40 +34,40 @@ class PaymentController {
         // validates a Checkout Session and records a payment for it.
         this.processCheckoutSession = createPaymentProcessor(models, collections, this.notifications);
         // Guards against duplicate concurrent Stripe Checkout Sessions for
-        // the same parcel - see services/checkoutSessionManager.js.
+        // the same repair request - see services/checkoutSessionManager.js.
         this.checkoutSessions = createCheckoutSessionManager(collections);
     }
 
     async createCheckoutSession(req, res) {
         try {
-            const { requestId: rawParcelId } = req.body;
+            const { requestId: rawRepairRequestId } = req.body;
 
-            if (!rawParcelId || !ObjectId.isValid(rawParcelId)) {
+            if (!rawRepairRequestId || !ObjectId.isValid(rawRepairRequestId)) {
                 return res.status(400).send({ message: 'invalid or missing repair request id' });
             }
 
-            const parcel = await this.RepairRequest.findById(rawParcelId);
-            if (!parcel) {
+            const repairRequest = await this.RepairRequest.findById(rawRepairRequestId);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'repair request not found' });
             }
 
             // Only the request's own owner may create a checkout session for
             // it - the authenticated token email is authoritative, never a
             // client-supplied email.
-            const ownerEmail = normalize(parcel.senderEmail);
+            const ownerEmail = normalize(repairRequest.senderEmail);
             const callerEmail = normalize(req.decoded_email);
             if (ownerEmail !== callerEmail) {
                 return res.status(403).send({ message: 'forbidden access' });
             }
 
-            // Centralizes every parcel-state-only eligibility rule (already
+            // Centralizes every repair request-state-only eligibility rule (already
             // paid, permitted lifecycle status, valid stored cost) - see
             // services/paymentEligibility.js. Must run before any checkout-
             // session slot is claimed or Stripe is called, but this same
             // check is never applied to webhook/browser-success completion,
             // which must remain able to finalize a session created earlier
             // even if the repair lifecycle has since moved on.
-            const eligibility = getPaymentEligibility(parcel);
+            const eligibility = getPaymentEligibility(repairRequest);
             if (!eligibility.eligible) {
                 const statusByCode = { ALREADY_PAID: 409, PAYMENT_NOT_AVAILABLE: 409, INVALID_PAYMENT_AMOUNT: 400 };
                 return res.status(statusByCode[eligibility.code] || 400).send({
@@ -80,7 +80,7 @@ class PaymentController {
             // cost - a client-supplied amount is never accepted or used.
             const cost = eligibility.cost;
             const unitAmount = toSmallestUnit(cost);
-            const requestId = parcel._id.toString();
+            const requestId = repairRequest._id.toString();
 
             const conflictResponse = () => res.status(409).send({
                 message: 'a checkout session is already being created for this request, please try again shortly',
@@ -88,7 +88,7 @@ class PaymentController {
             });
 
             // Reuse an existing, still-open Stripe Checkout Session for this
-            // parcel if one exists - this is what prevents multiple tabs,
+            // repair request if one exists - this is what prevents multiple tabs,
             // rapid retries, or concurrent requests from spawning multiple
             // live Stripe sessions for the same repair request.
             const activeRow = await this.checkoutSessions.findActive(requestId);
@@ -134,7 +134,7 @@ class PaymentController {
                                     currency: PAYMENT_CURRENCY,
                                     unit_amount: unitAmount,
                                     product_data: {
-                                        name: `Repair request: ${parcel.parcelName}`
+                                        name: `Repair request: ${repairRequest.deviceName}`
                                     }
                                 },
                                 quantity: 1,
@@ -143,7 +143,7 @@ class PaymentController {
                         mode: 'payment',
                         metadata: {
                             requestId,
-                            trackingId: parcel.trackingId
+                            trackingId: repairRequest.trackingId
                         },
                         customer_email: req.decoded_email,
                         success_url: `${SITE_ORIGIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
@@ -158,7 +158,7 @@ class PaymentController {
             } catch (stripeError) {
                 console.error('Checkout session creation failed:', stripeError.message);
                 // Release the slot - a failed Stripe call must never
-                // permanently lock the parcel out of future checkout attempts.
+                // permanently lock the repair request out of future checkout attempts.
                 await this.checkoutSessions.markFailed(claimResult.id);
                 return res.status(500).send({ message: 'Error creating checkout session' });
             }
@@ -200,14 +200,14 @@ class PaymentController {
             if (!ObjectId.isValid(id)) {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
-            const parcel = await this.RepairRequest.findById(id);
-            if (!parcel) {
+            const repairRequest = await this.RepairRequest.findById(id);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
-            if (normalize(parcel.senderEmail) !== normalize(req.decoded_email)) {
+            if (normalize(repairRequest.senderEmail) !== normalize(req.decoded_email)) {
                 return res.status(403).send({ message: 'forbidden access', code: 'NOT_REQUEST_OWNER' });
             }
-            const eligibility = getV2PaymentEligibility(parcel);
+            const eligibility = getV2PaymentEligibility(repairRequest);
             if (!eligibility.eligible) {
                 return res.send({ eligible: false, code: eligibility.code });
             }
@@ -225,7 +225,7 @@ class PaymentController {
     // Creates a Stripe Checkout Session for an approved v2 quote. The request
     // body is ignored entirely: the amount (BDT) and currency are derived from
     // the approved quote and the owner from the authenticated token - a client
-    // can never influence any of them. Reuses the same per-parcel checkout-slot
+    // can never influence any of them. Reuses the same per-repair request checkout-slot
     // concurrency guard as the legacy flow, so repeated clicks or parallel
     // requests never spawn more than one payable Stripe session. Completion
     // funnels through the same idempotent processCheckoutSession (v2 branch).
@@ -235,16 +235,16 @@ class PaymentController {
             if (!ObjectId.isValid(id)) {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
-            const parcel = await this.RepairRequest.findById(id);
-            if (!parcel) {
+            const repairRequest = await this.RepairRequest.findById(id);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
-            const ownerEmail = normalize(parcel.senderEmail);
+            const ownerEmail = normalize(repairRequest.senderEmail);
             if (ownerEmail !== normalize(req.decoded_email)) {
                 return res.status(403).send({ message: 'forbidden access', code: 'NOT_REQUEST_OWNER' });
             }
 
-            const eligibility = getV2PaymentEligibility(parcel);
+            const eligibility = getV2PaymentEligibility(repairRequest);
             if (!eligibility.eligible) {
                 const statusByCode = { ALREADY_PAID: 409 };
                 return res.status(statusByCode[eligibility.code] || 409).send({ message: eligibility.reason, code: eligibility.code });
@@ -252,14 +252,14 @@ class PaymentController {
 
             const amountTaka = eligibility.amount;
             const unitAmount = toSmallestUnit(amountTaka);
-            const requestId = parcel._id.toString();
+            const requestId = repairRequest._id.toString();
 
             const conflictResponse = () => res.status(409).send({
                 message: 'a checkout session is already being created for this request, please try again shortly',
                 code: 'CHECKOUT_CREATION_IN_PROGRESS'
             });
 
-            // Reuse an existing, still-open Stripe session for this parcel - the
+            // Reuse an existing, still-open Stripe session for this repair request - the
             // real multi-tab / rapid-retry / parallel-request guard.
             const activeRow = await this.checkoutSessions.findActive(requestId);
             if (activeRow) {
@@ -294,7 +294,7 @@ class PaymentController {
                                     currency: V2_PAYMENT_CURRENCY,
                                     unit_amount: unitAmount,
                                     product_data: {
-                                        name: `Repair request: ${parcel.parcelName}`
+                                        name: `Repair request: ${repairRequest.deviceName}`
                                     }
                                 },
                                 quantity: 1,
@@ -303,14 +303,14 @@ class PaymentController {
                         mode: 'payment',
                         // Only safe, non-authoritative references - never an
                         // amount, currency, or any client-supplied field. The
-                        // completion path re-derives everything from the parcel.
+                        // completion path re-derives everything from the repair request.
                         metadata: {
                             requestId,
-                            trackingId: parcel.trackingId,
+                            trackingId: repairRequest.trackingId,
                             schemaVersion: '2',
                             quoteVersion: String(eligibility.quoteVersion),
                         },
-                        customer_email: parcel.senderEmail,
+                        customer_email: repairRequest.senderEmail,
                         success_url: `${SITE_ORIGIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
                         cancel_url: `${SITE_ORIGIN}/dashboard/payment-cancelled`,
                     },
@@ -340,7 +340,7 @@ class PaymentController {
 
     // Verifies a completed Stripe Checkout Session server-side and marks the
     // corresponding request paid. The browser only ever supplies the
-    // sessionId - every other fact (owner, amount, currency, parcel state)
+    // sessionId - every other fact (owner, amount, currency, repair request state)
     // is re-derived from Stripe and MongoDB, never trusted from the client.
     // This remains a transitional fallback alongside the Stripe webhook
     // (handleStripeWebhook below), which is the authoritative completion

@@ -82,7 +82,7 @@ SITE_DOMAIN=http://localhost:5173
 | Name | Purpose |
 |---|---|
 | `FB_SERVICE_KEY` | Base64-encoded Firebase Admin service account key, used to verify Firebase ID tokens. |
-| `FIREBASE_STORAGE_BUCKET` | Optional. Firebase Storage bucket name (not a URL) backing the damage-evidence upload endpoints (`/parcels/:id/damage-images/*`). Every other endpoint works without it; damage-upload endpoints return a controlled `STORAGE_UNAVAILABLE` (503) if unset. |
+| `FIREBASE_STORAGE_BUCKET` | Optional. Firebase Storage bucket name (not a URL) backing the damage-evidence upload endpoints (`/repair-requests/:id/damage-images/*`). Every other endpoint works without it; damage-upload endpoints return a controlled `STORAGE_UNAVAILABLE` (503) if unset. |
 | `MONGO_URI` | MongoDB connection string. |
 | `STRIPE_SECRET` | Stripe secret key, used to create checkout sessions. |
 | `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret, used to verify `POST /stripe-webhook` requests. The local Stripe CLI and a deployed Stripe Dashboard webhook endpoint each have their own distinct secret - use whichever one matches the endpoint actually receiving events in this environment, and never mix test-mode and live-mode secrets. |
@@ -130,12 +130,12 @@ Once running, you can test it by visiting:
 
 The server provides various endpoints for:
 - User management (`/users/*`)
-- Parcel management (`/parcels/*`)
-- Rider management (`/riders/*`)
+- Repair request management (`/repair-requests/*`)
+- Technician management (`/technicians/*`)
 - Payment processing (`/payments/*`)
 - Tracking (`/trackings/*`)
 - Service definitions and pricing, read-only (`/service-definitions/*`)
-- Damage-evidence upload for v2 repair requests (`/parcels/:id/damage-images/*`)
+- Damage-evidence upload for v2 repair requests (`/repair-requests/:id/damage-images/*`)
 
 Most endpoints require Firebase authentication via the `Authorization` header.
 Exceptions: the root health check, the Stripe webhook (`POST /stripe-webhook`,
@@ -150,18 +150,18 @@ server (Express has no upload middleware installed, and Vercel's
 serverless request-body limits make routing multi-megabyte image bytes
 through the API impractical). The flow is:
 
-1. `POST /parcels/:id/damage-images/upload-session` - the owner requests a
+1. `POST /repair-requests/:id/damage-images/upload-session` - the owner requests a
    session; the server validates ownership/state/MIME/size and returns a
    short-lived Firebase Storage v4 signed upload URL. No image bytes touch
    this server.
 2. The client `PUT`s the file bytes directly to that signed URL (not yet
    implemented on the client side - out of scope for this unit).
-3. `POST /parcels/:id/damage-images/finalize` - the server re-verifies the
+3. `POST /repair-requests/:id/damage-images/finalize` - the server re-verifies the
    *actual* stored object (content type, size) directly against Firebase
    Storage, never trusting client-declared metadata, then atomically
    attaches the image to the request (MongoDB transaction, max 3 images,
    race-safe).
-4. `GET /parcels/:id/damage-images` (Phase 6.4 Unit 2) - the request owner,
+4. `GET /repair-requests/:id/damage-images` (Phase 6.4 Unit 2) - the request owner,
    an admin, or the currently-assigned technician (while the assignment is
    still active) can list attached images, each with a fresh, short-lived
    signed *read* URL generated on demand. No client implementation exists
@@ -177,7 +177,7 @@ through a fresh signed read URL, generated per request, never persisted.
 
 ### Browser upload contract
 
-`POST /parcels/:id/damage-images/upload-session` returns:
+`POST /repair-requests/:id/damage-images/upload-session` returns:
 
 ```json
 {
@@ -194,7 +194,7 @@ through a fresh signed read URL, generated per request, never persisted.
 
 The client must `fetch(upload.url, { method: upload.method, headers: upload.headers, body: fileBytes })` and send the **exact** `Content-Type` header shown - the signed URL was cryptographically signed with that content type, and GCS rejects the PUT if the actual header sent doesn't match.
 
-`GET /parcels/:id/damage-images` returns per-image `readUrl`/`readUrlExpiresAt` (5-minute expiry) - treat `readUrl` as temporary: never persist it (localStorage, app database), keep it only in memory/component state, and re-call this endpoint after `readUrlExpiresAt` to get a fresh one. Never log or send a signed URL to analytics.
+`GET /repair-requests/:id/damage-images` returns per-image `readUrl`/`readUrlExpiresAt` (5-minute expiry) - treat `readUrl` as temporary: never persist it (localStorage, app database), keep it only in memory/component state, and re-call this endpoint after `readUrlExpiresAt` to get a fresh one. Never log or send a signed URL to analytics.
 
 `scripts/audit-damage-uploads.js` provides a read-only report of
 expired/abandoned upload sessions - it never deletes anything.
@@ -218,18 +218,18 @@ bucket:
 5. Start the local dev server (`node index.js`).
 6. Create a synthetic v2 repair request (a real customer account is fine
    for a manual local check; avoid touching production data).
-7. Call `POST /parcels/:id/damage-images/upload-session` to get a signed
+7. Call `POST /repair-requests/:id/damage-images/upload-session` to get a signed
    upload URL.
 8. `PUT` a small test image (e.g. a few KB JPEG) to that URL with the exact
    `Content-Type` header from the response.
-9. Call `POST /parcels/:id/damage-images/finalize` and confirm it returns
+9. Call `POST /repair-requests/:id/damage-images/finalize` and confirm it returns
    canonical metadata (not the client's declared values).
-10. Call `GET /parcels/:id/damage-images` and confirm a working, browser-
+10. Call `GET /repair-requests/:id/damage-images` and confirm a working, browser-
     loadable `readUrl` is returned for the image.
 11. Confirm the persisted canonical `url` (visible only via direct database
     inspection, never via any API response) is **not** directly fetchable
     anonymously - it should 403/401 without a signed query string.
-12. Call `DELETE /parcels/:id/damage-images/:imageId` and confirm the
+12. Call `DELETE /repair-requests/:id/damage-images/:imageId` and confirm the
     response reports success.
 13. Confirm both the MongoDB metadata and the Firebase Storage object are
     gone (re-listing returns no images; the object no longer exists in the
@@ -341,6 +341,6 @@ node scripts/seed-service-definitions.js --confirm-seed # writes new rows only
 ## Notes
 
 - The `.env` file is gitignored and should not be committed
-- Make sure you have the Firebase Admin SDK JSON file (`zap-shift-firebase-adminsdk.json`) if you're using it directly (though the code uses base64 encoded version)
+- Make sure you have the Firebase Admin SDK JSON file (`zap-shift-firebase-adminsdk.json`) if you're using it directly (though the code uses base64 encoded version). *(Legacy external Firebase service-account artifact filename, retained as-is — it is generated outside this repo and renaming it would break credential coupling. The product/domain naming is Sarabo.)*
 - For production, use environment variables provided by your hosting platform (Vercel, etc.)
 

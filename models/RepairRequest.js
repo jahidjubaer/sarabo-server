@@ -16,7 +16,7 @@ class RepairRequestModel {
     // only these fields are ever allowed to leave MongoDB for that view,
     // independent of whatever else is later added to a repair-request
     // document. Never includes Stripe/session internals, technician
-    // application fields (NID etc. live on the riders collection, never
+    // application fields (NID etc. live on the technicians collection, never
     // here), or unrelated address/notes detail - those remain available only
     // through the existing single-request detail endpoint.
     static ADMIN_LIST_PROJECTION = {
@@ -24,7 +24,7 @@ class RepairRequestModel {
         trackingId: 1,
         senderName: 1,
         senderEmail: 1,
-        parcelName: 1,
+        deviceName: 1,
         deliveryStatus: 1,
         paymentStatus: 1,
         cost: 1,
@@ -74,9 +74,9 @@ class RepairRequestModel {
         return await this.collection.findOne(query, { projection });
     }
 
-    async create(parcelData) {
-        parcelData.createdAt = new Date();
-        const result = await this.collection.insertOne(parcelData);
+    async create(repairRequestData) {
+        repairRequestData.createdAt = new Date();
+        const result = await this.collection.insertOne(repairRequestData);
         return result;
     }
 
@@ -130,30 +130,30 @@ class RepairRequestModel {
     }
 
     // Set-based active-assignment lookup for eligible-technician evaluation
-    // (Phase 6.3 Unit 5) - one query for every candidate rider, never one
-    // query per rider. Deliberately generic (accepts the status list as a
-    // parameter rather than importing utils/parcelStatus.js's ACTIVE_STATUSES
+    // (Phase 6.3 Unit 5) - one query for every candidate technician, never one
+    // query per technician. Deliberately generic (accepts the status list as a
+    // parameter rather than importing utils/repairRequestStatus.js's ACTIVE_STATUSES
     // itself) so this model stays a thin query primitive and the caller
     // (services/technicianEligibilityService.js) owns which statuses count
     // as "active" for this purpose.
-    async findRiderIdsWithDeliveryStatuses(riderIds, statuses) {
-        if (riderIds.length === 0) return new Set();
+    async findTechnicianIdsWithDeliveryStatuses(technicianIds, statuses) {
+        if (technicianIds.length === 0) return new Set();
         const docs = await this.collection.find(
-            { technicianId: { $in: riderIds }, deliveryStatus: { $in: statuses } },
+            { technicianId: { $in: technicianIds }, deliveryStatus: { $in: statuses } },
             { projection: { technicianId: 1 } }
         ).toArray();
         return new Set(docs.map((doc) => doc.technicianId));
     }
 
     // Set-based completed-repair count for eligible-technician ranking
-    // (Phase 6.3 Unit 5) - one aggregation for every candidate rider, never
-    // one query per rider. `completedStatus` is passed in by the caller
+    // (Phase 6.3 Unit 5) - one aggregation for every candidate technician, never
+    // one query per technician. `completedStatus` is passed in by the caller
     // rather than hardcoded here, for the same reason as
-    // findRiderIdsWithDeliveryStatuses above.
-    async aggregateCompletedCountsByRider(riderIds, completedStatus) {
-        if (riderIds.length === 0) return new Map();
+    // findTechnicianIdsWithDeliveryStatuses above.
+    async aggregateCompletedCountsByTechnician(technicianIds, completedStatus) {
+        if (technicianIds.length === 0) return new Map();
         const pipeline = [
-            { $match: { technicianId: { $in: riderIds }, deliveryStatus: completedStatus } },
+            { $match: { technicianId: { $in: technicianIds }, deliveryStatus: completedStatus } },
             { $group: { _id: '$technicianId', count: { $sum: 1 } } }
         ];
         const rows = await this.collection.aggregate(pipeline).toArray();
@@ -168,7 +168,7 @@ class RepairRequestModel {
     // MongoDB serializes). A concurrent finalize that would push a 4th image
     // simply fails to match once a sibling transaction's push has already
     // landed. Also guards against the exact same storageKey being attached
-    // twice (idempotency/replay safety) - never a broad parcel replacement,
+    // twice (idempotency/replay safety) - never a broad repair request replacement,
     // never touches pricing/service/assignment fields.
     async attachDamageImage({ requestId, storageKey, image, session }) {
         const filter = {
@@ -193,14 +193,14 @@ class RepairRequestModel {
         );
     }
 
-    findDamageImage(parcel, storageKey) {
-        if (!parcel || !parcel.damage || !Array.isArray(parcel.damage.images)) return null;
-        return parcel.damage.images.find((image) => image.storageKey === storageKey) || null;
+    findDamageImage(repairRequest, storageKey) {
+        if (!repairRequest || !repairRequest.damage || !Array.isArray(repairRequest.damage.images)) return null;
+        return repairRequest.damage.images.find((image) => image.storageKey === storageKey) || null;
     }
 
-    countDamageImages(parcel) {
-        if (!parcel || !parcel.damage || !Array.isArray(parcel.damage.images)) return 0;
-        return parcel.damage.images.length;
+    countDamageImages(repairRequest) {
+        if (!repairRequest || !repairRequest.damage || !Array.isArray(repairRequest.damage.images)) return 0;
+        return repairRequest.damage.images.length;
     }
 
     async getDeliveryStatusStats() {

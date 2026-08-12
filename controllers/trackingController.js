@@ -1,7 +1,7 @@
 // Tracking-log statuses safe to show on the unauthenticated public endpoint -
-// deliberately excludes 'parcel_paid' (and anything else outside the real
+// deliberately excludes 'repair_request_paid' (and anything else outside the real
 // repair lifecycle): this endpoint must never reveal payment status, even in
-// a generic "payment received" form. 'parcel_created' is normalized to
+// a generic "payment received" form. 'repair_request_created' is normalized to
 // 'pending-pickup' since they represent the same starting point and only the
 // latter is understood by the client's repair-status label mapping.
 // 'assignment_pending' (Phase 8.2) is a customer-safe, neutral event ("a
@@ -9,7 +9,7 @@
 // reveals a rejection. 'assignment_rejected' is deliberately EXCLUDED - a
 // rejection is internal, so the public timeline only ever shows another
 // assignment_pending when the request is re-offered.
-const PUBLIC_TIMELINE_STATUSES = new Set(['parcel_created', 'assignment_pending', 'driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered', 'cancelled']);
+const PUBLIC_TIMELINE_STATUSES = new Set(['repair_request_created', 'assignment_pending', 'driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered', 'cancelled']);
 
 // Tracking codes are exact-matched bearer-style lookup keys (see
 // utils/trackingId.js) - this also doubles as a cheap format guard so an
@@ -31,17 +31,17 @@ class TrackingController {
             const trackingId = req.params.trackingId;
 
             // Check if user has access to this tracking (via repair request ownership or assignment)
-            const parcel = await this.RepairRequest.findByTrackingId(trackingId);
-            if (!parcel) {
+            const repairRequest = await this.RepairRequest.findByTrackingId(trackingId);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'tracking not found' });
             }
 
             const currentUser = await this.User.findByEmail(req.decoded_email);
-            const isOwner = parcel.senderEmail === req.decoded_email;
-            const isAssignedRider = parcel.technicianEmail === req.decoded_email;
+            const isOwner = repairRequest.senderEmail === req.decoded_email;
+            const isAssignedTechnician = repairRequest.technicianEmail === req.decoded_email;
             const isAdmin = currentUser && currentUser.role === 'admin';
 
-            if (!isOwner && !isAssignedRider && !isAdmin) {
+            if (!isOwner && !isAssignedTechnician && !isAdmin) {
                 return res.status(403).send({ message: 'forbidden access' });
             }
 
@@ -78,8 +78,8 @@ class TrackingController {
                 return res.status(404).send({ message: 'Repair tracking information not found.' });
             }
 
-            const parcel = await this.RepairRequest.findPublicProjectionByTrackingId(trackingCode);
-            if (!parcel) {
+            const repairRequest = await this.RepairRequest.findPublicProjectionByTrackingId(trackingCode);
+            if (!repairRequest) {
                 return res.status(404).send({ message: 'Repair tracking information not found.' });
             }
 
@@ -89,7 +89,7 @@ class TrackingController {
             const timeline = [];
             for (const log of sortedLogs) {
                 if (!PUBLIC_TIMELINE_STATUSES.has(log.status)) continue;
-                const status = log.status === 'parcel_created' ? 'pending-pickup' : log.status;
+                const status = log.status === 'repair_request_created' ? 'pending-pickup' : log.status;
                 const previous = timeline[timeline.length - 1];
                 // Collapses consecutive duplicate statuses (e.g. a retried
                 // status update) into one entry - the first occurrence's
@@ -101,12 +101,12 @@ class TrackingController {
 
             const updatedAt = sortedLogs.length
                 ? sortedLogs[sortedLogs.length - 1].createdAt
-                : parcel.createdAt;
+                : repairRequest.createdAt;
 
             res.send({
                 trackingCode,
-                currentStatus: parcel.deliveryStatus || 'pending-pickup',
-                createdAt: parcel.createdAt,
+                currentStatus: repairRequest.deliveryStatus || 'pending-pickup',
+                createdAt: repairRequest.createdAt,
                 updatedAt,
                 timeline
             });

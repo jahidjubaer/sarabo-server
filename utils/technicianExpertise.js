@@ -1,6 +1,6 @@
 // Canonical technician-expertise domain module (Phase 6.3 Unit 3). Pure
 // validation/comparison logic only - no MongoDB dependency, no database
-// access, so it can be unit-tested and reused by both the rider-application
+// access, so it can be unit-tested and reused by both the technician-application
 // path (createTechnicianApplication) and the dedicated expertise-update endpoint without
 // either one owning the rules.
 //

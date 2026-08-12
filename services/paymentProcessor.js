@@ -4,7 +4,7 @@ const { logTracking } = require('../middleware/logging');
 const { createCheckoutSessionManager } = require('./checkoutSessionManager');
 const { PAYMENT_CURRENCY, V2_PAYMENT_CURRENCY, toSmallestUnit, isValidStoredCost, isValidQuoteTotal, isBdtQuoteCurrency } = require('../config/paymentConfig');
 const { isV2RepairRequest } = require('../utils/repairRequestSchema');
-const { QUOTE_APPROVED, PAYMENT_COMPLETED } = require('../utils/parcelStatus');
+const { QUOTE_APPROVED, PAYMENT_COMPLETED } = require('../utils/repairRequestStatus');
 
 function normalize(value) {
     return (value || '').trim().toLowerCase();
@@ -14,7 +14,7 @@ function normalize(value) {
 // Checkout Session into a recorded payment - shared by the authenticated
 // browser-verification endpoint (Unit 2) and the Stripe webhook (Unit 3), so
 // there is exactly one place that validates ownership/amount/currency and
-// exactly one transaction that records a payment and marks a parcel paid.
+// exactly one transaction that records a payment and marks a repair request paid.
 //
 // `session` must already be trusted by the caller: either freshly retrieved
 // from Stripe with a client-supplied sessionId (browser path - Stripe itself
@@ -35,15 +35,15 @@ function createPaymentProcessor(models, collections, notifications) {
     const checkoutSessionManager = createCheckoutSessionManager(collections);
 
     // Completes a v2 approved-quote payment. Reached only from the shared
-    // processor below, after session mode/paid, metadata, parcel load, and
-    // ownership have already been verified for a v2 parcel. Everything
+    // processor below, after session mode/paid, metadata, repair request load, and
+    // ownership have already been verified for a v2 repair request. Everything
     // authoritative is re-derived from the persisted approved quote; the client
     // (and Stripe metadata) never influence the amount or currency here.
-    async function completeV2CheckoutSession({ session, parcel, sessionId, source }) {
-        const quote = parcel.quote;
+    async function completeV2CheckoutSession({ session, repairRequest, sessionId, source }) {
+        const quote = repairRequest.quote;
         // The quote must still be approved and the request still awaiting
         // payment. These mirror the eligibility rules but are re-checked here
-        // against fresh parcel state, since a payment can only be finalized for
+        // against fresh repair request state, since a payment can only be finalized for
         // a request that is genuinely in the payable state right now.
         if (!quote || quote.status !== 'approved') {
             return { code: 'V2_QUOTE_NOT_APPROVED' };
@@ -63,23 +63,23 @@ function createPaymentProcessor(models, collections, notifications) {
         // A cancelled request can never become paid - the customer's
         // cancellation is authoritative (common non-racing case; the guarded
         // update below covers the true concurrent race).
-        if (parcel.deliveryStatus === 'cancelled') {
+        if (repairRequest.deliveryStatus === 'cancelled') {
             return { code: 'REQUEST_CANCELLED' };
         }
         // Already completed through a different session (this exact session was
         // ruled out by the existing-payment fast path in the caller).
-        if (parcel.deliveryStatus === PAYMENT_COMPLETED || (parcel.payment && parcel.payment.status === 'completed')) {
+        if (repairRequest.deliveryStatus === PAYMENT_COMPLETED || (repairRequest.payment && repairRequest.payment.status === 'completed')) {
             return { code: 'ALREADY_PAID_OTHER_SESSION' };
         }
 
-        const ownerEmail = normalize(parcel.senderEmail);
-        const trackingId = parcel.trackingId;
+        const ownerEmail = normalize(repairRequest.senderEmail);
+        const trackingId = repairRequest.trackingId;
         const paymentIntentId = session.payment_intent || null;
 
         const paymentRecord = {
             sessionId,
             transactionId: paymentIntentId,
-            requestId: parcel._id.toString(),
+            requestId: repairRequest._id.toString(),
             trackingId,
             customerEmail: ownerEmail,
             amount: quote.totalAmount,
@@ -102,7 +102,7 @@ function createPaymentProcessor(models, collections, notifications) {
                 ownerRoleUnresolved = false;
                 committed = null;
 
-                const resolvedOwnerRole = await User.findRoleByEmail(parcel.senderEmail, { session: mongoSession });
+                const resolvedOwnerRole = await User.findRoleByEmail(repairRequest.senderEmail, { session: mongoSession });
                 if (!resolvedOwnerRole) {
                     ownerRoleUnresolved = true;
                     return;
@@ -132,7 +132,7 @@ function createPaymentProcessor(models, collections, notifications) {
                 // altering the quote line items.
                 const updateResult = await collections.repairRequests.updateOne(
                     {
-                        _id: parcel._id,
+                        _id: repairRequest._id,
                         schemaVersion: 2,
                         deliveryStatus: QUOTE_APPROVED,
                         'quote.status': 'approved',
@@ -162,7 +162,7 @@ function createPaymentProcessor(models, collections, notifications) {
                 }
 
                 // Release the active checkout slot atomically with completion.
-                await checkoutSessionManager.completeByParcelId(parcel._id.toString(), mongoSession);
+                await checkoutSessionManager.completeByRequestId(repairRequest._id.toString(), mongoSession);
 
                 // Tracking + notifications join this same transaction, so no
                 // payment can commit without them and none can be emitted for a
@@ -171,22 +171,22 @@ function createPaymentProcessor(models, collections, notifications) {
                 await logTracking(collections.trackingEvents, trackingId, PAYMENT_COMPLETED, mongoSession);
                 await notifications.createNotification({
                     session: mongoSession,
-                    recipientEmail: parcel.senderEmail,
+                    recipientEmail: repairRequest.senderEmail,
                     recipientRole: resolvedOwnerRole,
                     type: 'payment_completed',
-                    entityType: 'parcel',
-                    entityId: parcel._id.toString(),
+                    entityType: 'repair_request',
+                    entityId: repairRequest._id.toString(),
                     actorEmail: null,
                     metadata: { trackingId },
                 });
-                if (parcel.technicianEmail) {
+                if (repairRequest.technicianEmail) {
                     await notifications.createNotification({
                         session: mongoSession,
-                        recipientEmail: parcel.technicianEmail,
+                        recipientEmail: repairRequest.technicianEmail,
                         recipientRole: 'rider',
                         type: 'payment_completed_technician',
-                        entityType: 'parcel',
-                        entityId: parcel._id.toString(),
+                        entityType: 'repair_request',
+                        entityId: repairRequest._id.toString(),
                         actorEmail: null,
                         metadata: { trackingId },
                     });
@@ -204,11 +204,11 @@ function createPaymentProcessor(models, collections, notifications) {
         if (conflict) {
             const winner = await collections.payments.findOne({ sessionId });
             if (winner) {
-                await checkoutSessionManager.completeByParcelId(winner.requestId);
+                await checkoutSessionManager.completeByRequestId(winner.requestId);
                 return { code: 'OK', alreadyProcessed: true, transactionId: winner.transactionId, trackingId: winner.trackingId };
             }
-            const latestParcel = await RepairRequest.findById(parcel._id.toString());
-            if (latestParcel && latestParcel.deliveryStatus === 'cancelled') {
+            const latestRepairRequest = await RepairRequest.findById(repairRequest._id.toString());
+            if (latestRepairRequest && latestRepairRequest.deliveryStatus === 'cancelled') {
                 return { code: 'REQUEST_CANCELLED' };
             }
             return { code: 'ALREADY_PAID_OTHER_SESSION' };
@@ -225,18 +225,18 @@ function createPaymentProcessor(models, collections, notifications) {
         // by either source, on a previous call.
         const existingPayment = await collections.payments.findOne({ sessionId });
         if (existingPayment) {
-            const parcel = await RepairRequest.findById(existingPayment.requestId);
-            if (!parcel) {
+            const repairRequest = await RepairRequest.findById(existingPayment.requestId);
+            if (!repairRequest) {
                 return { code: 'PARCEL_NOT_FOUND' };
             }
-            if (normalizedCaller && normalize(parcel.senderEmail) !== normalizedCaller) {
+            if (normalizedCaller && normalize(repairRequest.senderEmail) !== normalizedCaller) {
                 return { code: 'OWNERSHIP_MISMATCH' };
             }
             // Defensive reconciliation: the active checkout row (if any) for
-            // this parcel should already be completed from the first call
+            // this repair request should already be completed from the first call
             // that recorded this payment, but this keeps repeat/idempotent
             // calls safe even if that earlier reconciliation did not run.
-            await checkoutSessionManager.completeByParcelId(existingPayment.requestId);
+            await checkoutSessionManager.completeByRequestId(existingPayment.requestId);
             return {
                 code: 'OK',
                 alreadyProcessed: true,
@@ -257,8 +257,8 @@ function createPaymentProcessor(models, collections, notifications) {
             return { code: 'MISSING_METADATA' };
         }
 
-        const parcel = await RepairRequest.findById(requestId);
-        if (!parcel) {
+        const repairRequest = await RepairRequest.findById(requestId);
+        if (!repairRequest) {
             return { code: 'PARCEL_NOT_FOUND' };
         }
 
@@ -266,7 +266,7 @@ function createPaymentProcessor(models, collections, notifications) {
         // paid must agree - this holds regardless of source, since Unit 1
         // always creates the session with customer_email set to the owner.
         // The authenticated caller (browser path only) must also agree.
-        const ownerEmail = normalize(parcel.senderEmail);
+        const ownerEmail = normalize(repairRequest.senderEmail);
         const stripeEmail = normalize(session.customer_email);
         if (ownerEmail !== stripeEmail) {
             return { code: 'OWNERSHIP_MISMATCH' };
@@ -278,19 +278,19 @@ function createPaymentProcessor(models, collections, notifications) {
         // Repair Request v2 approved-quote payments (Phase 6.4 Unit 6) diverge
         // from the legacy path entirely from here: the authoritative amount and
         // currency come from the immutable approved quote (BDT), never from
-        // parcel.cost/PAYMENT_CURRENCY, and completion transitions
+        // repair request.cost/PAYMENT_CURRENCY, and completion transitions
         // deliveryStatus to payment_completed rather than only flipping
         // paymentStatus. The shared checks above (session mode/paid, metadata,
-        // parcel load, ownership) and the idempotent existing-payment fast path
+        // repair request load, ownership) and the idempotent existing-payment fast path
         // at the top apply to both paths unchanged. A legacy request never
         // reaches this branch (legacy checkout creation rejects every v2
         // request), and a v2 request never falls through to the legacy code
         // below.
-        if (isV2RepairRequest(parcel)) {
-            return await completeV2CheckoutSession({ session, parcel, sessionId, source });
+        if (isV2RepairRequest(repairRequest)) {
+            return await completeV2CheckoutSession({ session, repairRequest, sessionId, source });
         }
 
-        const cost = Number(parcel.cost);
+        const cost = Number(repairRequest.cost);
         if (!isValidStoredCost(cost)) {
             return { code: 'INVALID_STORED_COST' };
         }
@@ -308,25 +308,25 @@ function createPaymentProcessor(models, collections, notifications) {
         // non-racing case (cancellation already committed well before this
         // call); the transaction's guarded update below additionally covers
         // the true concurrent race (Phase 2.5 Unit 1, Case 3).
-        if (parcel.deliveryStatus === 'cancelled') {
+        if (repairRequest.deliveryStatus === 'cancelled') {
             return { code: 'REQUEST_CANCELLED' };
         }
 
-        if (parcel.paymentStatus === 'paid') {
+        if (repairRequest.paymentStatus === 'paid') {
             // No payment record referenced this sessionId above, so this
-            // parcel was already paid through a different session. Reconcile
+            // repair request was already paid through a different session. Reconcile
             // defensively in case that other session's own completion never
             // released the active checkout row.
-            await checkoutSessionManager.completeByParcelId(parcel._id.toString());
+            await checkoutSessionManager.completeByRequestId(repairRequest._id.toString());
             return { code: 'ALREADY_PAID_OTHER_SESSION' };
         }
 
-        const trackingId = parcel.trackingId;
+        const trackingId = repairRequest.trackingId;
         const transactionId = session.payment_intent;
         const paymentRecord = {
             sessionId,
             transactionId,
-            requestId: parcel._id.toString(),
+            requestId: repairRequest._id.toString(),
             trackingId,
             customerEmail: ownerEmail,
             amount: cost,
@@ -345,11 +345,11 @@ function createPaymentProcessor(models, collections, notifications) {
             await mongoSession.withTransaction(async () => {
                 // Resolved first, inside the same transaction, before any
                 // write below - the real current role, never trusted from
-                // the parcel document, the client, or Stripe. A missing or
+                // the repair request document, the client, or Stripe. A missing or
                 // invalid owner account aborts before anything is written,
                 // mirroring the outcome-object pattern used for every other
                 // pre-write conflict in this function.
-                const resolvedOwnerRole = await User.findRoleByEmail(parcel.senderEmail, { session: mongoSession });
+                const resolvedOwnerRole = await User.findRoleByEmail(repairRequest.senderEmail, { session: mongoSession });
                 if (!resolvedOwnerRole) {
                     ownerRoleUnresolved = true;
                     return;
@@ -379,7 +379,7 @@ function createPaymentProcessor(models, collections, notifications) {
                 // read-then-write check (the early check above only catches
                 // the non-racing case).
                 const updateResult = await collections.repairRequests.updateOne(
-                    { _id: parcel._id, paymentStatus: { $ne: 'paid' }, deliveryStatus: { $ne: 'cancelled' } },
+                    { _id: repairRequest._id, paymentStatus: { $ne: 'paid' }, deliveryStatus: { $ne: 'cancelled' } },
                     { $set: { paymentStatus: 'paid' } },
                     { session: mongoSession }
                 );
@@ -391,28 +391,28 @@ function createPaymentProcessor(models, collections, notifications) {
                     return;
                 }
 
-                // Same transaction as the payment insert + parcel update - the
+                // Same transaction as the payment insert + repair request update - the
                 // active checkout slot is released atomically with the payment
                 // becoming final, never left dangling as "in progress" once
-                // the parcel is actually paid.
-                await checkoutSessionManager.completeByParcelId(parcel._id.toString(), mongoSession);
+                // the repair request is actually paid.
+                await checkoutSessionManager.completeByRequestId(repairRequest._id.toString(), mongoSession);
 
                 // Joins this same transaction, reached only on the genuine
                 // first-time commit path (never on a conflict/no-op return
                 // above, never on the alreadyProcessed fast path, which
                 // returns long before any transaction opens). A genuine
                 // failure here throws and aborts the whole transaction - no
-                // payment document and no paid parcel can commit without it.
+                // payment document and no paid repair request can commit without it.
                 await notifications.createNotification({
                     session: mongoSession,
-                    recipientEmail: parcel.senderEmail,
+                    recipientEmail: repairRequest.senderEmail,
                     recipientRole: resolvedOwnerRole,
                     type: 'payment_confirmed',
-                    entityType: 'parcel',
-                    entityId: parcel._id.toString(),
+                    entityType: 'repair_request',
+                    entityId: repairRequest._id.toString(),
                     actorEmail: null,
                     actorRole: null,
-                    metadata: { trackingId: parcel.trackingId }
+                    metadata: { trackingId: repairRequest.trackingId }
                 });
 
                 committedPayment = { ...paymentRecord, _id: insertedId };
@@ -432,7 +432,7 @@ function createPaymentProcessor(models, collections, notifications) {
                 // reconciled the checkout row in its own transaction - this
                 // is a defensive no-op unless that reconciliation somehow
                 // did not happen.
-                await checkoutSessionManager.completeByParcelId(winner.requestId);
+                await checkoutSessionManager.completeByRequestId(winner.requestId);
                 return {
                     code: 'OK',
                     alreadyProcessed: true,
@@ -443,14 +443,14 @@ function createPaymentProcessor(models, collections, notifications) {
             // No payment ever recorded for this sessionId, yet the guarded
             // update still lost - a concurrent cancellation, not a
             // concurrent payment, must have won the race (Case 3).
-            const latestParcel = await RepairRequest.findById(parcel._id.toString());
-            if (latestParcel && latestParcel.deliveryStatus === 'cancelled') {
+            const latestRepairRequest = await RepairRequest.findById(repairRequest._id.toString());
+            if (latestRepairRequest && latestRepairRequest.deliveryStatus === 'cancelled') {
                 return { code: 'REQUEST_CANCELLED' };
             }
             return { code: 'ALREADY_PAID_OTHER_SESSION' };
         }
 
-        logTracking(collections.trackingEvents, trackingId, 'parcel_paid');
+        logTracking(collections.trackingEvents, trackingId, 'repair_request_paid');
 
         return {
             code: 'OK',

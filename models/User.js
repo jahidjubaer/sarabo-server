@@ -3,7 +3,7 @@ const { normalize } = require('../services/paymentProcessor');
 
 class UserModel {
     // Every role the users collection is ever expected to hold - mirrors the
-    // enum-ownership pattern already used by utils/riderStatus.js's
+    // enum-ownership pattern already used by utils/technicianStatus.js's
     // RECOGNIZED_STATUSES and RepairRequestModel's own static projection constants.
     static VALID_ROLES = ['user', 'rider', 'admin'];
 

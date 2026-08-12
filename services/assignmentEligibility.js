@@ -4,10 +4,10 @@
 // initial, unassigned state. This is a display-only convenience flag for
 // the admin request-list view; assignTechnicianToRepairRequest remains the sole
 // authority on whether an assignment is actually allowed to commit.
-function canAssignRequest(parcel) {
-    const status = parcel.deliveryStatus || 'pending-pickup';
+function canAssignRequest(repairRequest) {
+    const status = repairRequest.deliveryStatus || 'pending-pickup';
     if (status !== 'pending-pickup') return false;
-    if (parcel.technicianEmail) return false;
+    if (repairRequest.technicianEmail) return false;
     return true;
 }
 

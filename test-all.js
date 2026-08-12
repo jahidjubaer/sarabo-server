@@ -218,7 +218,7 @@ async function testStatusTransitions() {
         async function createTestRepairRequest(marker) {
             const res = fakeRes();
             await parcelController.createRepairRequest(
-                { body: { parcelName: marker, cost: 1 }, decoded_email: CUSTOMER_EMAIL },
+                { body: { deviceName: marker, cost: 1 }, decoded_email: CUSTOMER_EMAIL },
                 res
             );
             const id = res.body.insertedId.toString();
@@ -383,11 +383,11 @@ async function testInitialRequestStatus() {
         originalRiderWorkStatus = riderBeforeTest?.workStatus ?? null;
 
         const marker = `TEST-INITIAL-STATUS-${Date.now()}`;
-        const countBefore = await collections.repairRequests.countDocuments({ parcelName: marker });
+        const countBefore = await collections.repairRequests.countDocuments({ deviceName: marker });
 
         const createRes = fakeRes();
         await parcelController.createRepairRequest(
-            { body: { parcelName: marker, cost: 1 }, decoded_email: CUSTOMER_EMAIL },
+            { body: { deviceName: marker, cost: 1 }, decoded_email: CUSTOMER_EMAIL },
             createRes
         );
         const id = createRes.body.insertedId.toString();
@@ -399,7 +399,7 @@ async function testInitialRequestStatus() {
         createdTrackingIds.push(stored.trackingId);
         logTest('New request stores deliveryStatus: pending-pickup in MongoDB', stored.deliveryStatus === 'pending-pickup');
 
-        const countAfter = await collections.repairRequests.countDocuments({ parcelName: marker });
+        const countAfter = await collections.repairRequests.countDocuments({ deviceName: marker });
         logTest('No duplicate request created', countAfter === countBefore + 1);
 
         // Same query the admin "Assign Technicians" page issues.
@@ -504,7 +504,7 @@ async function testSecureCheckoutSession() {
 
         async function createTestRepairRequest(marker, cost) {
             const doc = {
-                parcelName: marker,
+                deviceName: marker,
                 cost,
                 senderEmail: CUSTOMER_EMAIL,
                 trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -661,7 +661,7 @@ async function testSecurePaymentSuccess() {
 
         async function createTestRepairRequest(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, deliveryStatus, paymentStatus } = {}) {
             const doc = {
-                parcelName: marker,
+                deviceName: marker,
                 cost,
                 senderEmail,
                 trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -995,7 +995,7 @@ async function testStripeWebhook() {
 
         async function createTestRepairRequest(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, deliveryStatus, paymentStatus } = {}) {
             const doc = {
-                parcelName: marker,
+                deviceName: marker,
                 cost,
                 senderEmail,
                 trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -1405,7 +1405,7 @@ async function testDuplicateCheckoutPrevention() {
 
         async function createTestRepairRequest(marker, cost = 30) {
             const doc = {
-                parcelName: marker,
+                deviceName: marker,
                 cost,
                 senderEmail: CUSTOMER_EMAIL,
                 trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -1621,7 +1621,7 @@ async function testDuplicateCheckoutPrevention() {
     } finally {
         // Items 11/12 above genuinely record a payment via the real
         // processVerifiedCheckoutSession path (webhook/browser reconciliation
-        // tests), which also writes a 'parcel_paid' tracking log - collect
+        // tests), which also writes a 'repair_request_paid' tracking log - collect
         // each parcel's trackingId before deleting it so that log gets
         // cleaned up too, not just the parcel/payment/checkout rows.
         const trackingIdsToClean = [];
@@ -1688,7 +1688,7 @@ async function testCurrencyAndEligibility() {
 
         async function createTestRepairRequest(marker, { cost = 40, deliveryStatus, paymentStatus } = {}) {
             const doc = {
-                parcelName: marker,
+                deviceName: marker,
                 cost,
                 senderEmail: CUSTOMER_EMAIL,
                 trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -1847,7 +1847,7 @@ async function testCurrencyAndEligibility() {
     } finally {
         // Several cases above genuinely record a payment via the real
         // processVerifiedCheckoutSession path, which also writes a
-        // 'parcel_paid' tracking log - collect each parcel's trackingId
+        // 'repair_request_paid' tracking log - collect each parcel's trackingId
         // before deleting it so that log gets cleaned up too.
         const trackingIdsToClean = [];
         for (const id of createdParcelIds) {
@@ -1926,7 +1926,7 @@ async function testPublicTracking() {
 
         async function createTestRepairRequest(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, technicianEmail, deliveryStatus, trackingId } = {}) {
             const doc = {
-                parcelName: marker,
+                deviceName: marker,
                 cost,
                 senderEmail,
                 senderPhone: '01700000000',
@@ -1959,7 +1959,7 @@ async function testPublicTracking() {
 
         // --- 1. Public endpoint requires no Firebase token (real HTTP, no Authorization header). ---
         const p1 = await createTestRepairRequest(`TEST-TRACK-BASIC-${Date.now()}`, { technicianEmail: RIDER_EMAIL, deliveryStatus: 'driver_assigned' });
-        await addLog(p1.trackingId, 'parcel_created');
+        await addLog(p1.trackingId, 'repair_request_created');
         await addLog(p1.trackingId, 'driver_assigned');
         {
             const httpRes = await rawRequest(`/public/trackings/${p1.trackingId}`);
@@ -2024,7 +2024,7 @@ async function testPublicTracking() {
         const p2 = await createTestRepairRequest(`TEST-TRACK-ORDER-${Date.now()}`);
         const now = Date.now();
         await addLog(p2.trackingId, 'parcel_delivered', new Date(now + 3000));
-        await addLog(p2.trackingId, 'parcel_created', new Date(now));
+        await addLog(p2.trackingId, 'repair_request_created', new Date(now));
         await addLog(p2.trackingId, 'parcel_picked_up', new Date(now + 2000));
         await addLog(p2.trackingId, 'driver_assigned', new Date(now + 1000));
         res = await callPublic(p2.trackingId);
@@ -2043,7 +2043,7 @@ async function testPublicTracking() {
 
         // --- 17. Duplicate consecutive identical-status logs are collapsed into one entry. ---
         const p4 = await createTestRepairRequest(`TEST-TRACK-DUP-${Date.now()}`);
-        await addLog(p4.trackingId, 'parcel_created', new Date(now));
+        await addLog(p4.trackingId, 'repair_request_created', new Date(now));
         await addLog(p4.trackingId, 'driver_assigned', new Date(now + 1000));
         await addLog(p4.trackingId, 'driver_assigned', new Date(now + 1500)); // retried/duplicate
         res = await callPublic(p4.trackingId);
@@ -2094,7 +2094,7 @@ async function testPublicTracking() {
             };
             const createRes = fakeRes();
             await parcelController.createRepairRequest(
-                { body: { parcelName: `TEST-TRACK-COLLISION-${Date.now()}`, cost: 25 }, decoded_email: CUSTOMER_EMAIL },
+                { body: { deviceName: `TEST-TRACK-COLLISION-${Date.now()}`, cost: 25 }, decoded_email: CUSTOMER_EMAIL },
                 createRes
             );
             models.RepairRequest.create = originalCreate;
@@ -2112,7 +2112,7 @@ async function testPublicTracking() {
         // --- 26. Existing legacy-format tracking codes still resolve through the public endpoint. ---
         const legacyCode = `PRCL-19990101-${Math.random().toString(16).slice(2, 8).toUpperCase()}`;
         const legacyParcel = await createTestRepairRequest(`TEST-TRACK-LEGACY-${Date.now()}`, { trackingId: legacyCode });
-        await addLog(legacyCode, 'parcel_created');
+        await addLog(legacyCode, 'repair_request_created');
         res = await callPublic(legacyCode);
         logTest('Existing legacy-format (PRCL-...) tracking codes still resolve', res.statusCode === 200 && res.body.trackingCode === legacyCode);
 
@@ -2218,7 +2218,7 @@ async function testRequestCancellation() {
 
         async function createTestRepairRequest(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, deliveryStatus, technicianEmail, paymentStatus } = {}) {
             const doc = {
-                parcelName: marker,
+                deviceName: marker,
                 cost,
                 senderEmail,
                 trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -2541,7 +2541,7 @@ async function testTechnicianAssignment() {
 
         async function createTestRepairRequest(marker, { deliveryStatus = 'pending-pickup', omitStatus = false } = {}) {
             const doc = {
-                parcelName: marker,
+                deviceName: marker,
                 cost: 30,
                 senderEmail: CUSTOMER_EMAIL,
                 trackingId: `TEST-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -3307,7 +3307,7 @@ async function testTechnicianApprovalTransaction() {
 
         async function createTestRepairRequest(marker, { deliveryStatus = 'pending-pickup', technicianId } = {}) {
             const doc = {
-                parcelName: marker,
+                deviceName: marker,
                 cost: 30,
                 senderEmail: CUSTOMER_EMAIL,
                 deliveryStatus,
@@ -3818,7 +3818,7 @@ async function testRepairCompletionTransaction() {
 
         async function createTestRepairRequest(marker, { deliveryStatus = 'parcel_picked_up', technicianId, technicianEmail, technicianName } = {}) {
             const doc = {
-                parcelName: marker,
+                deviceName: marker,
                 cost: 30,
                 senderEmail: CUSTOMER_EMAIL,
                 deliveryStatus,
@@ -4241,7 +4241,7 @@ async function testAdminParcelsList() {
         async function insertFixture(suffix, overrides = {}) {
             const now = new Date();
             const doc = {
-                parcelName: `${marker}-${suffix}`,
+                deviceName: `${marker}-${suffix}`,
                 senderName: `${marker} Customer ${suffix}`,
                 senderEmail: `${marker.toLowerCase()}-${suffix.toLowerCase()}@example.com`,
                 trackingId: `${marker}-TRK-${suffix}`,
@@ -4379,7 +4379,7 @@ async function testAdminParcelsList() {
         logTest('Unpaid filter returns exactly the unpaid/unset fixtures', JSON.stringify(unpaidIds) === JSON.stringify([f1.id, f2.id, f4.id, f6.id].sort()));
 
         // --- 22. Combined search + status. ---
-        res = await callGetAdminParcels({ search: f2.parcelName, status: 'driver_assigned' });
+        res = await callGetAdminParcels({ search: f2.deviceName, status: 'driver_assigned' });
         logTest('Combined search + status filter narrows correctly', res.body.data.length === 1 && res.body.data[0]._id.toString() === f2.id);
 
         // --- 23. Combined status + payment. ---
@@ -4392,7 +4392,7 @@ async function testAdminParcelsList() {
             { trackingId: { $regex: marker, $options: 'i' } },
             { senderEmail: { $regex: marker, $options: 'i' } },
             { senderName: { $regex: marker, $options: 'i' } },
-            { parcelName: { $regex: marker, $options: 'i' } }
+            { deviceName: { $regex: marker, $options: 'i' } }
         ] });
         logTest(
             'Total count reflects the same filter as the paginated data, independent of limit',
@@ -4438,7 +4438,7 @@ async function testAdminParcelsList() {
         for (const id of createdParcelIds) {
             await collections.repairRequests.deleteOne({ _id: new ObjectId(id) });
         }
-        const remaining = await collections.repairRequests.countDocuments({ parcelName: { $regex: `^${marker}` } });
+        const remaining = await collections.repairRequests.countDocuments({ deviceName: { $regex: `^${marker}` } });
         logTest('No admin-list test fixtures remain after cleanup', remaining === 0);
     }
 
@@ -4517,7 +4517,7 @@ async function testNotificationFoundation() {
         let allRejectMissingTrackingId = true;
         for (const type of trackingRequiredTypes) {
             const def = NOTIFICATION_EVENTS[type];
-            const entityId = def.entityType === 'rider' ? fakeRiderId : fakeParcelId;
+            const entityId = def.entityType === 'technician' ? fakeRiderId : fakeParcelId;
             try {
                 await createNotification({
                     recipientEmail: testRecipient('missing-tracking'), recipientRole: def.recipientRole || def.recipientRoles[0],
@@ -4535,7 +4535,7 @@ async function testNotificationFoundation() {
         usedRecipients.add(normEmail.toLowerCase());
         const normResult = await createNotification({
             recipientEmail: `  ${normEmail.toUpperCase()}  `, recipientRole: 'user',
-            type: 'repair_completed', entityType: 'parcel', entityId: fakeParcelId,
+            type: 'repair_completed', entityType: 'repair_request', entityId: fakeParcelId,
             metadata: { trackingId: 'SRB-NORM' }
         });
         const normDoc = await models.Notification.findByDeduplicationKey(normResult.deduplicationKey);
@@ -4552,35 +4552,35 @@ async function testNotificationFoundation() {
 
         await expectRejected('10. Empty recipient email rejected', 'INVALID_RECIPIENT_EMAIL', {
             recipientEmail: '   ', recipientRole: 'user', type: 'repair_completed',
-            entityType: 'parcel', entityId: fakeParcelId, metadata: { trackingId: 'SRB-1' }
+            entityType: 'repair_request', entityId: fakeParcelId, metadata: { trackingId: 'SRB-1' }
         });
         await expectRejected('11. Invalid recipient role rejected', 'INVALID_RECIPIENT_ROLE', {
             recipientEmail: testRecipient('badrole'), recipientRole: 'superadmin', type: 'repair_completed',
-            entityType: 'parcel', entityId: fakeParcelId, metadata: { trackingId: 'SRB-1' }
+            entityType: 'repair_request', entityId: fakeParcelId, metadata: { trackingId: 'SRB-1' }
         });
         await expectRejected('12. Unknown event type rejected', 'INVALID_NOTIFICATION_TYPE', {
             recipientEmail: testRecipient('badtype'), recipientRole: 'user', type: 'not_a_real_event',
-            entityType: 'parcel', entityId: fakeParcelId, metadata: {}
+            entityType: 'repair_request', entityId: fakeParcelId, metadata: {}
         });
         await expectRejected('13. Mismatched entity type rejected', 'ENTITY_TYPE_MISMATCH', {
             recipientEmail: testRecipient('badentitytype'), recipientRole: 'user', type: 'repair_completed',
-            entityType: 'rider', entityId: fakeParcelId, metadata: { trackingId: 'SRB-1' }
+            entityType: 'technician', entityId: fakeParcelId, metadata: { trackingId: 'SRB-1' }
         });
         await expectRejected('14. Invalid entity ObjectId rejected', 'INVALID_ENTITY_ID', {
             recipientEmail: testRecipient('badid'), recipientRole: 'user', type: 'repair_completed',
-            entityType: 'parcel', entityId: 'not-an-object-id', metadata: { trackingId: 'SRB-1' }
+            entityType: 'repair_request', entityId: 'not-an-object-id', metadata: { trackingId: 'SRB-1' }
         });
         await expectRejected('15. Invalid actor role rejected', 'INVALID_ACTOR_ROLE', {
             recipientEmail: testRecipient('badactorrole'), recipientRole: 'user', type: 'repair_completed',
-            entityType: 'parcel', entityId: fakeParcelId, actorRole: 'superadmin', metadata: { trackingId: 'SRB-1' }
+            entityType: 'repair_request', entityId: fakeParcelId, actorRole: 'superadmin', metadata: { trackingId: 'SRB-1' }
         });
         await expectRejected('16. Unexpected metadata key rejected', 'UNEXPECTED_METADATA_KEY', {
             recipientEmail: testRecipient('badmetakey'), recipientRole: 'user', type: 'repair_completed',
-            entityType: 'parcel', entityId: fakeParcelId, metadata: { trackingId: 'SRB-1', extra: 'nope' }
+            entityType: 'repair_request', entityId: fakeParcelId, metadata: { trackingId: 'SRB-1', extra: 'nope' }
         });
         await expectRejected('17. Oversized metadata rejected', 'INVALID_METADATA_VALUE', {
             recipientEmail: testRecipient('bigmeta'), recipientRole: 'user', type: 'repair_completed',
-            entityType: 'parcel', entityId: fakeParcelId, metadata: { trackingId: 'x'.repeat(500) }
+            entityType: 'repair_request', entityId: fakeParcelId, metadata: { trackingId: 'x'.repeat(500) }
         });
 
         let allSpoofAttemptsRejected = true;
@@ -4588,7 +4588,7 @@ async function testNotificationFoundation() {
             try {
                 await createNotification({
                     recipientEmail: testRecipient('spoof'), recipientRole: 'user', type: 'repair_completed',
-                    entityType: 'parcel', entityId: fakeParcelId,
+                    entityType: 'repair_request', entityId: fakeParcelId,
                     metadata: { trackingId: 'SRB-1', [spoofKey]: 'attacker-supplied' }
                 });
                 allSpoofAttemptsRejected = false;
@@ -4603,7 +4603,7 @@ async function testNotificationFoundation() {
         usedRecipients.add(creationEmail.toLowerCase());
         const created = await createNotification({
             recipientEmail: creationEmail, recipientRole: 'user', type: 'repair_completed',
-            entityType: 'parcel', entityId: fakeParcelId, actorEmail: null, actorRole: null,
+            entityType: 'repair_request', entityId: fakeParcelId, actorEmail: null, actorRole: null,
             metadata: { trackingId: 'SRB-CREATION' }
         });
         const createdDoc = await models.Notification.findByDeduplicationKey(created.deduplicationKey);
@@ -4619,7 +4619,7 @@ async function testNotificationFoundation() {
 
         const duplicateAttempt = await createNotification({
             recipientEmail: creationEmail, recipientRole: 'user', type: 'repair_completed',
-            entityType: 'parcel', entityId: fakeParcelId, metadata: { trackingId: 'SRB-CREATION' }
+            entityType: 'repair_request', entityId: fakeParcelId, metadata: { trackingId: 'SRB-CREATION' }
         });
         const countAfterDuplicate = await collections.notifications.countDocuments({ deduplicationKey: created.deduplicationKey });
         logTest('25. Same logical event twice creates only one document', countAfterDuplicate === 1);
@@ -4633,11 +4633,11 @@ async function testNotificationFoundation() {
         usedRecipients.add(coexistEmail.toLowerCase());
         const customerCopy = await createNotification({
             recipientEmail: coexistEmail, recipientRole: 'user', type: 'technician_assigned',
-            entityType: 'parcel', entityId: fakeParcelId, metadata: { trackingId: 'SRB-COEXIST' }
+            entityType: 'repair_request', entityId: fakeParcelId, metadata: { trackingId: 'SRB-COEXIST' }
         });
         const technicianCopy = await createNotification({
             recipientEmail: coexistEmail, recipientRole: 'rider', type: 'new_repair_assignment',
-            entityType: 'parcel', entityId: fakeParcelId, metadata: {}
+            entityType: 'repair_request', entityId: fakeParcelId, metadata: {}
         });
         logTest('27. Different recipient-specific assignment types coexist for the same repair', customerCopy.created === true && technicianCopy.created === true);
 
@@ -4654,7 +4654,7 @@ async function testNotificationFoundation() {
                     await createNotification({
                         session: mongoSession,
                         recipientEmail: sessionEmail, recipientRole: 'user', type: 'repair_completed',
-                        entityType: 'parcel', entityId: sessionParcelId, metadata: { trackingId: 'SRB-SESSION' }
+                        entityType: 'repair_request', entityId: sessionParcelId, metadata: { trackingId: 'SRB-SESSION' }
                     });
                     // Force an abort - if the session was genuinely forwarded to
                     // insertOne, this notification must not exist afterward.
@@ -4677,7 +4677,7 @@ async function testNotificationFoundation() {
             await createNotification({
                 session: deadSession,
                 recipientEmail: testRecipient('deadsession'), recipientRole: 'user', type: 'repair_completed',
-                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-1' }
+                entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-1' }
             });
         } catch (error) {
             unexpectedErrorPropagated = error.code !== 11000;
@@ -4702,7 +4702,7 @@ async function testNotificationFoundation() {
         usedRecipients.add(paymentEmail.toLowerCase());
         const paymentNotif = await createNotification({
             recipientEmail: paymentEmail, recipientRole: 'user', type: 'payment_confirmed',
-            entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PRIV' }
+            entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PRIV' }
         });
         const paymentDoc = await models.Notification.findByDeduplicationKey(paymentNotif.deduplicationKey);
         const serialized = JSON.stringify(paymentDoc);
@@ -4713,7 +4713,7 @@ async function testNotificationFoundation() {
         try {
             const withUnknownField = await createNotification({
                 recipientEmail: testRecipient('unknownfield'), recipientRole: 'user', type: 'repair_completed',
-                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-1' },
+                entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-1' },
                 notARealParam: 'should be ignored'
             });
             usedRecipients.add(testRecipient('unknownfield').toLowerCase());
@@ -4731,13 +4731,13 @@ async function testNotificationFoundation() {
         usedRecipients.add(rejectedEmail.toLowerCase());
         const rejectedResult = await createNotification({
             recipientEmail: rejectedEmail, recipientRole: 'user', type: 'technician_application_rejected',
-            entityType: 'rider', entityId: fakeRiderId, metadata: {}
+            entityType: 'technician', entityId: fakeRiderId, metadata: {}
         });
         logTest('38. Rejection notification with recipientRole "user" is accepted', rejectedResult.created === true);
 
         await expectRejected('39. Rejection notification with recipientRole "rider" is now rejected', 'RECIPIENT_ROLE_MISMATCH', {
             recipientEmail: testRecipient('rejected-role-rider'), recipientRole: 'rider', type: 'technician_application_rejected',
-            entityType: 'rider', entityId: fakeRiderId, metadata: {}
+            entityType: 'technician', entityId: fakeRiderId, metadata: {}
         });
 
         // Each of the three role-acceptance checks below uses its own fresh
@@ -4750,7 +4750,7 @@ async function testNotificationFoundation() {
         usedRecipients.add(assignedUserEmail.toLowerCase());
         const assignedUserResult = await createNotification({
             recipientEmail: assignedUserEmail, recipientRole: 'user', type: 'technician_assigned',
-            entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-OWNER-USER' }
+            entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-OWNER-USER' }
         });
         logTest('40. technician_assigned accepts recipientRole "user"', assignedUserResult.created === true);
 
@@ -4758,7 +4758,7 @@ async function testNotificationFoundation() {
         usedRecipients.add(assignedRiderEmail.toLowerCase());
         const assignedRiderResult = await createNotification({
             recipientEmail: assignedRiderEmail, recipientRole: 'rider', type: 'technician_assigned',
-            entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-OWNER-RIDER' }
+            entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-OWNER-RIDER' }
         });
         logTest('41. technician_assigned accepts recipientRole "rider"', assignedRiderResult.created === true);
 
@@ -4766,18 +4766,18 @@ async function testNotificationFoundation() {
         usedRecipients.add(assignedAdminEmail.toLowerCase());
         const assignedAdminResult = await createNotification({
             recipientEmail: assignedAdminEmail, recipientRole: 'admin', type: 'technician_assigned',
-            entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-OWNER-ADMIN' }
+            entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-OWNER-ADMIN' }
         });
         logTest('42. technician_assigned accepts recipientRole "admin"', assignedAdminResult.created === true);
 
         await expectRejected('43. technician_assigned rejects an unsupported role', 'INVALID_RECIPIENT_ROLE', {
             recipientEmail: testRecipient('assigned-owner-superadmin'), recipientRole: 'superadmin', type: 'technician_assigned',
-            entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-OWNER-BAD' }
+            entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-OWNER-BAD' }
         });
 
         await expectRejected('44. Other single-role events still reject a mismatched (but globally valid) role', 'RECIPIENT_ROLE_MISMATCH', {
             recipientEmail: testRecipient('approved-role-admin'), recipientRole: 'admin', type: 'technician_application_approved',
-            entityType: 'rider', entityId: fakeRiderId, metadata: {}
+            entityType: 'technician', entityId: fakeRiderId, metadata: {}
         });
 
         // Full exclusivity (exactly which events are multi-role, and that
@@ -4798,27 +4798,27 @@ async function testNotificationFoundation() {
         usedRecipients.add(fanoutEmailA.toLowerCase());
         const fanoutResultA = await createNotification({
             recipientEmail: fanoutEmailA, recipientRole: 'admin', type: 'technician_application_submitted',
-            entityType: 'rider', entityId: fanoutRiderId, metadata: {}
+            entityType: 'technician', entityId: fanoutRiderId, metadata: {}
         });
         logTest('46. technician_application_submitted allows empty metadata', fanoutResultA.created === true);
 
         await expectRejected('47. adminEmail metadata is rejected as an unexpected key', 'UNEXPECTED_METADATA_KEY', {
             recipientEmail: testRecipient('fanout-badmeta-admin'), recipientRole: 'admin', type: 'technician_application_submitted',
-            entityType: 'rider', entityId: fanoutRiderId, metadata: { adminEmail: 'x@example.com' }
+            entityType: 'technician', entityId: fanoutRiderId, metadata: { adminEmail: 'x@example.com' }
         });
 
         await expectRejected('48. recipientEmail metadata is rejected as an unexpected key', 'UNEXPECTED_METADATA_KEY', {
             recipientEmail: testRecipient('fanout-badmeta-recipient'), recipientRole: 'admin', type: 'technician_application_submitted',
-            entityType: 'rider', entityId: fanoutRiderId, metadata: { recipientEmail: 'x@example.com' }
+            entityType: 'technician', entityId: fanoutRiderId, metadata: { recipientEmail: 'x@example.com' }
         });
 
-        logTest('49. Dedup key includes the normalized trusted recipientEmail', fanoutResultA.deduplicationKey === `rider:${fanoutRiderId}:application_submitted:${fanoutEmailA.toLowerCase()}`);
+        logTest('49. Dedup key includes the normalized trusted recipientEmail', fanoutResultA.deduplicationKey === `technician:${fanoutRiderId}:application_submitted:${fanoutEmailA.toLowerCase()}`);
 
         const fanoutEmailB = testRecipient('fanout-admin-b');
         usedRecipients.add(fanoutEmailB.toLowerCase());
         const fanoutResultB = await createNotification({
             recipientEmail: fanoutEmailB, recipientRole: 'admin', type: 'technician_application_submitted',
-            entityType: 'rider', entityId: fanoutRiderId, metadata: {}
+            entityType: 'technician', entityId: fanoutRiderId, metadata: {}
         });
         logTest(
             '50. Two different admins receive two distinct dedup keys for one application',
@@ -4827,7 +4827,7 @@ async function testNotificationFoundation() {
 
         const fanoutReplayA = await createNotification({
             recipientEmail: fanoutEmailA, recipientRole: 'admin', type: 'technician_application_submitted',
-            entityType: 'rider', entityId: fanoutRiderId, metadata: {}
+            entityType: 'technician', entityId: fanoutRiderId, metadata: {}
         });
         logTest(
             '51. Repeating creation for the same admin produces an idempotent duplicate',
@@ -4865,7 +4865,7 @@ async function testNotificationFoundation() {
             usedRecipients.add(userEmail.toLowerCase());
             const userResult = await createNotification({
                 recipientEmail: userEmail, recipientRole: 'user', type,
-                entityType: 'parcel', entityId, metadata: { trackingId: 'SRB-LIFECYCLE' }
+                entityType: 'repair_request', entityId, metadata: { trackingId: 'SRB-LIFECYCLE' }
             });
             if (userResult.created !== true) allLifecycleAcceptUser = false;
 
@@ -4873,7 +4873,7 @@ async function testNotificationFoundation() {
             usedRecipients.add(technicianEmail.toLowerCase());
             const riderResult = await createNotification({
                 recipientEmail: technicianEmail, recipientRole: 'rider', type,
-                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-LIFECYCLE' }
+                entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-LIFECYCLE' }
             });
             if (riderResult.created !== true) allLifecycleAcceptRider = false;
 
@@ -4881,14 +4881,14 @@ async function testNotificationFoundation() {
             usedRecipients.add(adminEmail.toLowerCase());
             const adminResult = await createNotification({
                 recipientEmail: adminEmail, recipientRole: 'admin', type,
-                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-LIFECYCLE' }
+                entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-LIFECYCLE' }
             });
             if (adminResult.created !== true) allLifecycleAcceptAdmin = false;
 
             try {
                 await createNotification({
                     recipientEmail: testRecipient(`${type}-superadmin`), recipientRole: 'superadmin', type,
-                    entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-LIFECYCLE' }
+                    entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-LIFECYCLE' }
                 });
                 allLifecycleRejectUnsupported = false;
             } catch (error) {
@@ -4920,7 +4920,7 @@ async function testNotificationFoundation() {
             usedRecipients.add(paymentUserEmail.toLowerCase());
             const paymentUserResult = await createNotification({
                 recipientEmail: paymentUserEmail, recipientRole: 'user', type: 'payment_confirmed',
-                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PAYMENT' }
+                entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PAYMENT' }
             });
             logTest('61. payment_confirmed accepts recipientRole user', paymentUserResult.created === true);
 
@@ -4928,7 +4928,7 @@ async function testNotificationFoundation() {
             usedRecipients.add(paymentRiderEmail.toLowerCase());
             const paymentRiderResult = await createNotification({
                 recipientEmail: paymentRiderEmail, recipientRole: 'rider', type: 'payment_confirmed',
-                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PAYMENT' }
+                entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PAYMENT' }
             });
             logTest('62. payment_confirmed accepts recipientRole rider', paymentRiderResult.created === true);
 
@@ -4936,7 +4936,7 @@ async function testNotificationFoundation() {
             usedRecipients.add(paymentAdminEmail.toLowerCase());
             const paymentAdminResult = await createNotification({
                 recipientEmail: paymentAdminEmail, recipientRole: 'admin', type: 'payment_confirmed',
-                entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PAYMENT' }
+                entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PAYMENT' }
             });
             logTest('63. payment_confirmed accepts recipientRole admin', paymentAdminResult.created === true);
 
@@ -4944,7 +4944,7 @@ async function testNotificationFoundation() {
             try {
                 await createNotification({
                     recipientEmail: testRecipient('payment_confirmed-superadmin'), recipientRole: 'superadmin', type: 'payment_confirmed',
-                    entityType: 'parcel', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PAYMENT' }
+                    entityType: 'repair_request', entityId: new ObjectId().toString(), metadata: { trackingId: 'SRB-PAYMENT' }
                 });
             } catch (error) {
                 paymentRejectsUnsupported = error.code === 'INVALID_RECIPIENT_ROLE';
@@ -5022,7 +5022,7 @@ async function testNotificationReadAPIs() {
             return {
                 recipientEmail, recipientRole, type: 'repair_completed',
                 title: 'Repair completed', message: 'Your repair request SRB-1 has been completed.',
-                entityType: 'parcel', entityId: new ObjectId().toString(), actionUrl: '/dashboard/my-requests/x',
+                entityType: 'repair_request', entityId: new ObjectId().toString(), actionUrl: '/dashboard/my-requests/x',
                 priority: 'normal', isRead: false, readAt: null, createdAt: new Date(),
                 actorEmail: null, actorRole: null, deduplicationKey: `test-unit2-dedup-${new ObjectId().toString()}`,
                 metadata: { trackingId: 'SRB-1' }, schemaVersion: 1,
@@ -5048,7 +5048,7 @@ async function testNotificationReadAPIs() {
         });
         const docAdmin = makeDoc(adminEmail, 'admin', {
             type: 'technician_application_submitted', title: 'New technician application',
-            message: 'A new technician application is awaiting review.', entityType: 'rider', metadata: {}
+            message: 'A new technician application is awaiting review.', entityType: 'technician', metadata: {}
         });
 
         const insertedA = [];
@@ -5399,7 +5399,7 @@ async function testTechnicianNotificationIntegration() {
 
         async function createTestRepairRequest(marker, { senderEmail = CUSTOMER_EMAIL, deliveryStatus = 'pending-pickup' } = {}) {
             const doc = {
-                parcelName: marker, cost: 30, senderEmail,
+                deviceName: marker, cost: 30, senderEmail,
                 trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
                 deliveryStatus, createdAt: new Date()
             };
@@ -5804,7 +5804,7 @@ async function testRepairLifecycleNotificationIntegration() {
 
         async function createTestRepairRequest(marker, { senderEmail = CUSTOMER_EMAIL, deliveryStatus = 'driver_assigned', rider } = {}) {
             const doc = {
-                parcelName: marker, cost: 30, senderEmail, deliveryStatus,
+                deviceName: marker, cost: 30, senderEmail, deliveryStatus,
                 trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
                 createdAt: new Date()
             };
@@ -5850,7 +5850,7 @@ async function testRepairLifecycleNotificationIntegration() {
         logTest('8. Spoofed request-body role has no effect', otw1.length === 1 && otw1[0].recipientRole === 'user');
         logTest('9. Actor email is the authenticated technician', otw1.length === 1 && otw1[0].actorEmail === tech1.email);
         logTest('10. Actor role is rider', otw1.length === 1 && otw1[0].actorRole === 'rider');
-        logTest('11. Entity type is parcel', otw1.length === 1 && otw1[0].entityType === 'parcel');
+        logTest('11. Entity type is parcel', otw1.length === 1 && otw1[0].entityType === 'repair_request');
         logTest('12. Entity ID matches parcel', otw1.length === 1 && otw1[0].entityId === p1.id);
         logTest('13. Metadata contains correct trackingId', otw1.length === 1 && otw1[0].metadata.trackingId === p1.trackingId);
         logTest('14. Action URL points to request details', otw1.length === 1 && otw1[0].actionUrl === `/dashboard/my-requests/${p1.id}`);
@@ -5921,7 +5921,7 @@ async function testRepairLifecycleNotificationIntegration() {
         // real insert below hits a genuine duplicate-key outcome.
         await collections.notifications.insertOne({
             recipientEmail: CUSTOMER_EMAIL.toLowerCase(), recipientRole: 'user', type: 'technician_on_the_way',
-            title: 'x', message: 'x', entityType: 'parcel', entityId: p8.id, actionUrl: '/x', priority: 'normal',
+            title: 'x', message: 'x', entityType: 'repair_request', entityId: p8.id, actionUrl: '/x', priority: 'normal',
             isRead: false, readAt: null, createdAt: new Date(), actorEmail: null, actorRole: null,
             deduplicationKey: `repair:${p8.id}:status:rider_arriving`, metadata: {}, schemaVersion: 1
         });
@@ -6001,7 +6001,7 @@ async function testRepairLifecycleNotificationIntegration() {
         const p16 = await createTestRepairRequest(`TEST-UNIT4-INPROGRESS-DUP-${runId}`, { rider: tech16, deliveryStatus: 'parcel_picked_up' });
         await collections.notifications.insertOne({
             recipientEmail: CUSTOMER_EMAIL.toLowerCase(), recipientRole: 'user', type: 'repair_in_progress',
-            title: 'x', message: 'x', entityType: 'parcel', entityId: p16.id, actionUrl: '/x', priority: 'normal',
+            title: 'x', message: 'x', entityType: 'repair_request', entityId: p16.id, actionUrl: '/x', priority: 'normal',
             isRead: false, readAt: null, createdAt: new Date(), actorEmail: null, actorRole: null,
             deduplicationKey: `repair:${p16.id}:status:parcel_picked_up`, metadata: {}, schemaVersion: 1
         });
@@ -6371,7 +6371,7 @@ async function testPaymentNotificationIntegration() {
 
         async function createTestRepairRequest(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL } = {}) {
             const doc = {
-                parcelName: marker, cost, senderEmail,
+                deviceName: marker, cost, senderEmail,
                 trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
                 createdAt: new Date()
             };
@@ -6455,7 +6455,7 @@ async function testPaymentNotificationIntegration() {
         logTest('12/13. Actor email and actor role are both null', pc1.length === 1 && pc1[0].actorEmail === null && pc1[0].actorRole === null);
         logTest('23. Actor email is null', pc1.length === 1 && pc1[0].actorEmail === null);
         logTest('24. Actor role is null', pc1.length === 1 && pc1[0].actorRole === null);
-        logTest('25. Entity type is parcel', pc1.length === 1 && pc1[0].entityType === 'parcel');
+        logTest('25. Entity type is parcel', pc1.length === 1 && pc1[0].entityType === 'repair_request');
         logTest('26. Entity ID matches parcel', pc1.length === 1 && pc1[0].entityId === p1.id);
         logTest('27(contract). Metadata contains trackingId only', pc1.length === 1 && Object.keys(pc1[0].metadata).length === 1 && pc1[0].metadata.trackingId === p1.trackingId);
         logTest('28. Title/message/action URL exact', pc1.length === 1 && pc1[0].title === 'Payment confirmed' && pc1[0].message === `Your payment for repair request ${p1.trackingId} has been confirmed.` && pc1[0].actionUrl === `/dashboard/my-requests/${p1.id}`);
@@ -6579,7 +6579,7 @@ async function testPaymentNotificationIntegration() {
 
         const dupProbe = await models.Notification.insertOne({
             recipientEmail: CUSTOMER_EMAIL.toLowerCase(), recipientRole: 'user', type: 'payment_confirmed',
-            title: 'Payment confirmed', message: 'x', entityType: 'parcel', entityId: p1.id, actionUrl: '/x', priority: 'normal',
+            title: 'Payment confirmed', message: 'x', entityType: 'repair_request', entityId: p1.id, actionUrl: '/x', priority: 'normal',
             isRead: false, readAt: null, createdAt: new Date(), actorEmail: null, actorRole: null,
             deduplicationKey: `repair:${p1.id}:payment_confirmed`, metadata: { trackingId: p1.trackingId }, schemaVersion: 1
         }).then(() => ({ inserted: true })).catch(err => ({ inserted: false, code: err.code }));
@@ -8219,7 +8219,7 @@ async function testTechnicianExpertise() {
 
         async function createActiveParcelFor(technicianId, marker) {
             const doc = {
-                parcelName: marker, cost: 30, senderEmail: `test-expertise-customer-${runId}@test.local`,
+                deviceName: marker, cost: 30, senderEmail: `test-expertise-customer-${runId}@test.local`,
                 trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
                 deliveryStatus: 'driver_assigned', technicianId, createdAt: new Date()
             };
@@ -8416,7 +8416,7 @@ async function testTechnicianExpertise() {
             // assignment transaction resolves the owner's notification role
             // from it, matching the same CUSTOMER_EMAIL convention already
             // used throughout this file's other assignment-path tests.
-            parcelName: `TEST-EXPERTISE-RACE-PARCEL-${runId}`, cost: 30, senderEmail: CUSTOMER_EMAIL,
+            deviceName: `TEST-EXPERTISE-RACE-PARCEL-${runId}`, cost: 30, senderEmail: CUSTOMER_EMAIL,
             trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`, deliveryStatus: 'pending-pickup', createdAt: new Date()
         };
         const raceParcelInsert = await collections.repairRequests.insertOne(raceParcelDoc);
@@ -8507,7 +8507,7 @@ async function testTechnicianExpertise() {
         }
 
         const leftoverRiders = await collections.technicians.countDocuments({ name: { $regex: '^TEST-EXPERTISE-' } });
-        const leftoverParcels = await collections.repairRequests.countDocuments({ parcelName: { $regex: '^TEST-EXPERTISE-' } });
+        const leftoverParcels = await collections.repairRequests.countDocuments({ deviceName: { $regex: '^TEST-EXPERTISE-' } });
         const leftoverUsers = await collections.users.countDocuments({ email: { $regex: '^test-expertise-' } });
         logTest('34. No fixture leakage after tests', leftoverRiders === 0 && leftoverParcels === 0 && leftoverUsers === 0);
     }
@@ -8628,12 +8628,12 @@ async function testRepairRequestV2() {
         createdUserEmails.push(customerEmail);
 
         // ================= Schema version (1-5) =================
-        const legacyNoVersionRes = await callCreateParcel({ parcelName: `TEST-REQUEST-V2-LEGACY-${runId}`, cost: 40 }, customerEmail);
+        const legacyNoVersionRes = await callCreateParcel({ deviceName: `TEST-REQUEST-V2-LEGACY-${runId}`, cost: 40 }, customerEmail);
         createdParcelIds.push(legacyNoVersionRes.body.insertedId.toString());
         const legacyNoVersionDoc = await collections.repairRequests.findOne({ _id: new ObjectId(legacyNoVersionRes.body.insertedId) });
         logTest('1. Missing schemaVersion follows legacy path', legacyNoVersionRes.statusCode === 200 && legacyNoVersionDoc.product === undefined && legacyNoVersionDoc.cost === 40);
 
-        const legacyV1Res = await callCreateParcel({ schemaVersion: 1, parcelName: `TEST-REQUEST-V2-LEGACYV1-${runId}`, cost: 40 }, customerEmail);
+        const legacyV1Res = await callCreateParcel({ schemaVersion: 1, deviceName: `TEST-REQUEST-V2-LEGACYV1-${runId}`, cost: 40 }, customerEmail);
         createdParcelIds.push(legacyV1Res.body.insertedId.toString());
         const legacyV1Doc = await collections.repairRequests.findOne({ _id: new ObjectId(legacyV1Res.body.insertedId) });
         logTest('2. schemaVersion 1 follows legacy path', legacyV1Res.statusCode === 200 && legacyV1Doc.product === undefined && legacyV1Doc.cost === 40);
@@ -8793,7 +8793,7 @@ async function testRepairRequestV2() {
             Object.keys(legacyNoVersionRes.body).sort().join(',') === 'acknowledged,insertedId'
         );
         const legacyReadBack = await models.RepairRequest.findById(legacyNoVersionRes.body.insertedId.toString());
-        logTest('55. Legacy record without v2 fields remains readable', legacyReadBack !== null && legacyReadBack.parcelName === `TEST-REQUEST-V2-LEGACY-${runId}`);
+        logTest('55. Legacy record without v2 fields remains readable', legacyReadBack !== null && legacyReadBack.deviceName === `TEST-REQUEST-V2-LEGACY-${runId}`);
 
         const mixedListRes = await models.RepairRequest.findAll({ senderEmail: customerEmail });
         logTest('56. Existing legacy list path remains functional over mixed legacy/v2 data', Array.isArray(mixedListRes) && mixedListRes.length >= 2);
@@ -8892,8 +8892,8 @@ async function testRepairRequestV2() {
             await collections.notifications.deleteMany({ entityId: { $in: createdParcelIds } });
         }
 
-        // senderEmail (not parcelName) is the leftover marker here - v2
-        // documents have no parcelName field at all, but every parcel this
+        // senderEmail (not deviceName) is the leftover marker here - v2
+        // documents have no deviceName field at all, but every parcel this
         // section created (legacy or v2) shares this run's synthetic
         // customerEmail as its owner.
         const leftoverParcels = customerEmail ? await collections.repairRequests.countDocuments({ senderEmail: customerEmail }) : 0;
@@ -8942,7 +8942,7 @@ async function testEligibleTechnicianAPI() {
     function evalRider(rider, overrides = {}) {
         return es.evaluateTechnician(rider, {
             requestTaxonomy: baseRequestTaxonomy, serviceDefinition: baseServiceDefinition,
-            activeRiderIds: noActiveAssignments, riderRole: 'rider', ...overrides
+            activeTechnicianIds: noActiveAssignments, technicianRole: 'rider', ...overrides
         });
     }
 
@@ -8958,7 +8958,7 @@ async function testEligibleTechnicianAPI() {
     const busyIds = new Set([busyRider._id.toString()]);
     logTest(
         '16. Active-assignment technician excluded despite available workStatus',
-        evalRider(busyRider, { activeRiderIds: busyIds }).reasonCodes.includes('TECHNICIAN_ALREADY_ASSIGNED')
+        evalRider(busyRider, { activeTechnicianIds: busyIds }).reasonCodes.includes('TECHNICIAN_ALREADY_ASSIGNED')
     );
     logTest('17. Missing expertise excluded', evalRider(makeRider({ expertise: undefined })).reasonCodes.includes('INCOMPLETE_TECHNICIAN_PROFILE'));
     logTest('18. Invalid/corrupt expertise excluded safely (no throw)', evalRider(makeRider({ expertise: 'not-an-array' })).reasonCodes.includes('INCOMPLETE_TECHNICIAN_PROFILE'));
@@ -8978,8 +8978,8 @@ async function testEligibleTechnicianAPI() {
         '22. Higher expertise level satisfies lower requirement',
         evalRider(makeRider({ expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'expert', experienceYears: 10 }] })).eligible === true
     );
-    logTest('23. Missing linked user excluded', evalRider(makeRider(), { riderRole: null }).reasonCodes.includes('TECHNICIAN_ROLE_INCONSISTENT'));
-    logTest('24. Linked user with wrong role excluded', evalRider(makeRider(), { riderRole: 'user' }).reasonCodes.includes('TECHNICIAN_ROLE_INCONSISTENT'));
+    logTest('23. Missing linked user excluded', evalRider(makeRider(), { technicianRole: null }).reasonCodes.includes('TECHNICIAN_ROLE_INCONSISTENT'));
+    logTest('24. Linked user with wrong role excluded', evalRider(makeRider(), { technicianRole: 'user' }).reasonCodes.includes('TECHNICIAN_ROLE_INCONSISTENT'));
     logTest('25. Incomplete region/district excluded', evalRider(makeRider({ district: undefined })).reasonCodes.includes('INCOMPLETE_TECHNICIAN_PROFILE'));
     logTest('26. Different district remains eligible', evalRider(makeRider({ district: 'Gulshan' })).eligible === true);
     logTest('27. Different region remains eligible', evalRider(makeRider({ region: 'Chittagong', district: 'Pahartali' })).eligible === true);
@@ -9125,7 +9125,7 @@ async function testEligibleTechnicianAPI() {
         createdParcelIds.push(v2Res.body.insertedId.toString());
         const v2RequestId = v2Res.body.insertedId.toString();
 
-        const legacyRes = await callCreateParcel({ parcelName: `TEST-ELIGIBILITY-LEGACY-${runId}`, cost: 40 }, customerEmail);
+        const legacyRes = await callCreateParcel({ deviceName: `TEST-ELIGIBILITY-LEGACY-${runId}`, cost: 40 }, customerEmail);
         createdParcelIds.push(legacyRes.body.insertedId.toString());
         const legacyRequestId = legacyRes.body.insertedId.toString();
 
@@ -9235,14 +9235,14 @@ async function testEligibleTechnicianAPI() {
         // ranking contribution and that only parcel_delivered is counted.
         for (let i = 0; i < 2; i += 1) {
             const completedDoc = {
-                parcelName: `TEST-ELIGIBILITY-COMPLETED-${runId}-${i}`, cost: 40, senderEmail: customerEmail,
+                deviceName: `TEST-ELIGIBILITY-COMPLETED-${runId}-${i}`, cost: 40, senderEmail: customerEmail,
                 trackingId: `TEST-${runId}-completed-${i}`, deliveryStatus: 'parcel_delivered', technicianId: eligibleRider2.id, createdAt: new Date()
             };
             const inserted = await collections.repairRequests.insertOne(completedDoc);
             createdParcelIds.push(inserted.insertedId.toString());
         }
         const cancelledDoc = {
-            parcelName: `TEST-ELIGIBILITY-CANCELLED-${runId}`, cost: 40, senderEmail: customerEmail,
+            deviceName: `TEST-ELIGIBILITY-CANCELLED-${runId}`, cost: 40, senderEmail: customerEmail,
             trackingId: `TEST-${runId}-cancelled`, deliveryStatus: 'cancelled', technicianId: eligibleRider2.id, createdAt: new Date()
         };
         const cancelledInsert = await collections.repairRequests.insertOne(cancelledDoc);
@@ -9254,7 +9254,7 @@ async function testEligibleTechnicianAPI() {
         const busyRiderFixture = await createTestTechnician(`TEST-ELIGIBILITY-BUSY-${runId}`);
         await createTestUser(busyRiderFixture.email, 'rider');
         const activeParcelDoc = {
-            parcelName: `TEST-ELIGIBILITY-ACTIVE-${runId}`, cost: 40, senderEmail: customerEmail,
+            deviceName: `TEST-ELIGIBILITY-ACTIVE-${runId}`, cost: 40, senderEmail: customerEmail,
             trackingId: `TEST-${runId}-active`, deliveryStatus: 'driver_assigned', technicianId: busyRiderFixture.id, createdAt: new Date()
         };
         const activeInsert = await collections.repairRequests.insertOne(activeParcelDoc);
@@ -9293,11 +9293,11 @@ async function testEligibleTechnicianAPI() {
 
         const diagTaxonomy = es.deriveRequestTaxonomy(await models.RepairRequest.findById(v2RequestId));
         const diagServiceDef = await models.ServiceDefinition.findById(serviceDef.id);
-        const diagActiveIds = await models.RepairRequest.findRiderIdsWithDeliveryStatuses([busyRiderFixture.id, pendingRider.id], ['driver_assigned', 'rider_arriving', 'parcel_picked_up']);
+        const diagActiveIds = await models.RepairRequest.findTechnicianIdsWithDeliveryStatuses([busyRiderFixture.id, pendingRider.id], ['driver_assigned', 'rider_arriving', 'parcel_picked_up']);
         const busyRiderDoc = await collections.technicians.findOne({ _id: new ObjectId(busyRiderFixture.id) });
         const pendingRiderDoc = await collections.technicians.findOne({ _id: new ObjectId(pendingRider.id) });
-        const busyEval = es.evaluateTechnician(busyRiderDoc, { requestTaxonomy: diagTaxonomy, serviceDefinition: diagServiceDef, activeRiderIds: diagActiveIds, riderRole: 'rider' });
-        const pendingEval = es.evaluateTechnician(pendingRiderDoc, { requestTaxonomy: diagTaxonomy, serviceDefinition: diagServiceDef, activeRiderIds: diagActiveIds, riderRole: 'user' });
+        const busyEval = es.evaluateTechnician(busyRiderDoc, { requestTaxonomy: diagTaxonomy, serviceDefinition: diagServiceDef, activeTechnicianIds: diagActiveIds, technicianRole: 'rider' });
+        const pendingEval = es.evaluateTechnician(pendingRiderDoc, { requestTaxonomy: diagTaxonomy, serviceDefinition: diagServiceDef, activeTechnicianIds: diagActiveIds, technicianRole: 'user' });
         logTest('48. Multiple reason codes supported (structure allows array)', Array.isArray(busyEval.reasonCodes) && busyEval.reasonCodes.includes('TECHNICIAN_ALREADY_ASSIGNED'));
         logTest('49. Reason order deterministic', pendingEval.reasonCodes[0] === 'TECHNICIAN_NOT_APPROVED' && pendingEval.reasonCodes.includes('TECHNICIAN_ROLE_INCONSISTENT'));
 
@@ -9362,8 +9362,8 @@ async function testEligibleTechnicianAPI() {
         const parcelIndexNames = (await collections.repairRequests.indexes()).map((i) => i.name);
         logTest(
             '66. Indexes exist as intended',
-            riderIndexNames.includes('riders_status_workStatus') && riderIndexNames.includes('riders_expertise_productCategorySlug') &&
-            riderIndexNames.includes('riders_expertise_repairCategorySlugs') && parcelIndexNames.includes('parcels_technicianId_deliveryStatus')
+            riderIndexNames.includes('technicians_status_workStatus') && riderIndexNames.includes('technicians_expertise_productCategorySlug') &&
+            riderIndexNames.includes('technicians_expertise_repairCategorySlugs') && parcelIndexNames.includes('repairRequests_technicianId_deliveryStatus')
         );
         const riderIndexSpecs = await collections.technicians.indexes();
         const hasInvalidCompoundMultikey = riderIndexSpecs.some((idx) => {
@@ -9561,7 +9561,7 @@ async function testAssignmentExpertiseRevalidation() {
         }
 
         async function createLegacyParcel(marker) {
-            const res = await callCreateParcel({ parcelName: `TEST-ASSIGNEXPERT-LEGACY-${marker}-${runId}`, cost: 40 }, customerEmail);
+            const res = await callCreateParcel({ deviceName: `TEST-ASSIGNEXPERT-LEGACY-${marker}-${runId}`, cost: 40 }, customerEmail);
             const id = res.body.insertedId.toString();
             createdParcelIds.push(id);
             return id;
@@ -9717,7 +9717,7 @@ async function testAssignmentExpertiseRevalidation() {
             trackingId: `TEST-ASSIGNEXPERT-INCOMPLETE-${runId}`,
             senderEmail: customerEmail,
             senderName: 'TEST-ASSIGNEXPERT',
-            parcelName: 'TEST-ASSIGNEXPERT-incomplete-taxonomy',
+            deviceName: 'TEST-ASSIGNEXPERT-incomplete-taxonomy',
             product: { categorySlug: 'smartphone', brand: 'TestBrand', model: 'TestModel' },
             service: { definitionId: serviceDef.id, repairCategorySlug: 'motherboard' },
             // region present, district deliberately omitted - directly
@@ -9842,8 +9842,8 @@ async function testAssignmentExpertiseRevalidation() {
         // ---- No index change required (31) ----
         const riderIndexNames = (await collections.technicians.indexes()).map((i) => i.name);
         logTest(
-            '31. No new index required - existing riders_status_workStatus / expertise indexes still cover this transaction\'s reads',
-            riderIndexNames.includes('riders_status_workStatus')
+            '31. No new index required - existing technicians_status_workStatus / expertise indexes still cover this transaction\'s reads',
+            riderIndexNames.includes('technicians_status_workStatus')
         );
 
     } finally {
@@ -10014,7 +10014,7 @@ async function testDamageUploadFoundation() {
         }
 
         async function createLegacyParcel() {
-            const res = await callCreateParcel({ parcelName: `TEST-DAMAGE-UPLOAD-LEGACY-${runId}`, cost: 40 }, customerEmail);
+            const res = await callCreateParcel({ deviceName: `TEST-DAMAGE-UPLOAD-LEGACY-${runId}`, cost: 40 }, customerEmail);
             const id = res.body.insertedId.toString();
             createdParcelIds.push(id);
             return id;
@@ -10627,7 +10627,7 @@ async function testAuthorizedDamageImageAccess() {
         }
 
         async function createLegacyParcel() {
-            const res = await callCreateParcel({ parcelName: `TEST-DAMAGE-ACCESS-LEGACY-${runId}`, cost: 40 }, ownerEmail);
+            const res = await callCreateParcel({ deviceName: `TEST-DAMAGE-ACCESS-LEGACY-${runId}`, cost: 40 }, ownerEmail);
             const id = res.body.insertedId.toString();
             createdParcelIds.push(id);
             return id;
@@ -11141,7 +11141,7 @@ async function testBdtPricingMigration() {
         const usdParcelId = usdV2Res.body.insertedId.toString();
         createdParcelIds.push(usdParcelId);
         const usdParcelBefore = await collections.repairRequests.findOne({ _id: new ObjectId(usdParcelId) });
-        const legacyRes = await (async () => { const res = fakeRes(); await parcelController.createRepairRequest({ body: { parcelName: `TEST-BDT-LEGACY-${runId}`, cost: 55 }, decoded_email: ownerEmail }, res); return res; })();
+        const legacyRes = await (async () => { const res = fakeRes(); await parcelController.createRepairRequest({ body: { deviceName: `TEST-BDT-LEGACY-${runId}`, cost: 55 }, decoded_email: ownerEmail }, res); return res; })();
         const legacyParcelId = legacyRes.body.insertedId.toString();
         createdParcelIds.push(legacyParcelId);
         const paymentDoc = { sessionId: `cs_test_bdt_${runId}`, requestId: usdParcelId, ownerEmail, amount: 55, currency: 'usd', status: 'paid', createdAt: new Date() };
@@ -11207,7 +11207,7 @@ async function testInspectionWorkflow() {
     const { ObjectId } = require('mongodb');
     const { initializeModels } = require('./models');
     const { initializeControllers } = require('./controllers');
-    const { ACTIVE_STATUSES, INSPECTION_COMPLETED } = require('./utils/parcelStatus');
+    const { ACTIVE_STATUSES, INSPECTION_COMPLETED } = require('./utils/repairRequestStatus');
     const { getPaymentEligibility } = require('./services/paymentEligibility');
     const { SERVICE_DEFINITION_SEED } = require('./data/serviceDefinitionSeed');
 
@@ -11363,7 +11363,7 @@ async function testInspectionWorkflow() {
         }
         {
             // 9. legacy request rejected.
-            const legacy = await createRepairRequest({ schemaVersion: undefined, product: undefined, service: undefined, pricing: undefined, parcelName: `TEST-INSPECTION-LEGACY-${runId}`, cost: 50 });
+            const legacy = await createRepairRequest({ schemaVersion: undefined, product: undefined, service: undefined, pricing: undefined, deviceName: `TEST-INSPECTION-LEGACY-${runId}`, cost: 50 });
             const r = await callSubmit(legacy.id, techEmail, validPayload());
             logTest('9. Legacy request rejected', r.statusCode === 400 && r.body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
         }
@@ -11409,7 +11409,7 @@ async function testInspectionWorkflow() {
             const doc = await collections.repairRequests.findOne({ _id: p._id });
             const insp = doc.inspection;
             logTest('33. Inspection stored correctly', insp && insp.diagnosis.summary.startsWith('No display output') && insp.diagnosis.detectedIssues.length === 1 && insp.repairability.decision === 'repairable_with_parts');
-            logTest('34. Submitted rider id correct', insp.submittedByRiderId && insp.submittedByRiderId.toString() === techRiderId);
+            logTest('34. Submitted rider id correct', insp.submittedByTechnicianId && insp.submittedByTechnicianId.toString() === techRiderId);
             logTest('35. submittedAt is server-owned Date', insp.submittedAt instanceof Date);
             logTest('36. version is 1', insp.version === 1);
             logTest('37. BDT currency server-owned', insp.estimate.currency === 'BDT' && insp.estimate.laborEstimate === 800 && insp.estimate.partsEstimate === 3500);
@@ -11501,7 +11501,7 @@ async function testInspectionWorkflow() {
             await callSubmit(p.id, techEmail, validPayload());
             const asOwner = await callGet(p.id, ownerEmail);
             logTest('55. Owner may read inspection', asOwner.statusCode === 200 && asOwner.body.inspection.status === 'submitted' && asOwner.body.inspection.diagnosis.summary.length > 0);
-            logTest('59/62. Customer response excludes internalNotes and submittedByEmail', asOwner.body.inspection.internalNotes === undefined && asOwner.body.inspection.submittedByEmail === undefined && asOwner.body.inspection.submittedByRiderId === undefined);
+            logTest('59/62. Customer response excludes internalNotes and submittedByEmail', asOwner.body.inspection.internalNotes === undefined && asOwner.body.inspection.submittedByEmail === undefined && asOwner.body.inspection.submittedByTechnicianId === undefined);
             const asAdmin = await callGet(p.id, adminEmail);
             logTest('56/60. Admin may read and sees internalNotes', asAdmin.statusCode === 200 && asAdmin.body.inspection.internalNotes && asAdmin.body.inspection.internalNotes.includes('INTERNAL-ONLY'));
             const asTech = await callGet(p.id, techEmail);
@@ -11513,7 +11513,7 @@ async function testInspectionWorkflow() {
         }
         {
             // 63. legacy read controlled.
-            const legacy = await createRepairRequest({ schemaVersion: undefined, product: undefined, pricing: undefined, parcelName: `TEST-INSPECTION-LEGACY-READ-${runId}`, cost: 40 });
+            const legacy = await createRepairRequest({ schemaVersion: undefined, product: undefined, pricing: undefined, deviceName: `TEST-INSPECTION-LEGACY-READ-${runId}`, cost: 40 });
             const r = await callGet(legacy.id, ownerEmail);
             logTest('63. Legacy read controlled', r.statusCode === 400 && r.body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
             const notStarted = await callGet((await createRepairRequest()).id, ownerEmail);
@@ -11562,7 +11562,7 @@ async function testQuoteWorkflow() {
     const { ObjectId } = require('mongodb');
     const { initializeModels } = require('./models');
     const { initializeControllers } = require('./controllers');
-    const { ACTIVE_STATUSES, INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED } = require('./utils/parcelStatus');
+    const { ACTIVE_STATUSES, INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED } = require('./utils/repairRequestStatus');
     const { getPaymentEligibility } = require('./services/paymentEligibility');
     const { SERVICE_DEFINITION_SEED } = require('./data/serviceDefinitionSeed');
 
@@ -11614,7 +11614,7 @@ async function testQuoteWorkflow() {
                 damage: { description: 'Screen cracked after a fall onto pavement.', images: [] },
                 serviceLocation: { region: 'Dhaka', district: 'Dhaka', address: '10 Test Rd' },
                 pricing: { currency: 'BDT', estimateMin: 1500, estimateMax: 6000, inspectionFee: 0, calculationVersion: 2, quotedAmount: null, quoteStatus: 'awaiting_quote', customerApprovedAt: null, finalAmount: null },
-                inspection: { status: 'submitted', diagnosis: { summary: 'panel dead', detectedIssues: [{ code: null, label: 'Panel', severity: 'major', notes: null }] }, repairability: { decision: 'repairable_with_parts', reason: 'needs panel' }, estimate: { laborEstimate: 500, partsEstimate: 3000, currency: 'BDT' }, internalNotes: null, submittedAt: now, submittedByRiderId: techInsert.insertedId, submittedByEmail: techEmail, version: 1 },
+                inspection: { status: 'submitted', diagnosis: { summary: 'panel dead', detectedIssues: [{ code: null, label: 'Panel', severity: 'major', notes: null }] }, repairability: { decision: 'repairable_with_parts', reason: 'needs panel' }, estimate: { laborEstimate: 500, partsEstimate: 3000, currency: 'BDT' }, internalNotes: null, submittedAt: now, submittedByTechnicianId: techInsert.insertedId, submittedByEmail: techEmail, version: 1 },
                 deliveryStatus: INSPECTION_COMPLETED, technicianId: techRiderId, technicianName: `TEST-QUOTE-TECH-${runId}`, technicianEmail: techEmail,
                 createdAt: now, updatedAt: now, ...overrides,
             };
@@ -11655,7 +11655,7 @@ async function testQuoteWorkflow() {
             logTest('8. inspection_completed quote accepted', ok.statusCode === 201 && ok.body.deliveryStatus === QUOTE_SUBMITTED);
             logTest('10. Duplicate quote rejected', (await submit(p.id, techEmail, validQuote())).body.code === 'QUOTE_ALREADY_SUBMITTED');
         }
-        logTest('9. Legacy request rejected', (await submit((await createRepairRequest({ schemaVersion: undefined, product: undefined, inspection: undefined, pricing: undefined, parcelName: `TEST-QUOTE-LEGACY-${runId}`, cost: 40 })).id, techEmail, validQuote())).body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
+        logTest('9. Legacy request rejected', (await submit((await createRepairRequest({ schemaVersion: undefined, product: undefined, inspection: undefined, pricing: undefined, deviceName: `TEST-QUOTE-LEGACY-${runId}`, cost: 40 })).id, techEmail, validQuote())).body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
 
         // ================= Validation (11-18) =================
         async function invalid(num, name, body, code) {
@@ -11689,7 +11689,7 @@ async function testQuoteWorkflow() {
             logTest('24. request.pricing unchanged by quote', JSON.stringify(doc.pricing) === beforePricing);
             logTest('25. inspection unchanged by quote', JSON.stringify(doc.inspection) === beforeInsp);
             logTest('48. No Stripe call during quote', capturedStripeSessionParams.length === stripeBefore);
-            logTest('46. Quote view excludes internal submitter id', r.body.quote.submittedByRiderId === undefined);
+            logTest('46. Quote view excludes internal submitter id', r.body.quote.submittedByTechnicianId === undefined);
         }
 
         // ================= Customer decision (26-35) =================
@@ -11767,7 +11767,7 @@ async function testQuoteWorkflow() {
             logTest('43. Admin reads quote', (await getQ(p.id, adminEmail)).statusCode === 200);
             logTest('44. Assigned technician reads quote', (await getQ(p.id, techEmail)).statusCode === 200);
             logTest('45. Unrelated technician denied', (await getQ(p.id, otherTechEmail)).statusCode === 404);
-            logTest('46b. Read view excludes submittedByRiderId', owner.body.quote.submittedByRiderId === undefined);
+            logTest('46b. Read view excludes submittedByTechnicianId', owner.body.quote.submittedByTechnicianId === undefined);
         }
 
         // ================= Regression (49) =================
@@ -11800,7 +11800,7 @@ async function testV2PaymentWorkflow() {
     const { ObjectId } = require('mongodb');
     const { initializeModels } = require('./models');
     const { initializeControllers } = require('./controllers');
-    const { ACTIVE_STATUSES, QUOTE_APPROVED, QUOTE_SUBMITTED, PAYMENT_COMPLETED } = require('./utils/parcelStatus');
+    const { ACTIVE_STATUSES, QUOTE_APPROVED, QUOTE_SUBMITTED, PAYMENT_COMPLETED } = require('./utils/repairRequestStatus');
     const { getPaymentEligibility, getV2PaymentEligibility } = require('./services/paymentEligibility');
     const { PAYMENT_CURRENCY, V2_PAYMENT_CURRENCY, toSmallestUnit } = require('./config/paymentConfig');
     const { SERVICE_DEFINITION_SEED } = require('./data/serviceDefinitionSeed');
@@ -11848,19 +11848,19 @@ async function testV2PaymentWorkflow() {
         const approvedQuote = (o = {}) => ({
             status: 'approved', laborAmount: 800, partsAmount: 3500, additionalCharges: 200,
             totalAmount: 4500, currency: 'BDT', notes: null, submittedAt: new Date(),
-            submittedByRiderId: techInsert.insertedId, decidedAt: new Date(), decisionReason: null, version: 1, ...o,
+            submittedByTechnicianId: techInsert.insertedId, decidedAt: new Date(), decisionReason: null, version: 1, ...o,
         });
 
         async function createRepairRequest(overrides = {}) {
             const now = new Date();
             const doc = {
-                schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail, parcelName: `TEST-PAY-DEVICE-${runId}`,
+                schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail, deviceName: `TEST-PAY-DEVICE-${runId}`,
                 product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
                 service: { definitionId: new ObjectId().toString(), repairCategorySlug: 'display-screen' },
                 damage: { description: 'Screen cracked.', images: [] },
                 serviceLocation: { region: 'Dhaka', district: 'Dhaka', address: '10 Test Rd' },
                 pricing: { currency: 'BDT', estimateMin: 1500, estimateMax: 6000, inspectionFee: 0, calculationVersion: 2, quotedAmount: null, quoteStatus: 'awaiting_quote', customerApprovedAt: null, finalAmount: null },
-                inspection: { status: 'submitted', estimate: { laborEstimate: 500, partsEstimate: 3000, currency: 'BDT' }, submittedAt: now, submittedByRiderId: techInsert.insertedId, submittedByEmail: techEmail, version: 1 },
+                inspection: { status: 'submitted', estimate: { laborEstimate: 500, partsEstimate: 3000, currency: 'BDT' }, submittedAt: now, submittedByTechnicianId: techInsert.insertedId, submittedByEmail: techEmail, version: 1 },
                 quote: approvedQuote(),
                 deliveryStatus: QUOTE_APPROVED, technicianId: techRiderId, technicianName: `TEST-PAY-TECH-${runId}`, technicianEmail: techEmail,
                 createdAt: now, updatedAt: now, ...overrides,
@@ -12028,7 +12028,7 @@ async function testV2PaymentWorkflow() {
         // ================= Regression / isolation (39-46) =================
         {
             // 39. Legacy payment path still creates a USD session, unchanged.
-            const legacy = await collections.repairRequests.insertOne({ trackingId: makeTrackingId(), senderEmail: ownerEmail, parcelName: `TEST-PAY-LEGACY-${runId}`, cost: 30, deliveryStatus: 'parcel_picked_up', createdAt: new Date() });
+            const legacy = await collections.repairRequests.insertOne({ trackingId: makeTrackingId(), senderEmail: ownerEmail, deviceName: `TEST-PAY-LEGACY-${runId}`, cost: 30, deliveryStatus: 'parcel_picked_up', createdAt: new Date() });
             createdParcelIds.push(legacy.insertedId);
             const before = capturedStripeSessionParams.length;
             const res = fakeRes();
@@ -12084,7 +12084,7 @@ async function testRepairWorkflow() {
     const { initializeModels } = require('./models');
     const { DamageStorageService } = require('./services/damageStorageService');
     const RepairController = require('./controllers/repairController');
-    const { ACTIVE_STATUSES, PAYMENT_COMPLETED, QUOTE_APPROVED, REPAIR_IN_PROGRESS, REPAIR_COMPLETED } = require('./utils/parcelStatus');
+    const { ACTIVE_STATUSES, PAYMENT_COMPLETED, QUOTE_APPROVED, REPAIR_IN_PROGRESS, REPAIR_COMPLETED } = require('./utils/repairRequestStatus');
     const { getV2PaymentEligibility } = require('./services/paymentEligibility');
     const { MAX_PROGRESS_UPDATES } = require('./utils/repair');
     const { SERVICE_DEFINITION_SEED } = require('./data/serviceDefinitionSeed');
@@ -12144,7 +12144,7 @@ async function testRepairWorkflow() {
         async function createRepairRequest(overrides = {}) {
             const now = new Date();
             const doc = {
-                schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail, parcelName: `TEST-REP-DEVICE-${runId}`,
+                schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail, deviceName: `TEST-REP-DEVICE-${runId}`,
                 product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
                 inspection: { status: 'submitted', estimate: { laborEstimate: 500, partsEstimate: 3000, currency: 'BDT' }, submittedAt: now, version: 1 },
                 pricing: { currency: 'BDT', estimateMin: 1500, estimateMax: 6000, calculationVersion: 2 },
@@ -12211,7 +12211,7 @@ async function testRepairWorkflow() {
             const r2 = await progress(p.id, techEmail, { message: 'Ordered a replacement part.', foo: 'bar' });
             const doc2 = await collections.repairRequests.findOne({ _id: p._id });
             const last = doc2.repair.progressUpdates[doc2.repair.progressUpdates.length - 1];
-            logTest('13. Unknown fields excluded from stored update', r2.statusCode === 201 && !('foo' in last) && Object.keys(last).sort().join() === 'createdAt,createdByRiderId,id,message');
+            logTest('13. Unknown fields excluded from stored update', r2.statusCode === 201 && !('foo' in last) && Object.keys(last).sort().join() === 'createdAt,createdByTechnicianId,id,message');
             logTest('14a. Client-supplied id rejected', (await progress(p.id, techEmail, { message: 'valid message here', id: 'forged' })).body.code === 'INVALID_PROGRESS');
             logTest('14b. Client-supplied createdAt rejected', (await progress(p.id, techEmail, { message: 'valid message here', createdAt: new Date() })).body.code === 'INVALID_PROGRESS');
         }
@@ -12219,7 +12219,7 @@ async function testRepairWorkflow() {
             // 15. Max 50 enforced.
             const p = await startedParcel();
             const seed = [];
-            for (let i = 0; i < MAX_PROGRESS_UPDATES; i++) seed.push({ id: `seed-${i}`, message: `seed ${i}`, createdAt: new Date(), createdByRiderId: techInsert.insertedId });
+            for (let i = 0; i < MAX_PROGRESS_UPDATES; i++) seed.push({ id: `seed-${i}`, message: `seed ${i}`, createdAt: new Date(), createdByTechnicianId: techInsert.insertedId });
             await collections.repairRequests.updateOne({ _id: p._id }, { $set: { 'repair.progressUpdates': seed } });
             logTest('15. Max 50 progress updates enforced', (await progress(p.id, techEmail, { message: 'one too many updates' })).body.code === 'PROGRESS_LIMIT_REACHED');
         }
@@ -12362,7 +12362,7 @@ async function testRepairWorkflow() {
             logTest('49. Assigned technician can read repair', (await getRep(p.id, techEmail)).statusCode === 200);
             logTest('50. Unrelated technician denied (404)', (await getRep(p.id, otherTechEmail)).statusCode === 404);
             const body = owner.body.repair;
-            logTest('51. No rider ids in read view', !JSON.stringify(body).includes('createdByRiderId') && !JSON.stringify(body).includes(techRiderId));
+            logTest('51. No rider ids in read view', !JSON.stringify(body).includes('createdByTechnicianId') && !JSON.stringify(body).includes(techRiderId));
             logTest('52. No storageKey field in read view', !JSON.stringify(body).includes('storageKey'));
             const ev = body.completion.evidenceImages[0];
             logTest('53. Signed read url present and short-lived', typeof ev.url === 'string' && ev.url.includes('fake-storage.test') && !!ev.readUrlExpiresAt);
@@ -12488,7 +12488,7 @@ async function testSafeRepairDeletion() {
             const now = new Date();
             const doc = {
                 schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail,
-                parcelName: `TEST-DEL-DEVICE-${runId}`,
+                deviceName: `TEST-DEL-DEVICE-${runId}`,
                 product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
                 deliveryStatus: 'pending-pickup', createdAt: now, updatedAt: now, ...overrides,
             };
@@ -12632,7 +12632,7 @@ async function testSafeRepairDeletion() {
         // --- 28. Repair evidence-session rows and their Storage objects are purged (defensive). ---
         const resParcel = await createRepairRequest();
         const k4 = `repair-requests/${resParcel.id}/completion/${runId}-4.jpg`;
-        await collections.repairEvidenceSessions.insertOne({ _id: `res-${runId}`, requestId: resParcel.id, createdByRiderId: 'x', technicianEmail: techEmail, storageKey: k4, status: 'pending', expiresAt: new Date(Date.now() + 3600000), createdAt: new Date() });
+        await collections.repairEvidenceSessions.insertOne({ _id: `res-${runId}`, requestId: resParcel.id, createdByTechnicianId: 'x', technicianEmail: techEmail, storageKey: k4, status: 'pending', expiresAt: new Date(Date.now() + 3600000), createdAt: new Date() });
         fakeBucket._objects.set(k4, { mimeType: 'image/jpeg', size: 444 });
         res = await delReq(resParcel.id, ownerEmail);
         const resRowAfter = await collections.repairEvidenceSessions.findOne({ requestId: resParcel.id });
@@ -13247,7 +13247,7 @@ async function testCP3IdentityFieldContract() {
             const trackingId = `CP3-${runId}-${seq++}`;
             const now = new Date();
             const doc = {
-                schemaVersion: 2, trackingId, senderEmail: customerEmail, parcelName: marker,
+                schemaVersion: 2, trackingId, senderEmail: customerEmail, deviceName: marker,
                 deliveryStatus: 'assignment_pending',
                 technicianId: techId.toString(), technicianName: 'CP3 Tech', technicianEmail: techEmail,
                 assignmentHistory: [{
@@ -13445,7 +13445,7 @@ async function testDamageProjectionHardening() {
 // including inspection.internalNotes (customer-private), the submitting
 // technician's identity, the quote's full pricing breakdown + decision reason,
 // repair completion-evidence storage metadata, and the payment paymentIntentId.
-// projectSafeListParcel now strips all of those, replacing the sub-documents
+// projectSafeListRepairRequest now strips all of those, replacing the sub-documents
 // with boolean existence markers (hasInspection/hasQuote/hasRepair) and reducing
 // the quote to the agreed-price summary the customer list actually renders.
 // These tests assert the strip AND that enough safe summary survives for the UI,
@@ -13457,7 +13457,7 @@ async function testInspectionListProjectionTightening() {
     const { connectDatabase, collections } = require('./config/database');
     const { initializeModels } = require('./models');
     const { initializeControllers } = require('./controllers');
-    const { projectSafeListParcel } = require('./utils/repairRequestProjection');
+    const { projectSafeListRepairRequest } = require('./utils/repairRequestProjection');
 
     function fakeRes() {
         return { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; } };
@@ -13508,7 +13508,7 @@ async function testInspectionListProjectionTightening() {
             trackingId: `TEST-ILP-${runId}`,
             senderEmail: customerEmail,
             senderName: 'ILP Customer',
-            parcelName: 'Laptop',
+            deviceName: 'Laptop',
             product: { categorySlug: 'laptop', brand: 'Acme', model: 'X1' },
             technicianEmail: techEmail,
             technicianName: 'ILP Tech',
@@ -13522,12 +13522,12 @@ async function testInspectionListProjectionTightening() {
                 repairability: { decision: 'repairable', reason: 'ok' },
                 estimate: { laborEstimate: 2000, partsEstimate: 2000, currency: 'BDT' },
                 internalNotes: 'INTERNAL-NOTES-SECRET do not show customer',
-                submittedAt: new Date(), submittedByRiderId: null, submittedByEmail: techEmail, version: 1,
+                submittedAt: new Date(), submittedByTechnicianId: null, submittedByEmail: techEmail, version: 1,
             },
             quote: {
                 status: 'approved', laborAmount: 2000, partsAmount: 2000, additionalCharges: 500,
                 totalAmount: 4500, currency: 'BDT', notes: 'QUOTE-NOTES-SECRET internal',
-                submittedAt: new Date(), submittedByRiderId: null,
+                submittedAt: new Date(), submittedByTechnicianId: null,
                 decidedAt: new Date(), decisionReason: 'DECISION-REASON-SECRET', version: 1,
             },
             repair: {
@@ -13607,8 +13607,8 @@ async function testInspectionListProjectionTightening() {
         logTest('8. Admin /admin/repair-requests list exposes only allow-listed fields (no inspection/quote/repair/payment internals)', res.statusCode === 200 && !!adminItem && !('inspection' in adminItem) && !('quote' in adminItem) && !('repair' in adminItem) && !('payment' in adminItem) && !leaks(adminItem));
 
         // --- pure helper: existence markers + summary, no mutation ---
-        const pure = projectSafeListParcel(richDoc);
-        logTest('9. projectSafeListParcel is pure (input keeps its inspection/quote/repair/payment sub-documents)', richDoc.inspection && richDoc.quote && richDoc.repair && richDoc.payment && !('inspection' in pure) && pure.hasInspection === true);
+        const pure = projectSafeListRepairRequest(richDoc);
+        logTest('9. projectSafeListRepairRequest is pure (input keeps its inspection/quote/repair/payment sub-documents)', richDoc.inspection && richDoc.quote && richDoc.repair && richDoc.payment && !('inspection' in pure) && pure.hasInspection === true);
     } finally {
         if (createdIds.length) await collections.repairRequests.deleteMany({ _id: { $in: createdIds } });
         if (emails.length) await collections.users.deleteMany({ email: { $in: emails } });
@@ -13871,7 +13871,7 @@ async function testTechnicianAssignmentDecisions() {
     const { initializeModels } = require('./models');
     const { initializeControllers } = require('./controllers');
     const { ObjectId } = require('mongodb');
-    const { ACTIVE_STATUSES } = require('./utils/parcelStatus');
+    const { ACTIVE_STATUSES } = require('./utils/repairRequestStatus');
     const { validateRejectionReason } = require('./utils/assignmentDecision');
 
     function fakeRes() {

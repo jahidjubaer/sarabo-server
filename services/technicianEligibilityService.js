@@ -1,7 +1,7 @@
 // Technician eligibility evaluation and ranking (Phase 6.3 Unit 5). Pure
 // business logic only - no MongoDB access, no HTTP coupling. All database
 // orchestration (fetching the request, the service definition, candidate
-// riders, active-assignment set, linked-user roles, completed-repair
+// technicians, active-assignment set, linked-user roles, completed-repair
 // counts) lives in controllers/repairRequestController.js#getEligibleTechnicians;
 // this module only evaluates/ranks/shapes the data it is given. Reuses
 // utils/technicianExpertise.js for every expertise rule rather than
@@ -84,17 +84,17 @@ function validatePagination(rawPage, rawLimit) {
 // ---- Request taxonomy / current service-definition validation ----
 
 // Reads the request's own persisted v2 snapshot - never guesses/derives
-// taxonomy from legacy fields (parcelName, receiverRegion, license, bike).
-function deriveRequestTaxonomy(parcel) {
-    if (!isV2RepairRequest(parcel)) {
+// taxonomy from legacy fields (deviceName, receiverRegion, license, bike).
+function deriveRequestTaxonomy(repairRequest) {
+    if (!isV2RepairRequest(repairRequest)) {
         return { valid: false, code: 'LEGACY_REQUEST_NOT_SUPPORTED', message: 'eligible-technician recommendations are only available for schemaVersion 2 requests' };
     }
 
-    const productCategorySlug = parcel.product && parcel.product.categorySlug;
-    const definitionId = parcel.service && parcel.service.definitionId;
-    const repairCategorySlug = parcel.service && parcel.service.repairCategorySlug;
-    const region = parcel.serviceLocation && parcel.serviceLocation.region;
-    const district = parcel.serviceLocation && parcel.serviceLocation.district;
+    const productCategorySlug = repairRequest.product && repairRequest.product.categorySlug;
+    const definitionId = repairRequest.service && repairRequest.service.definitionId;
+    const repairCategorySlug = repairRequest.service && repairRequest.service.repairCategorySlug;
+    const region = repairRequest.serviceLocation && repairRequest.serviceLocation.region;
+    const district = repairRequest.serviceLocation && repairRequest.serviceLocation.district;
 
     if (
         typeof productCategorySlug !== 'string' || !productCategorySlug ||
@@ -135,54 +135,54 @@ function normalizeForAreaComparison(value) {
     return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
 
-function deriveServiceAreaMatch(requestTaxonomy, rider) {
-    const regionMatch = normalizeForAreaComparison(requestTaxonomy.region) === normalizeForAreaComparison(rider.region);
-    const districtMatch = regionMatch && normalizeForAreaComparison(requestTaxonomy.district) === normalizeForAreaComparison(rider.district);
+function deriveServiceAreaMatch(requestTaxonomy, technician) {
+    const regionMatch = normalizeForAreaComparison(requestTaxonomy.region) === normalizeForAreaComparison(technician.region);
+    const districtMatch = regionMatch && normalizeForAreaComparison(requestTaxonomy.district) === normalizeForAreaComparison(technician.district);
     const matchLevel = districtMatch ? 'exact-district' : (regionMatch ? 'same-region' : 'different-region');
     return { regionMatch, districtMatch, matchLevel };
 }
 
 // ---- Hard eligibility ----
 
-function hasCompleteProfile(rider) {
-    return typeof rider.name === 'string' && rider.name.trim().length > 0 &&
-        typeof rider.region === 'string' && rider.region.trim().length > 0 &&
-        typeof rider.district === 'string' && rider.district.trim().length > 0;
+function hasCompleteProfile(technician) {
+    return typeof technician.name === 'string' && technician.name.trim().length > 0 &&
+        typeof technician.region === 'string' && technician.region.trim().length > 0 &&
+        typeof technician.district === 'string' && technician.district.trim().length > 0;
 }
 
 // Evaluates one candidate against every hard-eligibility rule (Phase F-I).
-// Never throws on malformed/corrupt rider data - an invalid expertise array
+// Never throws on malformed/corrupt technician data - an invalid expertise array
 // is treated as an ineligible, incomplete profile, never as an exception and
 // never as silently eligible. Returns every applicable reason code (not just
 // the first), since diagnostic mode must be able to show a technician
 // multiple simultaneous reasons.
-function evaluateTechnician(rider, { requestTaxonomy, serviceDefinition, activeRiderIds, riderRole }) {
+function evaluateTechnician(technician, { requestTaxonomy, serviceDefinition, activeTechnicianIds, technicianRole }) {
     const reasonCodes = [];
 
-    if (rider.status !== 'approved') {
+    if (technician.status !== 'approved') {
         reasonCodes.push('TECHNICIAN_NOT_APPROVED');
     }
-    if (rider.workStatus !== 'available') {
+    if (technician.workStatus !== 'available') {
         reasonCodes.push('TECHNICIAN_UNAVAILABLE');
     }
     // Checked independently of workStatus - a technician can read as
     // 'available' while historical data drift still leaves them holding an
     // active assignment; that must never be silently trusted.
-    if (activeRiderIds.has(rider._id.toString())) {
+    if (activeTechnicianIds.has(technician._id.toString())) {
         reasonCodes.push('TECHNICIAN_ALREADY_ASSIGNED');
     }
-    if (riderRole !== 'rider') {
+    if (technicianRole !== 'rider') {
         reasonCodes.push('TECHNICIAN_ROLE_INCONSISTENT');
     }
 
     let matchedExpertiseEntry = null;
-    const profileComplete = hasCompleteProfile(rider);
-    const expertiseValidation = Array.isArray(rider.expertise) ? validateTechnicianExpertise(rider.expertise) : { valid: false };
+    const profileComplete = hasCompleteProfile(technician);
+    const expertiseValidation = Array.isArray(technician.expertise) ? validateTechnicianExpertise(technician.expertise) : { valid: false };
 
-    if (!profileComplete || !expertiseValidation.valid || rider.expertise.length === 0) {
+    if (!profileComplete || !expertiseValidation.valid || technician.expertise.length === 0) {
         reasonCodes.push('INCOMPLETE_TECHNICIAN_PROFILE');
     } else {
-        const entry = getExpertiseForProduct(rider.expertise, requestTaxonomy.productCategorySlug);
+        const entry = getExpertiseForProduct(technician.expertise, requestTaxonomy.productCategorySlug);
         if (!entry) {
             reasonCodes.push('PRODUCT_EXPERTISE_MISMATCH');
         } else if (!entry.repairCategorySlugs.includes(requestTaxonomy.repairCategorySlug)) {
@@ -247,15 +247,15 @@ function sortTechnicians(technicians) {
 // ---- Safe response shaping ----
 
 // Only ever built from already-derived, already-safe values - never spreads
-// the raw rider document, so no private field (email, phone, NID, address,
+// the raw technician document, so no private field (email, phone, NID, address,
 // license, bike, application documents) can ever reach this object even if
-// one is added to the rider projection later.
-function buildEligibleTechnicianEntry(rider, evaluationResult, scoreResult, serviceAreaMatch, completedRepairCount) {
+// one is added to the technician projection later.
+function buildEligibleTechnicianEntry(technician, evaluationResult, scoreResult, serviceAreaMatch, completedRepairCount) {
     return {
-        technicianId: rider._id.toString(),
-        displayName: rider.name,
-        avatar: rider.avatar,
-        workStatus: rider.workStatus,
+        technicianId: technician._id.toString(),
+        displayName: technician.name,
+        avatar: technician.avatar,
+        workStatus: technician.workStatus,
         expertiseMatch: true,
         expertiseLevel: evaluationResult.matchedExpertiseEntry.level,
         experienceYears: evaluationResult.matchedExpertiseEntry.experienceYears,
@@ -266,10 +266,10 @@ function buildEligibleTechnicianEntry(rider, evaluationResult, scoreResult, serv
     };
 }
 
-function buildIneligibleTechnicianEntry(rider, evaluationResult) {
+function buildIneligibleTechnicianEntry(technician, evaluationResult) {
     return {
-        technicianId: rider._id.toString(),
-        displayName: rider.name,
+        technicianId: technician._id.toString(),
+        displayName: technician.name,
         reasonCodes: evaluationResult.reasonCodes
     };
 }

@@ -1,6 +1,6 @@
 // DEVELOPMENT-ONLY QA seed for manual v1.1 testing (Phase 8.5).
 //
-// Seeds a deterministic, clearly-namespaced set of repair-request (parcel)
+// Seeds a deterministic, clearly-namespaced set of repair-request (repairRequest)
 // scenarios - one per lifecycle state - plus the matching QA identity role
 // rows, so a human tester can walk the whole customer/technician/admin flow
 // locally without hand-building documents. This never creates Firebase Auth
@@ -9,10 +9,10 @@
 // documented QA emails.
 //
 // Usage:
-//   node scripts/seed-qa-parcels.js                      (dry-run - writes nothing)
-//   node scripts/seed-qa-parcels.js --confirm-seed       (upsert QA users + parcels)
-//   node scripts/seed-qa-parcels.js --reset              (dry-run of the namespaced cleanup)
-//   node scripts/seed-qa-parcels.js --reset --confirm-seed   (delete QA data, then reseed)
+//   node scripts/seed-qa-repair-requests.js                      (dry-run - writes nothing)
+//   node scripts/seed-qa-repair-requests.js --confirm-seed       (upsert QA users + repairRequests)
+//   node scripts/seed-qa-repair-requests.js --reset              (dry-run of the namespaced cleanup)
+//   node scripts/seed-qa-repair-requests.js --reset --confirm-seed   (delete QA data, then reseed)
 //
 // If both --dry-run and --confirm-seed are passed, the safer dry-run wins.
 //
@@ -21,12 +21,12 @@
 // is true AND independently when the resolved database name looks like a
 // production database. Every read, write, and delete is scoped to the QA
 // namespace (trackingId starts with QA_TRACKING_PREFIX, emails end with
-// QA_EMAIL_DOMAIN) - it never touches a real user, rider, payment, or parcel.
+// QA_EMAIL_DOMAIN) - it never touches a real user, rider, payment, or repairRequest.
 // It performs no Stripe calls and no Storage access. Never prints MONGO_URI or
 // any secret - only the resolved database name and computed counts.
 //
 // This is both a CLI entrypoint and a requirable module: the pure builders
-// (buildQaUsers / buildQaParcels) and the safety re-export are usable from
+// (buildQaUsers / buildQaRepairRequests) and the safety re-export are usable from
 // tests without the CLI's connect/process.exit flow.
 
 const { ObjectId } = require('mongodb');
@@ -44,7 +44,7 @@ const QA_IDENTITIES = {
 };
 
 // Deterministic, obviously-fake ObjectIds for the two QA technicians so the
-// seeded parcels reference a stable technicianId across re-runs.
+// seeded repairRequests reference a stable technicianId across re-runs.
 const QA_TECH_A_ID = new ObjectId('0000000000000000000000a1');
 const QA_TECH_B_ID = new ObjectId('0000000000000000000000b2');
 
@@ -76,7 +76,7 @@ function qaInspection() {
         estimate: { laborEstimate: 1500, partsEstimate: 3000, currency: 'BDT' },
         internalNotes: 'QA note (technician-private) - verify part number before ordering.',
         submittedAt: at(50),
-        submittedByRiderId: QA_TECH_B_ID,
+        submittedByTechnicianId: QA_TECH_B_ID,
         submittedByEmail: QA_IDENTITIES.techB.email,
         version: 1,
     };
@@ -91,7 +91,7 @@ function qaQuote(status) {
         currency: 'BDT',
         notes: 'QA quote note (internal).',
         submittedAt: at(60),
-        submittedByRiderId: QA_TECH_B_ID,
+        submittedByTechnicianId: QA_TECH_B_ID,
         decidedAt: status === 'submitted' ? null : at(70),
         decisionReason: status === 'rejected' ? 'QA: customer declined the estimate.' : null,
         version: 1,
@@ -106,7 +106,7 @@ function qaRepair(completed) {
     };
     if (completed) {
         base.completedAt = at(120);
-        base.completedByRiderId = QA_TECH_B_ID;
+        base.completedByTechnicianId = QA_TECH_B_ID;
         base.completion = {
             summary: 'Screen replaced and unit tested.',
             evidenceImages: [{ imageId: 'qa-ev1', storageKey: 'repair-evidence/QA/ev1.jpg', mimeType: 'image/jpeg', size: 1024 }],
@@ -151,16 +151,16 @@ function rejectedAssignmentEntry(techEmail, techName) {
     };
 }
 
-// Every QA parcel shares this base; scenario builders layer status + the
+// Every QA repairRequest shares this base; scenario builders layer status + the
 // relevant sub-documents on top.
-function baseParcel(seq, overrides) {
+function baseRepairRequest(seq, overrides) {
     const trackingId = `${QA_TRACKING_PREFIX}${String(seq).padStart(2, '0')}`;
     return {
         schemaVersion: 2,
         trackingId,
         senderEmail: QA_IDENTITIES.customer.email,
         senderName: QA_IDENTITIES.customer.name,
-        parcelName: 'Laptop screen repair',
+        deviceName: 'Laptop screen repair',
         product: { categorySlug: 'laptop', brand: 'Acme', model: 'X1' },
         damage: { description: 'Cracked screen after a drop.', images: [] },
         paymentStatus: 'unpaid',
@@ -175,48 +175,48 @@ function assignedTo(identity) {
 }
 
 // The full deterministic scenario matrix (12 requests).
-function buildQaParcels() {
+function buildQaRepairRequests() {
     return [
         // 1. brand-new, unassigned, deletable
-        baseParcel(1, { deliveryStatus: 'pending-pickup' }),
+        baseRepairRequest(1, { deliveryStatus: 'pending-pickup' }),
         // 2. offered to a technician, awaiting their decision
-        baseParcel(2, {
+        baseRepairRequest(2, {
             deliveryStatus: 'assignment_pending',
             ...assignedTo(QA_IDENTITIES.techB),
             assignmentHistory: [pendingAssignmentEntry(QA_IDENTITIES.techB.email, QA_IDENTITIES.techB.name)],
         }),
         // 3. technician accepted -> assigned
-        baseParcel(3, { deliveryStatus: 'driver_assigned', ...assignedTo(QA_IDENTITIES.techB) }),
+        baseRepairRequest(3, { deliveryStatus: 'driver_assigned', ...assignedTo(QA_IDENTITIES.techB) }),
         // 4. picked up
-        baseParcel(4, { deliveryStatus: 'parcel_picked_up', ...assignedTo(QA_IDENTITIES.techB) }),
+        baseRepairRequest(4, { deliveryStatus: 'parcel_picked_up', ...assignedTo(QA_IDENTITIES.techB) }),
         // 5. inspection completed
-        baseParcel(5, { deliveryStatus: 'inspection_completed', ...assignedTo(QA_IDENTITIES.techB), inspection: qaInspection() }),
+        baseRepairRequest(5, { deliveryStatus: 'inspection_completed', ...assignedTo(QA_IDENTITIES.techB), inspection: qaInspection() }),
         // 6. quote submitted, awaiting customer decision
-        baseParcel(6, { deliveryStatus: 'quote_submitted', ...assignedTo(QA_IDENTITIES.techB), inspection: qaInspection(), quote: qaQuote('submitted') }),
+        baseRepairRequest(6, { deliveryStatus: 'quote_submitted', ...assignedTo(QA_IDENTITIES.techB), inspection: qaInspection(), quote: qaQuote('submitted') }),
         // 7. quote approved, payment eligible
-        baseParcel(7, { deliveryStatus: 'quote_approved', ...assignedTo(QA_IDENTITIES.techB), inspection: qaInspection(), quote: qaQuote('approved') }),
+        baseRepairRequest(7, { deliveryStatus: 'quote_approved', ...assignedTo(QA_IDENTITIES.techB), inspection: qaInspection(), quote: qaQuote('approved') }),
         // 8. payment completed
-        baseParcel(8, {
+        baseRepairRequest(8, {
             deliveryStatus: 'payment_completed', paymentStatus: 'paid',
             ...assignedTo(QA_IDENTITIES.techB), inspection: qaInspection(), quote: qaQuote('approved'), payment: qaPayment(),
         }),
         // 9. repair in progress
-        baseParcel(9, {
+        baseRepairRequest(9, {
             deliveryStatus: 'repair_in_progress', paymentStatus: 'paid',
             ...assignedTo(QA_IDENTITIES.techB), inspection: qaInspection(), quote: qaQuote('approved'), payment: qaPayment(), repair: qaRepair(false),
         }),
         // 10. repair completed
-        baseParcel(10, {
+        baseRepairRequest(10, {
             deliveryStatus: 'repair_completed', paymentStatus: 'paid',
             ...assignedTo(QA_IDENTITIES.techB), inspection: qaInspection(), quote: qaQuote('approved'), payment: qaPayment(), repair: qaRepair(true),
         }),
         // 11. an assignment that was rejected, returned for reassignment
-        baseParcel(11, {
+        baseRepairRequest(11, {
             deliveryStatus: 'pending-pickup',
             assignmentHistory: [rejectedAssignmentEntry(QA_IDENTITIES.techA.email, QA_IDENTITIES.techA.name)],
         }),
         // 12. a quote the customer rejected
-        baseParcel(12, {
+        baseRepairRequest(12, {
             deliveryStatus: 'quote_rejected',
             ...assignedTo(QA_IDENTITIES.techB), inspection: qaInspection(), quote: qaQuote('rejected'),
         }),
@@ -226,38 +226,38 @@ function buildQaParcels() {
 // --- Idempotent write / namespaced cleanup (pure of console/process) --------
 async function runQaSeed({ collections, dryRun }) {
     const users = buildQaUsers();
-    const parcels = buildQaParcels();
+    const repairRequests = buildQaRepairRequests();
     if (dryRun) {
-        return { dryRun: true, usersUpserted: 0, parcelsUpserted: 0, wouldUpsertUsers: users.length, wouldUpsertParcels: parcels.length };
+        return { dryRun: true, usersUpserted: 0, repairRequestsUpserted: 0, wouldUpsertUsers: users.length, wouldUpsertRepairRequests: repairRequests.length };
     }
     let usersUpserted = 0;
     for (const user of users) {
         await collections.users.updateOne({ email: user.email }, { $set: user }, { upsert: true });
         usersUpserted += 1;
     }
-    let parcelsUpserted = 0;
-    for (const parcel of parcels) {
-        await collections.repairRequests.updateOne({ trackingId: parcel.trackingId }, { $set: parcel }, { upsert: true });
-        parcelsUpserted += 1;
+    let repairRequestsUpserted = 0;
+    for (const repairRequest of repairRequests) {
+        await collections.repairRequests.updateOne({ trackingId: repairRequest.trackingId }, { $set: repairRequest }, { upsert: true });
+        repairRequestsUpserted += 1;
     }
-    return { dryRun: false, usersUpserted, parcelsUpserted };
+    return { dryRun: false, usersUpserted, repairRequestsUpserted };
 }
 
 async function runQaReset({ collections, dryRun }) {
-    const parcelFilter = { trackingId: { $regex: `^${QA_TRACKING_PREFIX}` } };
+    const repairRequestFilter = { trackingId: { $regex: `^${QA_TRACKING_PREFIX}` } };
     const userFilter = { email: { $regex: `${QA_EMAIL_DOMAIN.replace('.', '\\.')}$` } };
     if (dryRun) {
-        const [parcels, users] = await Promise.all([
-            collections.repairRequests.countDocuments(parcelFilter),
+        const [repairRequests, users] = await Promise.all([
+            collections.repairRequests.countDocuments(repairRequestFilter),
             collections.users.countDocuments(userFilter),
         ]);
-        return { dryRun: true, wouldDeleteParcels: parcels, wouldDeleteUsers: users };
+        return { dryRun: true, wouldDeleteRepairRequests: repairRequests, wouldDeleteUsers: users };
     }
     const [p, u] = await Promise.all([
-        collections.repairRequests.deleteMany(parcelFilter),
+        collections.repairRequests.deleteMany(repairRequestFilter),
         collections.users.deleteMany(userFilter),
     ]);
-    return { dryRun: false, deletedParcels: p.deletedCount, deletedUsers: u.deletedCount };
+    return { dryRun: false, deletedRepairRequests: p.deletedCount, deletedUsers: u.deletedCount };
 }
 
 if (require.main === module) {
@@ -288,17 +288,17 @@ if (require.main === module) {
 
         if (isReset) {
             const reset = await runQaReset({ collections, dryRun: isDryRun });
-            if (reset.dryRun) console.log(`Reset (dry run): would delete ${reset.wouldDeleteParcels} QA parcels, ${reset.wouldDeleteUsers} QA users.`);
-            else console.log(`Reset: deleted ${reset.deletedParcels} QA parcels, ${reset.deletedUsers} QA users.`);
+            if (reset.dryRun) console.log(`Reset (dry run): would delete ${reset.wouldDeleteRepairRequests} QA repairRequests, ${reset.wouldDeleteUsers} QA users.`);
+            else console.log(`Reset: deleted ${reset.deletedRepairRequests} QA repairRequests, ${reset.deletedUsers} QA users.`);
         }
 
         const result = await runQaSeed({ collections, dryRun: isDryRun });
         if (result.dryRun) {
-            console.log(`Seed (dry run): would upsert ${result.wouldUpsertUsers} QA users and ${result.wouldUpsertParcels} QA parcels.`);
+            console.log(`Seed (dry run): would upsert ${result.wouldUpsertUsers} QA users and ${result.wouldUpsertRepairRequests} QA repairRequests.`);
             console.log('');
             console.log('Dry run only - nothing written. Re-run with --confirm-seed to write.');
         } else {
-            console.log(`Seed: upserted ${result.usersUpserted} QA users and ${result.parcelsUpserted} QA parcels.`);
+            console.log(`Seed: upserted ${result.usersUpserted} QA users and ${result.repairRequestsUpserted} QA repairRequests.`);
         }
     })()
         .catch((error) => {
@@ -315,7 +315,7 @@ module.exports = {
     QA_EMAIL_DOMAIN,
     QA_IDENTITIES,
     buildQaUsers,
-    buildQaParcels,
+    buildQaRepairRequests,
     runQaSeed,
     runQaReset,
     isSafeToSeed,

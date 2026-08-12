@@ -2,15 +2,15 @@ const { ObjectId } = require('mongodb');
 const { client } = require('../config/database');
 const { normalize } = require('../services/paymentProcessor');
 const { createNotificationService } = require('../services/notificationService');
-const { REQUESTABLE_STATUSES, ROLE_FOR_STATUS, isValidRiderTransition } = require('../utils/riderStatus');
-const { ACTIVE_STATUSES } = require('../utils/parcelStatus');
+const { REQUESTABLE_STATUSES, ROLE_FOR_STATUS, isValidTechnicianTransition } = require('../utils/technicianStatus');
+const { ACTIVE_STATUSES } = require('../utils/repairRequestStatus');
 const { validateTechnicianExpertise, normalizeTechnicianExpertise } = require('../utils/technicianExpertise');
 
 // Explicit allow-list for the (unauthenticated) technician-application body
 // (Phase 8.7A mass-assignment protection). ONLY these applicant-supplied
 // profile fields are ever persisted from POST /technicians. Operational and
 // authoritative fields are never taken from the client: `status` is forced to
-// 'pending' by the Rider model, `workStatus` is initialized server-side only on
+// 'pending' by the Technician model, `workStatus` is initialized server-side only on
 // approval, `role` lives on the users collection and changes only through the
 // admin approval transaction, and anything else a caller tries to inject
 // (approved, technicianId, ratings, moderation flags, ...) is simply dropped here.
@@ -32,13 +32,13 @@ function isNonEmptyString(value) {
 // array. Used both to validate a new application and to gate admin approval so
 // a legacy/incomplete application can never be approved into an unmatchable
 // technician.
-function hasMatchableProfile(rider) {
-    return isNonEmptyString(rider.name)
-        && isNonEmptyString(rider.region)
-        && isNonEmptyString(rider.district)
-        && Array.isArray(rider.expertise)
-        && rider.expertise.length > 0
-        && validateTechnicianExpertise(rider.expertise).valid;
+function hasMatchableProfile(technician) {
+    return isNonEmptyString(technician.name)
+        && isNonEmptyString(technician.region)
+        && isNonEmptyString(technician.district)
+        && Array.isArray(technician.expertise)
+        && technician.expertise.length > 0
+        && validateTechnicianExpertise(technician.expertise).valid;
 }
 
 class TechnicianController {
@@ -87,15 +87,15 @@ class TechnicianController {
                         from: "tracking_events",
                         localField: "trackingId",
                         foreignField: "trackingId",
-                        as: "parcel_trackings"
+                        as: "request_trackings"
                     }
                 },
                 {
-                    $unwind: "$parcel_trackings"
+                    $unwind: "$request_trackings"
                 },
                 {
                     $match: {
-                        "parcel_trackings.status": "parcel_delivered"
+                        "request_trackings.status": "parcel_delivered"
                     }
                 },
                 {
@@ -103,7 +103,7 @@ class TechnicianController {
                         deliveryDay: {
                             $dateToString: {
                                 format: "%Y-%m-%d",
-                                date: "$parcel_trackings.createdAt"
+                                date: "$request_trackings.createdAt"
                             }
                         }
                     }
@@ -130,7 +130,7 @@ class TechnicianController {
     // or moderation field can ride along. The application must now provide the
     // information the eligible-technician matcher requires (name/region/district
     // + a valid, non-empty canonical expertise array), so an approved applicant
-    // becomes matchable without any manual database edit. Legacy riders already
+    // becomes matchable without any manual database edit. Legacy technicians already
     // in the collection without expertise are untouched here - approval-time
     // gating (updateTechnicianStatus) handles them.
     async createTechnicianApplication(req, res) {
@@ -181,7 +181,7 @@ class TechnicianController {
         }
     }
 
-    async notifyAdminsOfNewApplication(rider, technicianId) {
+    async notifyAdminsOfNewApplication(technician, technicianId) {
         let adminEmails = [];
         try {
             adminEmails = await this.User.findEmailsByRole('admin');
@@ -193,14 +193,14 @@ class TechnicianController {
             return;
         }
 
-        const applicantEmail = normalize(rider.email);
+        const applicantEmail = normalize(technician.email);
         await Promise.all(adminEmails.map(async (adminEmail) => {
             try {
                 await this.notifications.createNotification({
                     recipientEmail: adminEmail,
                     recipientRole: 'admin',
                     type: 'technician_application_submitted',
-                    entityType: 'rider',
+                    entityType: 'technician',
                     entityId: technicianId.toString(),
                     actorEmail: applicantEmail || null,
                     actorRole: null,
@@ -217,16 +217,16 @@ class TechnicianController {
     }
 
     // Whether any repair request currently in an active lifecycle status
-    // (utils/parcelStatus.js's ACTIVE_STATUSES) names this technician as its
-    // assigned rider. Read inside the caller's own transaction session so
+    // (utils/repairRequestStatus.js's ACTIVE_STATUSES) names this technician as its
+    // assigned technician. Read inside the caller's own transaction session so
     // the check is consistent with everything else read/written in that
     // same transaction attempt.
     async hasActiveAssignment(technicianId, session) {
-        const activeParcel = await this.collections.repairRequests.findOne(
+        const activeRepairRequest = await this.collections.repairRequests.findOne(
             { technicianId: technicianId.toString(), deliveryStatus: { $in: ACTIVE_STATUSES } },
             { session, projection: { _id: 1 } }
         );
-        return !!activeParcel;
+        return !!activeRepairRequest;
     }
 
     // Admin-only technician approval/rejection. The application's status and
@@ -234,7 +234,7 @@ class TechnicianController {
     // both commit together or neither does. Previously these were two
     // independent writes using a client-supplied email for the role update;
     // if the second write failed or matched zero, the application could end
-    // up "approved" while the user never actually gained rider access, and
+    // up "approved" while the user never actually gained technician access, and
     // the admin still saw success. The linked email is always read from the
     // already-validated technician record inside the transaction, never
     // trusted from the request body.
@@ -315,7 +315,7 @@ class TechnicianController {
                         return;
                     }
 
-                    if (!isValidRiderTransition(currentStatus, requestedStatus)) {
+                    if (!isValidTechnicianTransition(currentStatus, requestedStatus)) {
                         // Only reachable with an unrecognized/legacy current
                         // status - every recognized-status pair other than
                         // "same status" (handled above) is already a legal
@@ -432,7 +432,7 @@ class TechnicianController {
                             recipientEmail: email,
                             recipientRole: 'rider',
                             type: 'technician_application_approved',
-                            entityType: 'rider',
+                            entityType: 'technician',
                             entityId: technician._id.toString(),
                             actorEmail: req.decoded_email,
                             actorRole: 'admin',
@@ -444,7 +444,7 @@ class TechnicianController {
                             recipientEmail: email,
                             recipientRole: 'user',
                             type: 'technician_application_rejected',
-                            entityType: 'rider',
+                            entityType: 'technician',
                             entityId: technician._id.toString(),
                             actorEmail: req.decoded_email,
                             actorRole: 'admin',

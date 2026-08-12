@@ -24,7 +24,7 @@ const DECISIONS = Object.freeze(['approve', 'reject']);
 // loud rejection (never a silent strip), so tampering is always an obvious error.
 const FORBIDDEN_SUBMIT_FIELDS = [
     'totalAmount', 'total', 'currency', 'status', 'version',
-    'technicianId', 'submittedByRiderId', 'submittedByEmail', 'submittedAt',
+    'technicianId', 'submittedByTechnicianId', 'submittedByEmail', 'submittedAt',
     'customerEmail', 'senderEmail', 'decision', 'decidedAt', 'decisionReason',
     'paymentStatus', 'stripeAmount', 'amount', 'cents',
 ];
@@ -82,9 +82,9 @@ function validateQuoteSubmission(body) {
 
 // Builds the persisted quote sub-document from ALREADY-validated line items.
 // totalAmount is computed here with integer arithmetic - never read from a
-// client. currency/status/version/submittedAt/submittedByRiderId are all
+// client. currency/status/version/submittedAt/submittedByTechnicianId are all
 // server-owned.
-function buildQuoteDocument(normalized, { submittedByRiderId, now }) {
+function buildQuoteDocument(normalized, { submittedByTechnicianId, now }) {
     const totalAmount = normalized.laborAmount + normalized.partsAmount + normalized.additionalCharges;
     return {
         status: 'submitted',
@@ -95,7 +95,7 @@ function buildQuoteDocument(normalized, { submittedByRiderId, now }) {
         currency: QUOTE_CURRENCY,
         notes: normalized.notes,
         submittedAt: now,
-        submittedByRiderId,
+        submittedByTechnicianId,
         decidedAt: null,
         decisionReason: null,
         version: QUOTE_VERSION,
@@ -131,7 +131,7 @@ function validateQuoteDecision(body) {
 }
 
 // Customer/admin/technician-safe read view - includes every business field but
-// never the internal submitter identity (submittedByRiderId).
+// never the internal submitter identity (submittedByTechnicianId).
 function buildQuoteView(quote) {
     if (!quote || !quote.status) {
         return { status: 'not_submitted' };

@@ -70,7 +70,7 @@ class NotificationModel {
 
     // Guarded update is the primary race-resolver (mirrors the "query
     // condition itself is the race-resolver" pattern already used throughout
-    // parcelController.js/riderController.js) - a single atomic update
+    // repairRequestController.js/technicianController.js) - a single atomic update
     // resolves both ownership and "was it actually unread" together. Only
     // when nothing was modified does it fall back to one additional owned
     // lookup, purely to distinguish "already read" from "not found/foreign"

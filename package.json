@@ -1,5 +1,5 @@
 {
-  "name": "zap-shift-server",
+  "name": "sarabo-server",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -8,7 +8,7 @@
     "start": "node index.js",
     "dev": "node index.js",
     "seed:service-definitions": "node scripts/seed-service-definitions.js",
-    "seed:qa-parcels": "node scripts/seed-qa-parcels.js"
+    "seed:qa-repair-requests": "node scripts/seed-qa-repair-requests.js"
   },
   "keywords": [],
   "author": "",

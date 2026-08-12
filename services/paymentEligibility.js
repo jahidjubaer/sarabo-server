@@ -1,9 +1,9 @@
-const { VALID_STATUSES, QUOTE_APPROVED, PAYMENT_COMPLETED } = require('../utils/parcelStatus');
+const { VALID_STATUSES, QUOTE_APPROVED, PAYMENT_COMPLETED } = require('../utils/repairRequestStatus');
 const { isValidStoredCost, isValidQuoteTotal, isBdtQuoteCurrency, V2_PAYMENT_CURRENCY } = require('../config/paymentConfig');
 const { isV2RepairRequest } = require('../utils/repairRequestSchema');
 
 // Every status the current repair lifecycle can ever produce, including the
-// implicit default before a technician is assigned (a parcel with no
+// implicit default before a technician is assigned (a repair request with no
 // deliveryStatus field is treated as 'pending-pickup' everywhere else in
 // this codebase - see the `request.deliveryStatus || 'pending-pickup'`
 // pattern in MyRequests/RequestDetails/CustomerDashboardHome). Payment is
@@ -15,14 +15,14 @@ const { isV2RepairRequest } = require('../utils/repairRequestSchema');
 // ineligible rather than guessed at.
 const ELIGIBLE_STATUSES = ['pending-pickup', ...VALID_STATUSES];
 
-// Centralizes every parcel-state-only payment eligibility rule (rules that
-// depend only on the parcel document itself, not on the caller's identity or
+// Centralizes every repair request-state-only payment eligibility rule (rules that
+// depend only on the repair request document itself, not on the caller's identity or
 // any in-flight checkout session - those remain the caller's responsibility,
 // see controllers/paymentController.js). Used only to gate NEW checkout-
 // session creation - never call this from webhook/browser-success payment
 // completion, which must remain able to finalize a session that was validly
 // created earlier even if the repair lifecycle has since moved on.
-function getPaymentEligibility(parcel) {
+function getPaymentEligibility(repairRequest) {
     // Repair Request v2 foundation (Phase 6.3 Unit 4): a v2 request has no
     // authoritative legacy `cost` field and no quote/final-amount workflow
     // exists yet (that is a future unit) - checked first, before the
@@ -33,20 +33,20 @@ function getPaymentEligibility(parcel) {
     // yet). No checkout session or Stripe call is ever reached for a v2
     // request as a result - see controllers/paymentController.js, which
     // checks this before claiming a checkout-session slot or calling Stripe.
-    if (isV2RepairRequest(parcel)) {
+    if (isV2RepairRequest(repairRequest)) {
         return { eligible: false, code: 'PAYMENT_NOT_AVAILABLE', reason: 'payment is not yet available for this repair request - a quote is required first' };
     }
 
-    if (parcel.paymentStatus === 'paid') {
+    if (repairRequest.paymentStatus === 'paid') {
         return { eligible: false, code: 'ALREADY_PAID', reason: 'this request has already been paid for' };
     }
 
-    const status = parcel.deliveryStatus || 'pending-pickup';
+    const status = repairRequest.deliveryStatus || 'pending-pickup';
     if (!ELIGIBLE_STATUSES.includes(status)) {
         return { eligible: false, code: 'PAYMENT_NOT_AVAILABLE', reason: "payment is not available for this request's current status" };
     }
 
-    const cost = Number(parcel.cost);
+    const cost = Number(repairRequest.cost);
     if (!isValidStoredCost(cost)) {
         return { eligible: false, code: 'INVALID_PAYMENT_AMOUNT', reason: 'invalid stored amount for this request' };
     }
@@ -54,7 +54,7 @@ function getPaymentEligibility(parcel) {
     return { eligible: true, cost };
 }
 
-// V2 approved-quote payment eligibility (Phase 6.4 Unit 6). Parcel-state-only,
+// V2 approved-quote payment eligibility (Phase 6.4 Unit 6). RepairRequest-state-only,
 // exactly like getPaymentEligibility above (caller identity is the controller's
 // responsibility). Kept as a SEPARATE function so the legacy path above keeps
 // rejecting every v2 request outright (PAYMENT_NOT_AVAILABLE) - legacy
@@ -67,19 +67,19 @@ function getPaymentEligibility(parcel) {
 // Every rejection is a controlled code; only an approved quote on a
 // quote_approved request, in BDT, with a valid positive integer total, and not
 // already paid, is eligible.
-function getV2PaymentEligibility(parcel) {
-    if (!parcel || !isV2RepairRequest(parcel)) {
+function getV2PaymentEligibility(repairRequest) {
+    if (!repairRequest || !isV2RepairRequest(repairRequest)) {
         return { eligible: false, code: 'NOT_V2_REQUEST', reason: 'this payment path is only available for newer (v2) repair requests' };
     }
 
     // Already paid takes precedence over any quote/state check - once a v2
     // request has a completed payment it is never eligible to be charged again,
     // regardless of its other fields.
-    if (parcel.deliveryStatus === PAYMENT_COMPLETED || (parcel.payment && parcel.payment.status === 'completed')) {
+    if (repairRequest.deliveryStatus === PAYMENT_COMPLETED || (repairRequest.payment && repairRequest.payment.status === 'completed')) {
         return { eligible: false, code: 'ALREADY_PAID', reason: 'this request has already been paid for' };
     }
 
-    const quote = parcel.quote;
+    const quote = repairRequest.quote;
     if (!quote || !quote.status) {
         return { eligible: false, code: 'NO_QUOTE', reason: 'no repair quote exists for this request yet' };
     }
@@ -90,7 +90,7 @@ function getV2PaymentEligibility(parcel) {
         // submitted / any other non-approved state.
         return { eligible: false, code: 'QUOTE_NOT_APPROVED', reason: 'the repair quote has not been approved yet' };
     }
-    if (parcel.deliveryStatus !== QUOTE_APPROVED) {
+    if (repairRequest.deliveryStatus !== QUOTE_APPROVED) {
         return { eligible: false, code: 'INVALID_PAYMENT_STATE', reason: 'this request is not in a payable state' };
     }
     if (!isBdtQuoteCurrency(quote.currency)) {

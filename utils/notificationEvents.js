@@ -1,5 +1,5 @@
 // Single source of truth for every notification event type this project can
-// create - mirrors utils/parcelStatus.js and utils/riderStatus.js's role as
+// create - mirrors utils/repairRequestStatus.js and utils/technicianStatus.js's role as
 // the one place a business-state enum and its rules live. A caller (see
 // services/notificationService.js) only ever supplies a `type` plus a small
 // set of identity/entity/metadata fields; every visible piece of copy
@@ -9,7 +9,7 @@
 // `priority: 'high'` is kept in the allowed enum as a safe, forward-
 // compatible value - no V1 event definition below uses it, and nothing here
 // currently produces it.
-const ENTITY_TYPES = ['parcel', 'rider'];
+const ENTITY_TYPES = ['repair_request', 'technician'];
 const ROLES = ['user', 'rider', 'admin'];
 const PRIORITIES = ['normal', 'high'];
 
@@ -24,7 +24,7 @@ const PRIORITIES = ['normal', 'high'];
 // are already normalized/validated and are never persisted as metadata.
 const NOTIFICATION_EVENTS = {
     technician_application_submitted: {
-        entityType: 'rider',
+        entityType: 'technician',
         recipientRole: 'admin',
         priority: 'normal',
         allowedMetadataKeys: [],
@@ -47,11 +47,11 @@ const NOTIFICATION_EVENTS = {
                     { code: 'MISSING_TRUSTED_RECIPIENT_CONTEXT' }
                 );
             }
-            return `rider:${entityId}:application_submitted:${recipientEmail}`;
+            return `technician:${entityId}:application_submitted:${recipientEmail}`;
         },
     },
     technician_application_approved: {
-        entityType: 'rider',
+        entityType: 'technician',
         recipientRole: 'rider',
         priority: 'normal',
         allowedMetadataKeys: [],
@@ -59,12 +59,12 @@ const NOTIFICATION_EVENTS = {
         title: () => 'Your technician application was approved',
         message: () => 'You can now access assigned repairs.',
         actionUrl: () => '/dashboard/assigned-jobs',
-        deduplicationKey: ({ entityId }) => `rider:${entityId}:approved`,
+        deduplicationKey: ({ entityId }) => `technician:${entityId}:approved`,
     },
     technician_application_rejected: {
-        entityType: 'rider',
+        entityType: 'technician',
         // A rejected application's linked user is set back to 'user' (see
-        // utils/riderStatus.js's ROLE_FOR_STATUS.rejected), never 'rider' -
+        // utils/technicianStatus.js's ROLE_FOR_STATUS.rejected), never 'rider' -
         // this is the exact same-transaction role the recipient holds at the
         // moment this notification is created.
         recipientRole: 'user',
@@ -74,10 +74,10 @@ const NOTIFICATION_EVENTS = {
         title: () => 'Your technician application was not approved',
         message: () => 'Your technician application was not approved at this time.',
         actionUrl: () => '/dashboard',
-        deduplicationKey: ({ entityId }) => `rider:${entityId}:rejected`,
+        deduplicationKey: ({ entityId }) => `technician:${entityId}:rejected`,
     },
     technician_assigned: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         // The repair request's owner is whoever is authenticated when they
         // submit it (POST /repair-requests only requires verifyFBToken - see
         // routes/repairRequests.js), so this is the one event whose recipient's
@@ -93,7 +93,7 @@ const NOTIFICATION_EVENTS = {
         deduplicationKey: ({ entityId }) => `repair:${entityId}:technician_assigned:customer`,
     },
     new_repair_assignment: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         recipientRole: 'rider',
         priority: 'normal',
         // trackingId is accepted (for future use/consistency) but not
@@ -106,7 +106,7 @@ const NOTIFICATION_EVENTS = {
         deduplicationKey: ({ entityId }) => `repair:${entityId}:technician_assigned:technician`,
     },
     technician_on_the_way: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         // Same reasoning as technician_assigned - POST /repair-requests only
         // requires authentication (routes/repairRequests.js), so the repair
         // owner's real role is not fixed to a single value.
@@ -120,7 +120,7 @@ const NOTIFICATION_EVENTS = {
         deduplicationKey: ({ entityId }) => `repair:${entityId}:status:rider_arriving`,
     },
     repair_in_progress: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         recipientRoles: ['user', 'rider', 'admin'],
         priority: 'normal',
         allowedMetadataKeys: ['trackingId'],
@@ -131,7 +131,7 @@ const NOTIFICATION_EVENTS = {
         deduplicationKey: ({ entityId }) => `repair:${entityId}:status:parcel_picked_up`,
     },
     repair_completed: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         recipientRoles: ['user', 'rider', 'admin'],
         priority: 'normal',
         allowedMetadataKeys: ['trackingId'],
@@ -142,7 +142,7 @@ const NOTIFICATION_EVENTS = {
         deduplicationKey: ({ entityId }) => `repair:${entityId}:completed`,
     },
     inspection_completed: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         // Same reasoning as technician_assigned - the repair owner's real role
         // is not fixed to a single value (POST /repair-requests only requires
         // authentication), so a fixed recipientRoles allowlist is used.
@@ -159,7 +159,7 @@ const NOTIFICATION_EVENTS = {
         deduplicationKey: ({ entityId }) => `repair:${entityId}:inspection_completed`,
     },
     quote_submitted: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         // Owner-facing, same variable-role reasoning as technician_assigned.
         recipientRoles: ['user', 'rider', 'admin'],
         priority: 'normal',
@@ -171,7 +171,7 @@ const NOTIFICATION_EVENTS = {
         deduplicationKey: ({ entityId }) => `repair:${entityId}:quote_submitted`,
     },
     quote_approved: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         // Addressed to the assigned technician - a fixed single role.
         recipientRole: 'rider',
         priority: 'normal',
@@ -183,7 +183,7 @@ const NOTIFICATION_EVENTS = {
         deduplicationKey: ({ entityId }) => `repair:${entityId}:quote_approved`,
     },
     quote_rejected: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         recipientRole: 'rider',
         priority: 'normal',
         allowedMetadataKeys: ['trackingId'],
@@ -194,7 +194,7 @@ const NOTIFICATION_EVENTS = {
         deduplicationKey: ({ entityId }) => `repair:${entityId}:quote_rejected`,
     },
     payment_confirmed: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         // Same reasoning as technician_assigned/technician_on_the_way/
         // repair_in_progress/repair_completed - POST /repair-requests only requires
         // authentication (routes/repairRequests.js), so the repair owner's real
@@ -209,7 +209,7 @@ const NOTIFICATION_EVENTS = {
         deduplicationKey: ({ entityId }) => `repair:${entityId}:payment_confirmed`,
     },
     payment_completed: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         // Owner-facing (v2 approved-quote payment, Phase 6.4 Unit 6). Same
         // variable-role reasoning as technician_assigned/payment_confirmed.
         // Carries no card data, no Stripe IDs, no amount - just the tracking id.
@@ -223,7 +223,7 @@ const NOTIFICATION_EVENTS = {
         deduplicationKey: ({ entityId }) => `repair:${entityId}:payment_completed`,
     },
     payment_completed_technician: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         // Addressed to the assigned technician - a fixed single role.
         recipientRole: 'rider',
         priority: 'normal',
@@ -241,7 +241,7 @@ const NOTIFICATION_EVENTS = {
     // repair_in_progress at pickup, so reusing them here would let the v2
     // start/finish notification be silently deduplicated away.
     repair_started: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         recipientRoles: ['user', 'rider', 'admin'],
         priority: 'normal',
         allowedMetadataKeys: ['trackingId'],
@@ -252,7 +252,7 @@ const NOTIFICATION_EVENTS = {
         deduplicationKey: ({ entityId }) => `repair:${entityId}:repair_started`,
     },
     repair_finished: {
-        entityType: 'parcel',
+        entityType: 'repair_request',
         recipientRoles: ['user', 'rider', 'admin'],
         priority: 'normal',
         allowedMetadataKeys: ['trackingId'],

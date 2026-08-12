@@ -3,7 +3,7 @@ const { client } = require('../config/database');
 const { logTracking } = require('../middleware/logging');
 const { createNotificationService } = require('../services/notificationService');
 const { isV2RepairRequest } = require('../utils/repairRequestSchema');
-const { INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED } = require('../utils/parcelStatus');
+const { INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED } = require('../utils/repairRequestStatus');
 const {
     validateQuoteSubmission, buildQuoteDocument, validateQuoteDecision, buildQuoteView,
 } = require('../utils/quote');
@@ -23,14 +23,14 @@ class QuoteController {
         this.notifications = createNotificationService(models);
     }
 
-    async resolveAccess(parcel, email) {
+    async resolveAccess(repairRequest, email) {
         const currentUser = await this.User.findByEmail(email);
         const role = currentUser ? currentUser.role : 'user';
         return {
             role,
-            isOwner: !!parcel && parcel.senderEmail === email,
+            isOwner: !!repairRequest && repairRequest.senderEmail === email,
             isAdmin: role === 'admin',
-            isAssignedByEmail: !!parcel && parcel.technicianEmail === email,
+            isAssignedByEmail: !!repairRequest && repairRequest.technicianEmail === email,
         };
     }
 
@@ -41,23 +41,23 @@ class QuoteController {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
             const email = req.decoded_email;
-            const parcel = await this.RepairRequest.findById(id);
-            const access = await this.resolveAccess(parcel, email);
-            const canSee = parcel && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
+            const repairRequest = await this.RepairRequest.findById(id);
+            const access = await this.resolveAccess(repairRequest, email);
+            const canSee = repairRequest && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
 
-            if (!parcel || !canSee) {
+            if (!repairRequest || !canSee) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
             if (!(access.role === 'rider' && access.isAssignedByEmail)) {
                 return res.status(403).send({ message: 'only the assigned technician can submit a quote', code: 'TECHNICIAN_ROLE_REQUIRED' });
             }
-            if (!isV2RepairRequest(parcel)) {
+            if (!isV2RepairRequest(repairRequest)) {
                 return res.status(400).send({ message: 'quotes are only available for newer (v2) repair requests', code: 'LEGACY_REQUEST_NOT_SUPPORTED' });
             }
-            if (parcel.quote && parcel.quote.status) {
+            if (repairRequest.quote && repairRequest.quote.status) {
                 return res.status(409).send({ message: 'a quote has already been submitted for this request', code: 'QUOTE_ALREADY_SUBMITTED' });
             }
-            if (parcel.deliveryStatus !== INSPECTION_COMPLETED) {
+            if (repairRequest.deliveryStatus !== INSPECTION_COMPLETED) {
                 return res.status(409).send({ message: 'a quote can only be submitted after the inspection is completed', code: 'QUOTE_NOT_ALLOWED' });
             }
 
@@ -66,7 +66,7 @@ class QuoteController {
                 return res.status(400).send({ message: validation.message, code: validation.code });
             }
 
-            const ownerRole = (await this.User.findRoleByEmail(parcel.senderEmail)) || 'user';
+            const ownerRole = (await this.User.findRoleByEmail(repairRequest.senderEmail)) || 'user';
 
             const mongoSession = client.startSession();
             let conflictCode = null;
@@ -84,17 +84,17 @@ class QuoteController {
 
                     const now = new Date();
                     quoteDoc = buildQuoteDocument(validation.normalized, {
-                        submittedByRiderId: parcel.technicianId ? new ObjectId(parcel.technicianId) : null,
+                        submittedByTechnicianId: repairRequest.technicianId ? new ObjectId(repairRequest.technicianId) : null,
                         now,
                     });
 
                     const updateResult = await this.collections.repairRequests.updateOne(
                         {
-                            _id: parcel._id,
+                            _id: repairRequest._id,
                             schemaVersion: 2,
                             deliveryStatus: INSPECTION_COMPLETED,
                             technicianEmail: email,
-                            technicianId: parcel.technicianId,
+                            technicianId: repairRequest.technicianId,
                             'quote.status': { $exists: false },
                         },
                         { $set: { quote: quoteDoc, deliveryStatus: QUOTE_SUBMITTED, updatedAt: now } },
@@ -102,23 +102,23 @@ class QuoteController {
                     );
 
                     if (updateResult.matchedCount === 0) {
-                        const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
+                        const fresh = await this.collections.repairRequests.findOne({ _id: repairRequest._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
                         else if (fresh.quote && fresh.quote.status) conflictCode = 'QUOTE_ALREADY_SUBMITTED';
-                        else if (fresh.technicianEmail !== email || fresh.technicianId !== parcel.technicianId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
+                        else if (fresh.technicianEmail !== email || fresh.technicianId !== repairRequest.technicianId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
                         else conflictCode = 'QUOTE_NOT_ALLOWED';
                         throw new Error('quote submission guard failed');
                     }
 
-                    await logTracking(this.collections.trackingEvents, parcel.trackingId, QUOTE_SUBMITTED, mongoSession);
+                    await logTracking(this.collections.trackingEvents, repairRequest.trackingId, QUOTE_SUBMITTED, mongoSession);
                     await this.notifications.createNotification({
                         session: mongoSession,
-                        recipientEmail: parcel.senderEmail,
+                        recipientEmail: repairRequest.senderEmail,
                         recipientRole: ownerRole,
                         type: 'quote_submitted',
-                        entityType: 'parcel',
-                        entityId: parcel._id.toString(),
-                        metadata: { trackingId: parcel.trackingId },
+                        entityType: 'repair_request',
+                        entityId: repairRequest._id.toString(),
+                        metadata: { trackingId: repairRequest.trackingId },
                         actorEmail: null,
                     });
                 });
@@ -144,11 +144,11 @@ class QuoteController {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
             const email = req.decoded_email;
-            const parcel = await this.RepairRequest.findById(id);
-            const access = await this.resolveAccess(parcel, email);
-            const canSee = parcel && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
+            const repairRequest = await this.RepairRequest.findById(id);
+            const access = await this.resolveAccess(repairRequest, email);
+            const canSee = repairRequest && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
 
-            if (!parcel || !canSee) {
+            if (!repairRequest || !canSee) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
             // Only the request owner (customer) decides - never an admin
@@ -156,7 +156,7 @@ class QuoteController {
             if (!access.isOwner) {
                 return res.status(403).send({ message: 'only the request owner can decide on a quote', code: 'NOT_REQUEST_OWNER' });
             }
-            if (!isV2RepairRequest(parcel)) {
+            if (!isV2RepairRequest(repairRequest)) {
                 return res.status(400).send({ message: 'quotes are only available for newer (v2) repair requests', code: 'LEGACY_REQUEST_NOT_SUPPORTED' });
             }
 
@@ -165,10 +165,10 @@ class QuoteController {
                 return res.status(400).send({ message: validation.message, code: validation.code });
             }
 
-            if (!parcel.quote || parcel.quote.status !== 'submitted' || parcel.deliveryStatus !== QUOTE_SUBMITTED) {
+            if (!repairRequest.quote || repairRequest.quote.status !== 'submitted' || repairRequest.deliveryStatus !== QUOTE_SUBMITTED) {
                 // An already-approved/rejected quote gets its own precise code;
                 // anything else (no quote yet, wrong stage) is not-decidable.
-                const alreadyDecided = parcel.quote && (parcel.quote.status === 'approved' || parcel.quote.status === 'rejected');
+                const alreadyDecided = repairRequest.quote && (repairRequest.quote.status === 'approved' || repairRequest.quote.status === 'rejected');
                 const code = alreadyDecided ? 'QUOTE_ALREADY_DECIDED' : 'QUOTE_NOT_DECIDABLE';
                 return res.status(409).send({ message: this.messageForCode(code), code });
             }
@@ -189,7 +189,7 @@ class QuoteController {
 
                     const updateResult = await this.collections.repairRequests.updateOne(
                         {
-                            _id: parcel._id,
+                            _id: repairRequest._id,
                             schemaVersion: 2,
                             senderEmail: email,
                             deliveryStatus: QUOTE_SUBMITTED,
@@ -208,23 +208,23 @@ class QuoteController {
                     );
 
                     if (updateResult.matchedCount === 0) {
-                        const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
+                        const fresh = await this.collections.repairRequests.findOne({ _id: repairRequest._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
                         else if (fresh.quote && (fresh.quote.status === 'approved' || fresh.quote.status === 'rejected')) conflictCode = 'QUOTE_ALREADY_DECIDED';
                         else conflictCode = 'QUOTE_NOT_DECIDABLE';
                         throw new Error('quote decision guard failed');
                     }
 
-                    await logTracking(this.collections.trackingEvents, parcel.trackingId, newDeliveryStatus, mongoSession);
+                    await logTracking(this.collections.trackingEvents, repairRequest.trackingId, newDeliveryStatus, mongoSession);
                     // Notify the assigned technician of the customer's decision.
                     await this.notifications.createNotification({
                         session: mongoSession,
-                        recipientEmail: parcel.technicianEmail,
+                        recipientEmail: repairRequest.technicianEmail,
                         recipientRole: 'rider',
                         type: notifyType,
-                        entityType: 'parcel',
-                        entityId: parcel._id.toString(),
-                        metadata: { trackingId: parcel.trackingId },
+                        entityType: 'repair_request',
+                        entityId: repairRequest._id.toString(),
+                        metadata: { trackingId: repairRequest.trackingId },
                         actorEmail: null,
                     });
                 });
@@ -239,7 +239,7 @@ class QuoteController {
             }
 
             const decidedQuote = buildQuoteView({
-                ...parcel.quote,
+                ...repairRequest.quote,
                 status: newQuoteStatus,
                 decidedAt,
                 decisionReason: validation.normalized.reason,
@@ -257,17 +257,17 @@ class QuoteController {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
             const email = req.decoded_email;
-            const parcel = await this.RepairRequest.findById(id);
-            const access = await this.resolveAccess(parcel, email);
-            const canRead = parcel && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
+            const repairRequest = await this.RepairRequest.findById(id);
+            const access = await this.resolveAccess(repairRequest, email);
+            const canRead = repairRequest && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
 
-            if (!parcel || !canRead) {
+            if (!repairRequest || !canRead) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
-            if (!isV2RepairRequest(parcel)) {
+            if (!isV2RepairRequest(repairRequest)) {
                 return res.status(400).send({ message: 'quotes are only available for newer (v2) repair requests', code: 'LEGACY_REQUEST_NOT_SUPPORTED' });
             }
-            return res.send({ quote: buildQuoteView(parcel.quote) });
+            return res.send({ quote: buildQuoteView(repairRequest.quote) });
         } catch (error) {
             return res.status(500).send({ message: 'Error fetching quote', code: 'INTERNAL_ERROR' });
         }

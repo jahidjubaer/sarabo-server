@@ -1,4 +1,4 @@
-const { VALID_STATUSES } = require('../utils/parcelStatus');
+const { VALID_STATUSES } = require('../utils/repairRequestStatus');
 
 const CANCELLED_STATUS = 'cancelled';
 
@@ -7,8 +7,8 @@ const CANCELLED_STATUS = 'cancelled';
 // status outside this set is corrupted/unknown data and is never guessed at.
 const KNOWN_STATUSES = ['pending-pickup', ...VALID_STATUSES, CANCELLED_STATUS];
 
-// Centralizes every parcel-state-only cancellation eligibility rule (rules
-// that depend only on the parcel/payment records, not on the caller's
+// Centralizes every repair request-state-only cancellation eligibility rule (rules
+// that depend only on the repair request/payment records, not on the caller's
 // identity - ownership is checked separately by the caller, see
 // controllers/repairRequestController.js's cancelRepairRequest). Cancellation is only ever
 // possible from the very first stage of the repair lifecycle: once a
@@ -17,10 +17,10 @@ const KNOWN_STATUSES = ['pending-pickup', ...VALID_STATUSES, CANCELLED_STATUS];
 //
 // `hasCompletedPayment` must be independently confirmed by the caller
 // (a real payments-collection lookup) - a request must be rejected if a
-// completed payment record exists even if parcel.paymentStatus is somehow
+// completed payment record exists even if repair request.paymentStatus is somehow
 // inconsistent with it.
-function getCancellationEligibility(parcel, { hasCompletedPayment }) {
-    const status = parcel.deliveryStatus || 'pending-pickup';
+function getCancellationEligibility(repairRequest, { hasCompletedPayment }) {
+    const status = repairRequest.deliveryStatus || 'pending-pickup';
 
     if (status === CANCELLED_STATUS) {
         return { eligible: false, alreadyCancelled: true, code: 'ALREADY_CANCELLED', reason: 'this request has already been cancelled' };
@@ -34,13 +34,13 @@ function getCancellationEligibility(parcel, { hasCompletedPayment }) {
         return { eligible: false, code: 'REQUEST_ALREADY_ASSIGNED', reason: 'a technician has already been assigned to this request' };
     }
 
-    if (parcel.technicianEmail) {
+    if (repairRequest.technicianEmail) {
         // Defensive: a technician reference should never exist while status
         // is still pending-pickup, but never trust deliveryStatus alone.
         return { eligible: false, code: 'REQUEST_ALREADY_ASSIGNED', reason: 'a technician has already been assigned to this request' };
     }
 
-    if (parcel.paymentStatus === 'paid' || hasCompletedPayment) {
+    if (repairRequest.paymentStatus === 'paid' || hasCompletedPayment) {
         return { eligible: false, code: 'REQUEST_ALREADY_PAID', reason: 'this request has already been paid for and cannot be cancelled here' };
     }
 

@@ -41,19 +41,19 @@ function buildPendingAssignmentEntry({ assignmentId, technicianId, technicianEma
 // - assigned technician: current assignment + their own decision state
 // - customer/other: ONLY a neutral current-assignment view (display name if
 //   present) - never rejection reasons, internal ids, or the history array.
-function projectAssignmentForRole(parcel, role) {
-    const history = Array.isArray(parcel?.assignmentHistory) ? parcel.assignmentHistory : [];
-    const status = parcel?.deliveryStatus || 'pending-pickup';
+function projectAssignmentForRole(repairRequest, role) {
+    const history = Array.isArray(repairRequest?.assignmentHistory) ? repairRequest.assignmentHistory : [];
+    const status = repairRequest?.deliveryStatus || 'pending-pickup';
     const current = {
         deliveryStatus: status,
         awaitingDecision: status === 'assignment_pending',
-        technicianName: parcel?.technicianName || null,
+        technicianName: repairRequest?.technicianName || null,
     };
 
     if (role === 'admin') {
         return {
             ...current,
-            technicianEmail: parcel?.technicianEmail || null,
+            technicianEmail: repairRequest?.technicianEmail || null,
             assignmentHistory: history.map((h) => ({
                 assignmentId: h.assignmentId,
                 technicianId: h.technicianId,
@@ -74,7 +74,7 @@ function projectAssignmentForRole(parcel, role) {
         const currentEntry = history.find((h) => h.decision === 'pending') || null;
         return {
             ...current,
-            technicianEmail: parcel?.technicianEmail || null,
+            technicianEmail: repairRequest?.technicianEmail || null,
             decision: currentEntry ? currentEntry.decision : (status === 'assignment_pending' ? 'pending' : null),
         };
     }

@@ -4,7 +4,7 @@
 // utils/inspection.js / utils/quote.js.
 //
 // Locked rules: the technician owns progress updates and the completion
-// summary/evidence; every server-generated field (ids, timestamps, rider
+// summary/evidence; every server-generated field (ids, timestamps, technician
 // identity) is built here, never accepted from a client. This module never
 // touches payment, quote, or pricing state.
 
@@ -23,8 +23,8 @@ const COMPLETION_SUMMARY_MAX = 2000;
 // Fields a client must never supply. Their presence is a loud rejection (never
 // a silent strip), so any attempt to forge an id/timestamp/identity/status is
 // an obvious error rather than quietly ignored.
-const FORBIDDEN_PROGRESS_FIELDS = ['id', 'createdAt', 'createdByRiderId', 'technicianId', 'status', 'version'];
-const FORBIDDEN_COMPLETE_FIELDS = ['status', 'completedAt', 'completedByRiderId', 'evidenceImages', 'evidence', 'startedAt', 'progressUpdates', 'version'];
+const FORBIDDEN_PROGRESS_FIELDS = ['id', 'createdAt', 'createdByTechnicianId', 'technicianId', 'status', 'version'];
+const FORBIDDEN_COMPLETE_FIELDS = ['status', 'completedAt', 'completedByTechnicianId', 'evidenceImages', 'evidence', 'startedAt', 'progressUpdates', 'version'];
 
 function isPlainObject(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -61,14 +61,14 @@ function validateProgressInput(body) {
 }
 
 // Builds a single progress update from an already-validated message. The id and
-// timestamp are always server-generated; the rider identity is passed in from
-// the trusted parcel.technicianId, never from the client.
-function buildProgressUpdate(normalized, { createdByRiderId, now }) {
+// timestamp are always server-generated; the technician identity is passed in from
+// the trusted repair request.technicianId, never from the client.
+function buildProgressUpdate(normalized, { createdByTechnicianId, now }) {
     return {
         id: crypto.randomUUID(),
         message: normalized.message,
         createdAt: now,
-        createdByRiderId,
+        createdByTechnicianId,
     };
 }
 
@@ -99,8 +99,8 @@ function validateCompletionInput(body) {
     return { valid: true, normalized: { summary: body.summary.trim(), evidenceImageIds: [...ids] } };
 }
 
-// Customer/technician/admin-safe read view. Never exposes any rider identity
-// (createdByRiderId on updates, completion's internal ids), storageKey, or
+// Customer/technician/admin-safe read view. Never exposes any technician identity
+// (createdByTechnicianId on updates, completion's internal ids), storageKey, or
 // upload-session id. The completion's evidence images are returned WITHOUT
 // urls here - the controller adds short-lived signed read urls, since those
 // require async storage access.

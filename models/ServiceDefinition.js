@@ -28,7 +28,7 @@ const { toSmallestUnit } = require('../config/paymentConfig');
 // currency in config/paymentConfig.js (still USD), which this module never
 // touches. Only 'BDT' is accepted here; any other value (including 'usd' or
 // lowercase 'bdt') is rejected, so no new canonical definition can drift back
-// to USD. Historical parcel pricing snapshots are read directly from their
+// to USD. Historical repair request pricing snapshots are read directly from their
 // own documents and never pass through this validator, so pre-existing USD
 // snapshots are unaffected by this change.
 const CANONICAL_CURRENCY = 'BDT';

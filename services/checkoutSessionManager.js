@@ -1,5 +1,5 @@
 // Tracks at most one active (occupying-the-slot) Stripe Checkout Session per
-// parcel, so concurrent checkout requests (multiple tabs, rapid retries,
+// repair request, so concurrent checkout requests (multiple tabs, rapid retries,
 // direct API calls, two browser sessions) can never spawn more than one live
 // Stripe session for the same repair request. The real guard is the unique
 // partial index on checkoutSessions.requestId (see config/database.js, filtered
@@ -15,7 +15,7 @@ const CREATING_CLAIM_TTL_MS = 60 * 1000;
 function createCheckoutSessionManager(collections) {
     const checkoutSessions = collections.checkoutSessions;
 
-    // Returns the parcel's active row, if any, after opportunistically
+    // Returns the repair request's active row, if any, after opportunistically
     // reconciling it away when it is stale:
     //  - status 'creating' older than the claim TTL means the request that
     //    claimed it died (crashed, restarted) before ever calling Stripe or
@@ -51,9 +51,9 @@ function createCheckoutSessionManager(collections) {
         return row;
     }
 
-    // Atomically attempts to occupy the per-parcel slot before any Stripe API
+    // Atomically attempts to occupy the per-repair request slot before any Stripe API
     // call is made, so two concurrent requests never both reach
-    // stripe.checkout.sessions.create for the same parcel. A duplicate-key
+    // stripe.checkout.sessions.create for the same repair request. A duplicate-key
     // error here means another request (any tab/device/retry) won the race
     // between the caller's own findActive() check and this insert.
     async function claim({ requestId, ownerEmail, amount, currency }) {
@@ -88,7 +88,7 @@ function createCheckoutSessionManager(collections) {
     }
 
     // Releases the slot after a failed Stripe creation attempt (or a stale
-    // reused row that Stripe no longer recognizes as open) - the parcel is
+    // reused row that Stripe no longer recognizes as open) - the repair request is
     // never left permanently unable to start a new checkout.
     async function markFailed(id) {
         await checkoutSessions.updateOne(
@@ -97,13 +97,13 @@ function createCheckoutSessionManager(collections) {
         );
     }
 
-    // Called once a payment for this parcel is confirmed (browser or
+    // Called once a payment for this repair request is confirmed (browser or
     // webhook path, see services/paymentProcessor.js) - releases the active
     // slot so it stops being reported as reusable/in-progress. Safe to call
     // even when no active row exists, and safe to call repeatedly (idempotent
     // no-op once already inactive). Accepts an optional MongoDB session so it
     // can participate in the same transaction as the payment write.
-    async function completeByParcelId(requestId, mongoSession = null) {
+    async function completeByRequestId(requestId, mongoSession = null) {
         await checkoutSessions.updateOne(
             { requestId, active: true },
             { $set: { status: 'completed', active: false, updatedAt: new Date() } },
@@ -117,7 +117,7 @@ function createCheckoutSessionManager(collections) {
     // be expired (see controllers/repairRequestController.js's cancelRepairRequest, which
     // uses the returned row's sessionId to best-effort expire it). Returns
     // the row that was active (with its sessionId), or null if none existed.
-    async function cancelByParcelId(requestId) {
+    async function cancelByRequestId(requestId) {
         const row = await checkoutSessions.findOne({ requestId, active: true });
         if (!row) return null;
         await checkoutSessions.updateOne(
@@ -127,7 +127,7 @@ function createCheckoutSessionManager(collections) {
         return row;
     }
 
-    return { findActive, claim, markOpen, markFailed, completeByParcelId, cancelByParcelId };
+    return { findActive, claim, markOpen, markFailed, completeByRequestId, cancelByRequestId };
 }
 
 module.exports = { createCheckoutSessionManager, CREATING_CLAIM_TTL_MS };

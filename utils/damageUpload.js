@@ -73,13 +73,13 @@ function generateStorageKey(requestId, mimeType, uploadSessionId) {
 // to reference later, so no further upload/finalize/removal is allowed.
 // Unlike cancellationPolicy this has no payment dimension - payment is
 // unrelated to whether evidence may still be edited.
-function isDamageEvidenceEditable(parcel) {
-    const status = parcel.deliveryStatus || 'pending-pickup';
+function isDamageEvidenceEditable(repairRequest) {
+    const status = repairRequest.deliveryStatus || 'pending-pickup';
     if (status !== 'pending-pickup') return false;
     // Defensive: a technician reference should never exist while status is
     // still pending-pickup, but never trust deliveryStatus alone (mirrors
     // the same defensive technicianEmail check in getCancellationEligibility).
-    if (parcel.technicianId || parcel.technicianEmail) return false;
+    if (repairRequest.technicianId || repairRequest.technicianEmail) return false;
     return true;
 }
 

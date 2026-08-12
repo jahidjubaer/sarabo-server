@@ -28,8 +28,8 @@ class TechnicianModel {
         return await this.collection.findOne(query);
     }
 
-    // Resolves "which rider record belongs to this caller" from a verified
-    // token email (Phase 6.4 Unit 2) - never trusts a client-supplied rider
+    // Resolves "which technician record belongs to this caller" from a verified
+    // token email (Phase 6.4 Unit 2) - never trusts a client-supplied technician
     // id. Session-aware for callers evaluating access inside a transaction.
     async findByEmail(email, options = {}) {
         const findOptions = {};
@@ -37,10 +37,10 @@ class TechnicianModel {
         return await this.collection.findOne({ email }, findOptions);
     }
 
-    async create(riderData) {
-        riderData.status = 'pending';
-        riderData.createdAt = new Date();
-        const result = await this.collection.insertOne(riderData);
+    async create(technicianData) {
+        technicianData.status = 'pending';
+        technicianData.createdAt = new Date();
+        const result = await this.collection.insertOne(technicianData);
         return result;
     }
 
@@ -66,11 +66,11 @@ class TechnicianModel {
     // Guarded full-replacement update (Phase 6.3 Unit 3) - the filter always
     // includes the exact expertise state the caller read moments earlier
     // (either the prior array value, or "the field does not exist yet" for
-    // a legacy rider), so a concurrent expertise update or an active
+    // a legacy technician), so a concurrent expertise update or an active
     // assignment forming between the read and this write is detected via
     // matchedCount === 0 rather than silently overwritten. Mirrors the
     // "guard on every field read, not just the one being changed" pattern
-    // already used throughout riderController.js/parcelController.js.
+    // already used throughout technicianController.js/repairRequestController.js.
     async replaceExpertise({ id, hasExpertiseField, expectedExpertise, newExpertise, session }) {
         const filter = { _id: new ObjectId(id) };
         filter.expertise = hasExpertiseField ? expectedExpertise : { $exists: false };
@@ -85,7 +85,7 @@ class TechnicianModel {
     // Unit 5). Explicit inclusion projection - never a bare find() - so a
     // future field added to this collection is never accidentally pulled
     // into eligibility evaluation/response building. `approvedOnly: false`
-    // (diagnostic mode only) additionally fetches non-approved riders solely
+    // (diagnostic mode only) additionally fetches non-approved technicians solely
     // so the diagnostic response can report TECHNICIAN_NOT_APPROVED for
     // them; the default (non-diagnostic) path never needs to see them at
     // all, since they could never be eligible regardless.

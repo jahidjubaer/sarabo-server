@@ -1,4 +1,4 @@
-const { VALID_STATUSES } = require('../utils/parcelStatus');
+const { VALID_STATUSES } = require('../utils/repairRequestStatus');
 
 const CANCELLED_STATUS = 'cancelled';
 
@@ -14,8 +14,8 @@ const KNOWN_STATUSES = ['pending-pickup', ...VALID_STATUSES, CANCELLED_STATUS];
 // multiplying machine codes the client would have to branch on.
 const REQUEST_DELETE_NOT_ALLOWED = 'REQUEST_DELETE_NOT_ALLOWED';
 
-// Centralizes every parcel-state-only *deletion* eligibility rule (rules that
-// depend only on the parcel/payment/checkout records, not on the caller's
+// Centralizes every repair request-state-only *deletion* eligibility rule (rules that
+// depend only on the repair request/payment/checkout records, not on the caller's
 // identity - ownership/role is checked separately by the caller, see
 // controllers/repairRequestController.js's deleteRepairRequest).
 //
@@ -30,10 +30,10 @@ const REQUEST_DELETE_NOT_ALLOWED = 'REQUEST_DELETE_NOT_ALLOWED';
 //
 // `hasAnyPayment` and `hasActiveCheckout` must be independently confirmed by
 // the caller (real collection lookups) - a financial record is authoritative
-// even if parcel.paymentStatus is somehow inconsistent with it, and is never
+// even if repair request.paymentStatus is somehow inconsistent with it, and is never
 // silently destroyed.
-function getDeletionEligibility(parcel, { hasAnyPayment, hasActiveCheckout }) {
-    const status = parcel.deliveryStatus || 'pending-pickup';
+function getDeletionEligibility(repairRequest, { hasAnyPayment, hasActiveCheckout }) {
+    const status = repairRequest.deliveryStatus || 'pending-pickup';
 
     if (!KNOWN_STATUSES.includes(status)) {
         return { eligible: false, code: REQUEST_DELETE_NOT_ALLOWED, reason: 'this request is in an unrecognized state and cannot be deleted' };
@@ -43,25 +43,25 @@ function getDeletionEligibility(parcel, { hasAnyPayment, hasActiveCheckout }) {
         return { eligible: false, code: REQUEST_DELETE_NOT_ALLOWED, reason: 'this request has progressed beyond the stage where it can be deleted' };
     }
 
-    if (parcel.technicianEmail || parcel.technicianId) {
+    if (repairRequest.technicianEmail || repairRequest.technicianId) {
         // Defensive: a technician reference should never exist while status is
         // still pending-pickup, but never trust deliveryStatus alone.
         return { eligible: false, code: REQUEST_DELETE_NOT_ALLOWED, reason: 'a technician has already been assigned to this request' };
     }
 
-    if (parcel.inspection) {
+    if (repairRequest.inspection) {
         return { eligible: false, code: REQUEST_DELETE_NOT_ALLOWED, reason: 'this request already has an inspection on record and cannot be deleted' };
     }
 
-    if (parcel.quote) {
+    if (repairRequest.quote) {
         return { eligible: false, code: REQUEST_DELETE_NOT_ALLOWED, reason: 'this request already has a quote on record and cannot be deleted' };
     }
 
-    if (parcel.repair) {
+    if (repairRequest.repair) {
         return { eligible: false, code: REQUEST_DELETE_NOT_ALLOWED, reason: 'this request already has repair activity on record and cannot be deleted' };
     }
 
-    if (parcel.paymentStatus === 'paid' || hasAnyPayment) {
+    if (repairRequest.paymentStatus === 'paid' || hasAnyPayment) {
         return { eligible: false, code: REQUEST_DELETE_NOT_ALLOWED, reason: 'this request has a payment on record and cannot be deleted' };
     }
 

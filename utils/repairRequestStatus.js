@@ -71,7 +71,7 @@ const ACTIVE_STATUSES = [
     INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, PAYMENT_COMPLETED, REPAIR_IN_PROGRESS
 ];
 
-// Maps a parcel's current deliveryStatus to the statuses it may move to next
+// Maps a repair request's current deliveryStatus to the statuses it may move to next
 // via the GENERIC PATCH path. assignment_pending is present with an empty list
 // so the generic path can never leave it (accept/reject endpoints own that);
 // driver_assigned is never a generic target (no entry lists it as `next`), so

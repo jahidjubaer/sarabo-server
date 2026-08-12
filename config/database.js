@@ -59,7 +59,7 @@ async function connectDatabase() {
                 // Session can only ever back one payment record, independent of
                 // any application-level race in handlePaymentSuccess.
                 await collections.payments.createIndex({ sessionId: 1 }, { unique: true });
-                // Enforces at the database level that a parcel can have at most
+                // Enforces at the database level that a repair request can have at most
                 // one active (still-occupying-the-slot) checkout session row at
                 // a time - see services/checkoutSessionManager.js. Partial index
                 // filters support only simple equality, so `active` is a plain
@@ -96,7 +96,7 @@ async function connectDatabase() {
                 // signal that this exact logical event already produced a
                 // notification (see services/notificationService.js's
                 // createNotification), the same pattern already used for
-                // payments.sessionId and parcels.trackingId above.
+                // payments.sessionId and repair requests.trackingId above.
                 await collections.notifications.createIndex(
                     { deduplicationKey: 1 },
                     { unique: true, name: 'notifications_deduplicationKey_unique' }
@@ -112,7 +112,7 @@ async function connectDatabase() {
                 // the database level - the same "guard the invariant in the
                 // database, not just in application code" pattern already
                 // used above for payments.sessionId, checkoutSessions.requestId,
-                // and parcels.trackingId.
+                // and repair requests.trackingId.
                 await collections.serviceDefinitions.createIndex(
                     { productCategorySlug: 1, repairCategorySlug: 1 },
                     { unique: true, name: 'serviceDefinitions_product_repair_unique' }
@@ -140,15 +140,15 @@ async function connectDatabase() {
                 // gets its own standalone index rather than being combined.
                 await collections.technicians.createIndex(
                     { status: 1, workStatus: 1 },
-                    { name: 'riders_status_workStatus' }
+                    { name: 'technicians_status_workStatus' }
                 );
                 await collections.technicians.createIndex(
                     { 'expertise.productCategorySlug': 1 },
-                    { name: 'riders_expertise_productCategorySlug' }
+                    { name: 'technicians_expertise_productCategorySlug' }
                 );
                 await collections.technicians.createIndex(
                     { 'expertise.repairCategorySlugs': 1 },
-                    { name: 'riders_expertise_repairCategorySlugs' }
+                    { name: 'technicians_expertise_repairCategorySlugs' }
                 );
                 // Serves both the active-assignment set lookup (filtered to
                 // ACTIVE_STATUSES) and the completed-repair-count aggregation
@@ -158,7 +158,7 @@ async function connectDatabase() {
                 // actually matched.
                 await collections.repairRequests.createIndex(
                     { technicianId: 1, deliveryStatus: 1 },
-                    { name: 'parcels_technicianId_deliveryStatus' }
+                    { name: 'repairRequests_technicianId_deliveryStatus' }
                 );
                 // Damage-upload session foundation (Phase 6.4 Unit 1).
                 // Enforces at the database level that a storage key can back
