@@ -21,7 +21,7 @@ const TRACKING_CODE_PATTERN = /^[A-Za-z0-9_-]{6,64}$/;
 class TrackingController {
     constructor(models, collections) {
         this.Tracking = models.Tracking;
-        this.Parcel = models.Parcel;
+        this.RepairRequest = models.RepairRequest;
         this.User = models.User;
         this.collections = collections;
     }
@@ -31,7 +31,7 @@ class TrackingController {
             const trackingId = req.params.trackingId;
 
             // Check if user has access to this tracking (via repair request ownership or assignment)
-            const parcel = await this.Parcel.findByTrackingId(trackingId);
+            const parcel = await this.RepairRequest.findByTrackingId(trackingId);
             if (!parcel) {
                 return res.status(404).send({ message: 'tracking not found' });
             }
@@ -58,7 +58,7 @@ class TrackingController {
     // tracking security boundary this endpoint was built against). Every
     // field returned is explicitly selected, never a spread of a MongoDB
     // document, and the underlying queries themselves already use an
-    // allow-list projection (models/Parcel.js, models/Tracking.js) so no
+    // allow-list projection (models/RepairRequest.js, models/Tracking.js) so no
     // private field is ever pulled from the database for this path, let
     // alone sent to the client.
     async getPublicTracking(req, res) {
@@ -78,7 +78,7 @@ class TrackingController {
                 return res.status(404).send({ message: 'Repair tracking information not found.' });
             }
 
-            const parcel = await this.Parcel.findPublicProjectionByTrackingId(trackingCode);
+            const parcel = await this.RepairRequest.findPublicProjectionByTrackingId(trackingCode);
             if (!parcel) {
                 return res.status(404).send({ message: 'Repair tracking information not found.' });
             }

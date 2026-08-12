@@ -1,7 +1,7 @@
 // Idempotent retry for durable deletion Storage cleanup (Phase 6.5 Unit 8, Fix
 // 2). When a repair request is safely deleted, its trusted Firebase Storage
 // object keys are recorded in a durable `deletionCleanups` record BEFORE the
-// source metadata is removed (see controllers/parcelController.js#deleteParcel
+// source metadata is removed (see controllers/repairRequestController.js#deleteRepairRequest
 // and services/deletionCleanup.js). The immediate post-commit cleanup pass
 // normally removes that record; if any Storage delete failed (outage, transient
 // error, process crash) the record is retained. This script finishes those

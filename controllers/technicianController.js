@@ -41,16 +41,16 @@ function hasMatchableProfile(rider) {
         && validateTechnicianExpertise(rider.expertise).valid;
 }
 
-class RiderController {
+class TechnicianController {
     constructor(models, collections) {
-        this.Rider = models.Rider;
+        this.Technician = models.Technician;
         this.User = models.User;
-        this.Parcel = models.Parcel;
+        this.RepairRequest = models.RepairRequest;
         this.collections = collections;
         this.notifications = createNotificationService(models);
     }
 
-    async getAllRiders(req, res) {
+    async getTechnicians(req, res) {
         try {
             const { status, district, workStatus } = req.query;
             const query = {};
@@ -65,7 +65,7 @@ class RiderController {
                 query.workStatus = workStatus;
             }
 
-            const result = await this.Rider.findAll(query);
+            const result = await this.Technician.findAll(query);
             res.send(result);
         } catch (error) {
             res.status(500).send({ message: 'Error fetching technicians', error: error.message });
@@ -124,7 +124,7 @@ class RiderController {
     }
 
     // Technician application intake (Phase 8.7A). This route is unauthenticated
-    // (routes/riders.js), so the body is treated as fully untrusted: it is
+    // (routes/technicians.js), so the body is treated as fully untrusted: it is
     // reduced to an explicit allow-list (APPLICATION_ALLOWED_FIELDS) before
     // anything is persisted - no client-supplied status/workStatus/role/riderId
     // or moderation field can ride along. The application must now provide the
@@ -132,8 +132,8 @@ class RiderController {
     // + a valid, non-empty canonical expertise array), so an approved applicant
     // becomes matchable without any manual database edit. Legacy riders already
     // in the collection without expertise are untouched here - approval-time
-    // gating (updateRiderStatus) handles them.
-    async createRider(req, res) {
+    // gating (updateTechnicianStatus) handles them.
+    async createTechnicianApplication(req, res) {
         try {
             const body = req.body || {};
 
@@ -164,10 +164,10 @@ class RiderController {
             }
             application.expertise = normalizeTechnicianExpertise(application.expertise);
 
-            const result = await this.Rider.create(application);
+            const result = await this.Technician.create(application);
 
             // Best-effort admin fan-out - this route is unauthenticated
-            // (routes/riders.js), so there is no req.decoded_email; the actor
+            // (routes/technicians.js), so there is no req.decoded_email; the actor
             // is the applicant's own submitted email, and actorRole is
             // always null since no verified identity exists for it. A
             // lookup or notification failure here must never fail
@@ -238,7 +238,7 @@ class RiderController {
     // the admin still saw success. The linked email is always read from the
     // already-validated technician record inside the transaction, never
     // trusted from the request body.
-    async updateRiderStatus(req, res) {
+    async updateTechnicianStatus(req, res) {
         const requestedStatus = req.body.status;
         try {
             const riderId = req.params.id;
@@ -553,7 +553,7 @@ class RiderController {
                         return;
                     }
 
-                    const updateResult = await this.Rider.replaceExpertise({
+                    const updateResult = await this.Technician.replaceExpertise({
                         id: technician._id,
                         hasExpertiseField,
                         expectedExpertise: technician.expertise,
@@ -587,5 +587,5 @@ class RiderController {
     }
 }
 
-module.exports = RiderController;
+module.exports = TechnicianController;
 

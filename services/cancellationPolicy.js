@@ -10,7 +10,7 @@ const KNOWN_STATUSES = ['pending-pickup', ...VALID_STATUSES, CANCELLED_STATUS];
 // Centralizes every parcel-state-only cancellation eligibility rule (rules
 // that depend only on the parcel/payment records, not on the caller's
 // identity - ownership is checked separately by the caller, see
-// controllers/parcelController.js's cancelParcel). Cancellation is only ever
+// controllers/repairRequestController.js's cancelRepairRequest). Cancellation is only ever
 // possible from the very first stage of the repair lifecycle: once a
 // technician is assigned, or the request has progressed/been paid, a
 // customer can no longer back out through this endpoint.

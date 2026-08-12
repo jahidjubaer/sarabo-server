@@ -17,7 +17,7 @@ const REQUEST_DELETE_NOT_ALLOWED = 'REQUEST_DELETE_NOT_ALLOWED';
 // Centralizes every parcel-state-only *deletion* eligibility rule (rules that
 // depend only on the parcel/payment/checkout records, not on the caller's
 // identity - ownership/role is checked separately by the caller, see
-// controllers/parcelController.js's deleteParcel).
+// controllers/repairRequestController.js's deleteRepairRequest).
 //
 // Deletion is far more destructive than cancellation: it removes the request
 // document, its upload/evidence sessions, its checkout rows, and its Storage

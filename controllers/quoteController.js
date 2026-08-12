@@ -17,7 +17,7 @@ const {
 // the total is always computed server-side and currency is server-owned BDT.
 class QuoteController {
     constructor(models, collections) {
-        this.Parcel = models.Parcel;
+        this.RepairRequest = models.RepairRequest;
         this.User = models.User;
         this.collections = collections;
         this.notifications = createNotificationService(models);
@@ -41,7 +41,7 @@ class QuoteController {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
             const email = req.decoded_email;
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             const access = await this.resolveAccess(parcel, email);
             const canSee = parcel && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
 
@@ -144,7 +144,7 @@ class QuoteController {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
             const email = req.decoded_email;
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             const access = await this.resolveAccess(parcel, email);
             const canSee = parcel && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
 
@@ -257,7 +257,7 @@ class QuoteController {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
             const email = req.decoded_email;
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             const access = await this.resolveAccess(parcel, email);
             const canRead = parcel && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
 

@@ -58,7 +58,7 @@ const verifyAdmin = async (req, res, next) => {
     next();
 }
 
-const verifyRider = async (req, res, next) => {
+const verifyTechnician = async (req, res, next) => {
     if (!req.collections) {
         return res.status(500).send({ message: 'Database collections not available' });
     }
@@ -74,5 +74,5 @@ const verifyRider = async (req, res, next) => {
     next();
 }
 
-module.exports = { verifyFBToken, verifyAdmin, verifyRider, verifyEmailVerified };
+module.exports = { verifyFBToken, verifyAdmin, verifyTechnician, verifyEmailVerified };
 

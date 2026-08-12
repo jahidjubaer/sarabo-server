@@ -1,6 +1,6 @@
 const UserController = require('./userController');
-const ParcelController = require('./parcelController');
-const RiderController = require('./riderController');
+const RepairRequestController = require('./repairRequestController');
+const TechnicianController = require('./technicianController');
 const PaymentController = require('./paymentController');
 const TrackingController = require('./trackingController');
 const NotificationController = require('./NotificationController');
@@ -14,8 +14,8 @@ const RepairController = require('./repairController');
 function initializeControllers(models, collections) {
     return {
         user: new UserController(models, collections),
-        parcel: new ParcelController(models, collections),
-        rider: new RiderController(models, collections),
+        repairRequest: new RepairRequestController(models, collections),
+        technician: new TechnicianController(models, collections),
         payment: new PaymentController(models, collections),
         tracking: new TrackingController(models, collections),
         notification: new NotificationController(models),

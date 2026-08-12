@@ -1,7 +1,7 @@
 const { ObjectId } = require('mongodb');
 const { MAX_DAMAGE_IMAGES } = require('../utils/repairRequestV2');
 
-class ParcelModel {
+class RepairRequestModel {
     constructor(collection) {
         this.collection = collection;
     }
@@ -35,13 +35,13 @@ class ParcelModel {
 
     // Paginated, projected, count-consistent list for the admin request
     // management view. `query` must already be a safe, server-built filter
-    // (see controllers/parcelController.js's getAdminParcels) - this method
+    // (see controllers/repairRequestController.js's getAdminRepairRequests) - this method
     // never interprets or trusts raw client input itself.
     async findPaginated(query, { page, limit, sort = { createdAt: -1 } }) {
         const skip = (page - 1) * limit;
         const [data, totalItems] = await Promise.all([
             this.collection
-                .find(query, { projection: ParcelModel.ADMIN_LIST_PROJECTION })
+                .find(query, { projection: RepairRequestModel.ADMIN_LIST_PROJECTION })
                 .sort(sort)
                 .skip(skip)
                 .limit(limit)
@@ -222,5 +222,5 @@ class ParcelModel {
     }
 }
 
-module.exports = ParcelModel;
+module.exports = RepairRequestModel;
 

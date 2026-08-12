@@ -2,7 +2,7 @@
 // business logic only - no MongoDB access, no HTTP coupling. All database
 // orchestration (fetching the request, the service definition, candidate
 // riders, active-assignment set, linked-user roles, completed-repair
-// counts) lives in controllers/parcelController.js#getEligibleTechnicians;
+// counts) lives in controllers/repairRequestController.js#getEligibleTechnicians;
 // this module only evaluates/ranks/shapes the data it is given. Reuses
 // utils/technicianExpertise.js for every expertise rule rather than
 // re-deriving them here.

@@ -20,10 +20,10 @@ const UPLOAD_SESSION_BODY_FIELDS = ['fileName', 'mimeType', 'size'];
 
 class DamageUploadController {
     constructor(models, collections, storageService = damageStorageService) {
-        this.Parcel = models.Parcel;
+        this.RepairRequest = models.RepairRequest;
         this.DamageUploadSession = models.DamageUploadSession;
         this.User = models.User;
-        this.Rider = models.Rider;
+        this.Technician = models.Technician;
         this.models = models;
         this.collections = collections;
         this.storage = storageService;
@@ -41,7 +41,7 @@ class DamageUploadController {
             res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             return null;
         }
-        const parcel = await this.Parcel.findById(parcelId);
+        const parcel = await this.RepairRequest.findById(parcelId);
         if (!parcel) {
             res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             return null;
@@ -90,7 +90,7 @@ class DamageUploadController {
                 return res.status(409).send({ message: 'damage evidence can no longer be modified for this request', code: 'DAMAGE_IMAGES_LOCKED' });
             }
 
-            const currentCount = this.Parcel.countDamageImages(parcel);
+            const currentCount = this.RepairRequest.countDamageImages(parcel);
             if (currentCount >= MAX_DAMAGE_IMAGES) {
                 return res.status(409).send({ message: 'this request already has the maximum number of damage images', code: 'DAMAGE_IMAGE_LIMIT_REACHED' });
             }
@@ -185,7 +185,7 @@ class DamageUploadController {
             }
 
             if (uploadSession.status === 'finalized') {
-                const existingImage = this.Parcel.findDamageImage(parcel, uploadSession.storageKey);
+                const existingImage = this.RepairRequest.findDamageImage(parcel, uploadSession.storageKey);
                 if (existingImage) {
                     return res.status(200).send({ message: 'already finalized', image: this._serializeImage(uploadSession._id, existingImage) });
                 }
@@ -243,7 +243,7 @@ class DamageUploadController {
             let outcome = null;
             try {
                 await mongoSession.withTransaction(async () => {
-                    const attachResult = await this.Parcel.attachDamageImage({
+                    const attachResult = await this.RepairRequest.attachDamageImage({
                         requestId: parcelId, storageKey: uploadSession.storageKey, image: imageEntry, session: mongoSession
                     });
                     if (attachResult.matchedCount === 0) {
@@ -252,7 +252,7 @@ class DamageUploadController {
                             outcome = { code: 'REQUEST_NOT_FOUND', httpStatus: 404 };
                             return;
                         }
-                        const existing = this.Parcel.findDamageImage(freshParcel, uploadSession.storageKey);
+                        const existing = this.RepairRequest.findDamageImage(freshParcel, uploadSession.storageKey);
                         outcome = existing
                             ? { code: 'DAMAGE_IMAGE_ALREADY_ATTACHED', httpStatus: 409 }
                             : { code: 'DAMAGE_IMAGE_LIMIT_REACHED', httpStatus: 409 };
@@ -313,7 +313,7 @@ class DamageUploadController {
                 return res.status(409).send({ message: 'damage evidence can no longer be modified for this request', code: 'DAMAGE_IMAGES_LOCKED' });
             }
 
-            const existingImage = this.Parcel.findDamageImage(parcel, uploadSession.storageKey);
+            const existingImage = this.RepairRequest.findDamageImage(parcel, uploadSession.storageKey);
             if (!existingImage) {
                 // Already removed (repeated-removal retry) - safe, idempotent
                 // success, not an error.
@@ -327,7 +327,7 @@ class DamageUploadController {
             // already gone - there is no dangling pointer and nothing
             // misleading in the response; the orphaned Firebase object
             // becomes cleanup debt for scripts/audit-damage-uploads.js.
-            const removeResult = await this.Parcel.removeDamageImage({ requestId: parcelId, storageKey: uploadSession.storageKey });
+            const removeResult = await this.RepairRequest.removeDamageImage({ requestId: parcelId, storageKey: uploadSession.storageKey });
             if (removeResult.modifiedCount === 0) {
                 // Raced with another removal of the same image - idempotent
                 // success either way.
@@ -360,7 +360,7 @@ class DamageUploadController {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
 
-            const parcel = await this.Parcel.findById(parcelId);
+            const parcel = await this.RepairRequest.findById(parcelId);
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }

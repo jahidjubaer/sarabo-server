@@ -1,6 +1,6 @@
 const UserModel = require('./User');
-const ParcelModel = require('./Parcel');
-const RiderModel = require('./Rider');
+const RepairRequestModel = require('./RepairRequest');
+const TechnicianModel = require('./Technician');
 const PaymentModel = require('./Payment');
 const TrackingModel = require('./Tracking');
 const NotificationModel = require('./Notification');
@@ -12,8 +12,8 @@ const DeletionCleanupModel = require('./DeletionCleanup');
 function initializeModels(collections) {
     return {
         User: new UserModel(collections.users),
-        Parcel: new ParcelModel(collections.repairRequests),
-        Rider: new RiderModel(collections.technicians),
+        RepairRequest: new RepairRequestModel(collections.repairRequests),
+        Technician: new TechnicianModel(collections.technicians),
         Payment: new PaymentModel(collections.payments),
         Tracking: new TrackingModel(collections.trackingEvents),
         Notification: new NotificationModel(collections.notifications),

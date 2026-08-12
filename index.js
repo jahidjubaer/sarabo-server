@@ -11,10 +11,10 @@ const { logSafeError, getSafeLogPath, ERROR_CATEGORIES } = require('./utils/safe
 
 // Import routes
 const userRoutes = require('./routes/users');
-const parcelRoutes = require('./routes/parcels');
+const repairRequestRoutes = require('./routes/repairRequests');
 const paymentRoutes = require('./routes/payments');
 const { registerPaymentWebhookRoute } = require('./routes/paymentWebhook');
-const riderRoutes = require('./routes/riders');
+const technicianRoutes = require('./routes/technicians');
 const trackingRoutes = require('./routes/trackings');
 const publicTrackingRoutes = require('./routes/publicTracking');
 const notificationRoutes = require('./routes/notifications');
@@ -87,9 +87,9 @@ app.get('/', (req, res) => {
 // database outage returns 503 instead of the route appearing as an
 // unregistered 404.
 userRoutes(app, controllers);
-parcelRoutes(app, controllers);
+repairRequestRoutes(app, controllers);
 paymentRoutes(app, controllers);
-riderRoutes(app, controllers);
+technicianRoutes(app, controllers);
 trackingRoutes(app, controllers);
 publicTrackingRoutes(app, controllers);
 notificationRoutes(app, controllers);

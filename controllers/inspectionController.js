@@ -27,7 +27,7 @@ const {
 //    is a technician finding only, always in server-owned BDT.
 class InspectionController {
     constructor(models, collections) {
-        this.Parcel = models.Parcel;
+        this.RepairRequest = models.RepairRequest;
         this.User = models.User;
         this.collections = collections;
         this.notifications = createNotificationService(models);
@@ -54,7 +54,7 @@ class InspectionController {
             }
 
             const email = req.decoded_email;
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             const access = await this.resolveAccess(parcel, email);
             const canSee = parcel && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
 
@@ -218,7 +218,7 @@ class InspectionController {
             }
 
             const email = req.decoded_email;
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             const access = await this.resolveAccess(parcel, email);
             const canRead = parcel && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
 

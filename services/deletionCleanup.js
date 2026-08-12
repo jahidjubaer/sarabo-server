@@ -1,5 +1,5 @@
 // Durable Storage cleanup for deleted repair requests (Phase 6.5 Unit 8, Fix
-// 2). Shared by controllers/parcelController.js#deleteParcel (the immediate
+// 2). Shared by controllers/repairRequestController.js#deleteRepairRequest (the immediate
 // post-commit pass) and scripts/retry-deletion-cleanup.js (the retry path), so
 // both behave identically and idempotently.
 //

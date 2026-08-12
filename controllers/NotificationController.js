@@ -6,7 +6,7 @@ const LIST_MAX_LIMIT = 50;
 
 // Missing page -> default to 1. Present but not a positive integer -> reject,
 // never silently coerce (this is a new endpoint, not bound to
-// getAdminParcels's older silent-normalize convention).
+// getAdminRepairRequests's older silent-normalize convention).
 function parsePage(rawPage) {
     if (rawPage === undefined) return 1;
     const page = Number(rawPage);

@@ -21,7 +21,7 @@ const SESSION_ID_PATTERN = /^[a-zA-Z0-9_]{1,500}$/;
 class PaymentController {
     constructor(models, collections) {
         this.Payment = models.Payment;
-        this.Parcel = models.Parcel;
+        this.RepairRequest = models.RepairRequest;
         this.User = models.User;
         this.collections = collections;
         // Same notification-service construction parcelController.js already
@@ -46,7 +46,7 @@ class PaymentController {
                 return res.status(400).send({ message: 'invalid or missing repair request id' });
             }
 
-            const parcel = await this.Parcel.findById(rawParcelId);
+            const parcel = await this.RepairRequest.findById(rawParcelId);
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found' });
             }
@@ -200,7 +200,7 @@ class PaymentController {
             if (!ObjectId.isValid(id)) {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
@@ -235,7 +235,7 @@ class PaymentController {
             if (!ObjectId.isValid(id)) {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }

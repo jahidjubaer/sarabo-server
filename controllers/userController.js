@@ -5,7 +5,7 @@ const { normalize } = require('../services/paymentProcessor');
 class UserController {
     constructor(models, collections) {
         this.User = models.User;
-        this.Parcel = models.Parcel;
+        this.RepairRequest = models.RepairRequest;
         this.collections = collections;
     }
 

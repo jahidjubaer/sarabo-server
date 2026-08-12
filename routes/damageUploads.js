@@ -2,9 +2,9 @@ const { verifyFBToken, verifyEmailVerified } = require('../middleware/auth');
 const { ensureDatabaseReady } = require('../middleware/database');
 
 // Damage-evidence upload routes (Phase 6.4 Unit 1). Deliberately a separate
-// route module from routes/parcels.js (mounted independently below, not
+// route module from routes/repairRequests.js (mounted independently below, not
 // touching that file) even though every path nests under /parcels/:id.
-// No verifyAdmin/verifyRider here - ownership is enforced inside
+// No verifyAdmin/verifyTechnician here - ownership is enforced inside
 // controllers/damageUploadController.js, exactly like the existing
 // /parcels/:id/cancel route already does for the same reason.
 function damageUploadRoutes(app, controllers) {
@@ -13,7 +13,7 @@ function damageUploadRoutes(app, controllers) {
     // Authorized read access (Phase 6.4 Unit 2) - admits owner, admin, and
     // the currently-assigned technician; every role is resolved live inside
     // the controller/service (see services/damageImageAccessService.js),
-    // never via a single-role route gate like verifyAdmin/verifyRider,
+    // never via a single-role route gate like verifyAdmin/verifyTechnician,
     // since this one route must serve three different roles.
     app.get(
         '/parcels/:id/damage-images',

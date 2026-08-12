@@ -1,12 +1,12 @@
 // Single source of truth for the repair-request delivery-status lifecycle.
-// assignRiderToParcel sets the first status (driver_assigned) unconditionally
-// and isn't covered here - only updateParcelStatus accepts a client-supplied
+// assignTechnicianToRepairRequest sets the first status (driver_assigned) unconditionally
+// and isn't covered here - only updateRepairRequestStatus accepts a client-supplied
 // status value, which is what needed validating.
 const VALID_STATUSES = ['driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered'];
 
 // Technician inspection completion (Phase 6.4 Unit 4). Deliberately NOT part
 // of VALID_STATUSES: that list is the set of client-settable transition
-// targets updateParcelStatus accepts, and inspection_completed must never be
+// targets updateRepairRequestStatus accepts, and inspection_completed must never be
 // reachable through the generic PATCH /parcels/:id/status path - it is set
 // only by the dedicated, atomic inspection-submission endpoint (see
 // controllers/inspectionController.js). It is, however, an ACTIVE status
@@ -63,7 +63,7 @@ const ASSIGNMENT_PENDING = 'assignment_pending';
 // repair request - i.e. every status between assignment and completion,
 // including inspection_completed, the quote states, payment_completed, and
 // repair_in_progress. repair_completed is intentionally excluded (terminal).
-// Used by assignRiderToParcel (Phase 6.2 Unit 2) and technicianEligibilityService
+// Used by assignTechnicianToRepairRequest (Phase 6.2 Unit 2) and technicianEligibilityService
 // to find any request still occupying a technician's single active-assignment slot.
 const ACTIVE_STATUSES = [
     ASSIGNMENT_PENDING,

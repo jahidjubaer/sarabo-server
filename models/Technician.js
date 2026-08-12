@@ -1,13 +1,13 @@
 const { ObjectId } = require('mongodb');
 
-class RiderModel {
+class TechnicianModel {
     constructor(collection) {
         this.collection = collection;
     }
 
     async findAll(filters = {}) {
         // Explicit field allow-list rather than a bare find() - this route is
-        // admin-only (routes/riders.js), and every field listed here is
+        // admin-only (routes/technicians.js), and every field listed here is
         // actually rendered by an existing admin consumer: ApproveTechnicians'
         // review modal needs the full application (including address/nid) to
         // vet a technician; AssignTechnicians/AdminDashboardHome only need a
@@ -99,5 +99,5 @@ class RiderModel {
     }
 }
 
-module.exports = RiderModel;
+module.exports = TechnicianModel;
 

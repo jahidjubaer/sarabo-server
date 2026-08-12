@@ -1,17 +1,17 @@
-const { verifyFBToken, verifyAdmin, verifyRider, verifyEmailVerified } = require('../middleware/auth');
+const { verifyFBToken, verifyAdmin, verifyTechnician, verifyEmailVerified } = require('../middleware/auth');
 const { ensureDatabaseReady } = require('../middleware/database');
 
-function parcelRoutes(app, controllers) {
-    const parcelController = controllers.parcel;
+function repairRequestRoutes(app, controllers) {
+    const parcelController = controllers.repairRequest;
 
     // Get all repair requests
-    app.get('/parcels', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.getAllParcels(req, res));
+    app.get('/parcels', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.getAllRepairRequests(req, res));
 
     // Get repair requests for technician
-    app.get('/parcels/rider', verifyFBToken, ensureDatabaseReady, verifyRider, (req, res) => parcelController.getRiderParcels(req, res));
+    app.get('/parcels/rider', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => parcelController.getTechnicianRepairRequests(req, res));
 
     // Get repair request by ID
-    app.get('/parcels/:id', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.getParcelById(req, res));
+    app.get('/parcels/:id', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.getRepairRequestById(req, res));
 
     // Get repair status stats (admin only)
     app.get('/parcels/delivery-status/stats', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.getDeliveryStatusStats(req, res));
@@ -27,34 +27,34 @@ function parcelRoutes(app, controllers) {
     // deliberately separate from GET /parcels above (whose flat-array
     // response shape is already relied on by MyRequests and
     // AssignTechnicians and is not changed by this route).
-    app.get('/admin/parcels', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.getAdminParcels(req, res));
+    app.get('/admin/parcels', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.getAdminRepairRequests(req, res));
 
     // Create new repair request. Customer-exclusive business mutation - gated
     // by verifyEmailVerified (Phase 8.1) so an unverified email/password user
     // cannot create a request; server token is authoritative (client guard is
     // UX only). verifyEmailVerified runs after verifyFBToken and before the
     // controller.
-    app.post('/parcels', verifyFBToken, ensureDatabaseReady, verifyEmailVerified, (req, res) => parcelController.createParcel(req, res));
+    app.post('/parcels', verifyFBToken, ensureDatabaseReady, verifyEmailVerified, (req, res) => parcelController.createRepairRequest(req, res));
 
     // Update repair request status
-    app.patch('/parcels/:id/status', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.updateParcelStatus(req, res));
+    app.patch('/parcels/:id/status', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.updateRepairRequestStatus(req, res));
 
     // Customer-initiated soft cancellation - ownership is enforced inside
     // the controller (never delegated to route middleware alone), so any
     // authenticated caller may reach this route but only the request's own
     // owner can actually cancel it.
-    app.patch('/parcels/:id/cancel', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.cancelParcel(req, res));
+    app.patch('/parcels/:id/cancel', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.cancelRepairRequest(req, res));
 
     // Technician assignment decision (Phase 8.2). Accept/reject are technician
-    // operations - verifyRider gates role; the controller additionally enforces
+    // operations - verifyTechnician gates role; the controller additionally enforces
     // that the caller is the CURRENTLY offered technician and that the request
     // is still assignment_pending, and resolves concurrency atomically. These
     // (not the generic status PATCH) are the sole authority for the
     // assignment_pending -> driver_assigned / -> pending-pickup transitions.
     // Not gated by verifyEmailVerified (technician operation, not a customer
     // mutation).
-    app.post('/parcels/:id/assignment/accept', verifyFBToken, ensureDatabaseReady, verifyRider, (req, res) => parcelController.acceptAssignment(req, res));
-    app.post('/parcels/:id/assignment/reject', verifyFBToken, ensureDatabaseReady, verifyRider, (req, res) => parcelController.rejectAssignment(req, res));
+    app.post('/parcels/:id/assignment/accept', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => parcelController.acceptAssignment(req, res));
+    app.post('/parcels/:id/assignment/reject', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => parcelController.rejectAssignment(req, res));
 
     // Role-projected assignment read (Phase 8.2) - owner/assigned-technician/
     // admin; the controller strips rejection reasons + identities from non-admin
@@ -62,7 +62,7 @@ function parcelRoutes(app, controllers) {
     app.get('/parcels/:id/assignment', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.getAssignment(req, res));
 
     // Assign technician to repair request (admin only)
-    app.patch('/parcels/:id', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.assignRiderToParcel(req, res));
+    app.patch('/parcels/:id', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => parcelController.assignTechnicianToRepairRequest(req, res));
 
     // Safe deletion of a repair request (Phase 6.5 Unit 8). Ownership/role is
     // enforced inside the controller - the request's own owner OR an admin may
@@ -71,8 +71,8 @@ function parcelRoutes(app, controllers) {
     // Deliberately NOT gated by verifyAdmin at the route level (unlike before):
     // a customer must be able to delete their own not-yet-started request, and
     // the controller is the single authority that decides who and when, the
-    // same convention already used for cancelParcel above.
-    app.delete('/parcels/:id', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.deleteParcel(req, res));
+    // same convention already used for cancelRepairRequest above.
+    app.delete('/parcels/:id', verifyFBToken, ensureDatabaseReady, (req, res) => parcelController.deleteRepairRequest(req, res));
 }
 
-module.exports = parcelRoutes;
+module.exports = repairRequestRoutes;

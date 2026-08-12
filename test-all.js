@@ -206,7 +206,7 @@ async function testStatusTransitions() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
 
         // Real assignments against the shared RIDER_EMAIL account can now
         // actually succeed (Phase 2.5 Unit 2 made assignment transactional
@@ -215,27 +215,27 @@ async function testStatusTransitions() {
         const riderBeforeTest = await collections.technicians.findOne({ email: RIDER_EMAIL });
         originalRiderWorkStatus = riderBeforeTest?.workStatus ?? null;
 
-        async function createTestParcel(marker) {
+        async function createTestRepairRequest(marker) {
             const res = fakeRes();
-            await parcelController.createParcel(
+            await parcelController.createRepairRequest(
                 { body: { parcelName: marker, cost: 1 }, decoded_email: CUSTOMER_EMAIL },
                 res
             );
             const id = res.body.insertedId.toString();
             createdParcelIds.push(id);
-            const parcel = await models.Parcel.findById(id);
+            const parcel = await models.RepairRequest.findById(id);
             createdTrackingIds.push(parcel.trackingId);
             return { id, trackingId: parcel.trackingId };
         }
 
         async function assignTestRider(id, trackingId) {
             // Must be a real, approved technician document now that
-            // assignRiderToParcel validates riderId as an ObjectId and
+            // assignTechnicianToRepairRequest validates riderId as an ObjectId and
             // looks the technician up (Phase 2.5 Unit 2) - reuses the same
             // known, persistent local-dev rider account referenced by
             // RIDER_EMAIL elsewhere in this file, rather than a fake string.
             const realRider = await collections.technicians.findOne({ email: RIDER_EMAIL });
-            await parcelController.assignRiderToParcel(
+            await parcelController.assignTechnicianToRepairRequest(
                 {
                     params: { id },
                     body: { riderId: realRider._id.toString(), riderName: realRider.name, riderEmail: RIDER_EMAIL, trackingId }
@@ -246,7 +246,7 @@ async function testStatusTransitions() {
 
         async function updateStatus(id, deliveryStatus, decoded_email, trackingId) {
             const res = fakeRes();
-            await parcelController.updateParcelStatus(
+            await parcelController.updateRepairRequestStatus(
                 { params: { id }, body: { deliveryStatus, trackingId }, decoded_email },
                 res
             );
@@ -256,7 +256,7 @@ async function testStatusTransitions() {
         // --- Main sequence parcel: valid full sequence, backward, repeated,
         // nonsense, and post-completion transitions ---
         const marker = `TEST-STATUS-TRANSITION-${Date.now()}`;
-        const main = await createTestParcel(marker);
+        const main = await createTestRepairRequest(marker);
         await assignTestRider(main.id, main.trackingId);
 
         let res = await updateStatus(main.id, 'rider_arriving', RIDER_EMAIL, main.trackingId);
@@ -271,7 +271,7 @@ async function testStatusTransitions() {
         res = await updateStatus(main.id, 'driver_assigned', RIDER_EMAIL, main.trackingId);
         // Phase 3.0 Unit 4 moved transition-rejection from 400 to 409
         // (STATUS_TRANSITION_NOT_ALLOWED) - a conflict with existing state,
-        // not a malformed request - see parcelController.updateParcelStatus.
+        // not a malformed request - see parcelController.updateRepairRequestStatus.
         logTest('Backward transition rejected', res.statusCode === 409 && res.body.code === 'STATUS_TRANSITION_NOT_ALLOWED');
 
         const trackingCountBefore = await collections.trackingEvents.countDocuments({ trackingId: main.trackingId });
@@ -291,11 +291,11 @@ async function testStatusTransitions() {
         // --- Second parcel, fresh from assignment: skipped transition and
         // unauthorized-customer checks ---
         const marker2 = `TEST-STATUS-SKIP-${Date.now()}`;
-        const second = await createTestParcel(marker2);
+        const second = await createTestRepairRequest(marker2);
         await assignTestRider(second.id, second.trackingId);
 
         res = await updateStatus(second.id, 'parcel_delivered', RIDER_EMAIL, second.trackingId);
-        // Now routed through the transactional completeParcel path (Phase
+        // Now routed through the transactional completeRepairRequest path (Phase
         // 3.0 Unit 4) - a skipped transition is a 409 conflict against the
         // request's current state, not a malformed request.
         logTest('Skipped transition rejected (driver_assigned -> parcel_delivered)', res.statusCode === 409 && res.body.code === 'STATUS_TRANSITION_NOT_ALLOWED');
@@ -318,7 +318,7 @@ async function testStatusTransitions() {
             await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
         // Phase 5.2 Unit 3 wired real notification creation into
-        // assignRiderToParcel, so assignTestRider's real CUSTOMER_EMAIL/
+        // assignTechnicianToRepairRequest, so assignTestRider's real CUSTOMER_EMAIL/
         // RIDER_EMAIL assignment above now also creates real notification
         // documents - scoped and removed here by entityId, never by
         // recipient, so both real accounts are left exactly as found.
@@ -374,7 +374,7 @@ async function testInitialRequestStatus() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
 
         // This test's assignment can genuinely flip the shared RIDER_EMAIL
         // account's workStatus now that assignment is transactional -
@@ -386,7 +386,7 @@ async function testInitialRequestStatus() {
         const countBefore = await collections.repairRequests.countDocuments({ parcelName: marker });
 
         const createRes = fakeRes();
-        await parcelController.createParcel(
+        await parcelController.createRepairRequest(
             { body: { parcelName: marker, cost: 1 }, decoded_email: CUSTOMER_EMAIL },
             createRes
         );
@@ -395,7 +395,7 @@ async function testInitialRequestStatus() {
 
         // Read back from MongoDB directly - confirms the value is actually
         // persisted, not just something the client fabricates for display.
-        const stored = await models.Parcel.findById(id);
+        const stored = await models.RepairRequest.findById(id);
         createdTrackingIds.push(stored.trackingId);
         logTest('New request stores deliveryStatus: pending-pickup in MongoDB', stored.deliveryStatus === 'pending-pickup');
 
@@ -403,22 +403,22 @@ async function testInitialRequestStatus() {
         logTest('No duplicate request created', countAfter === countBefore + 1);
 
         // Same query the admin "Assign Technicians" page issues.
-        const pendingResults = await models.Parcel.findAll({ deliveryStatus: 'pending-pickup' });
+        const pendingResults = await models.RepairRequest.findAll({ deliveryStatus: 'pending-pickup' });
         const foundInPending = pendingResults.some(p => p._id.toString() === id);
         logTest('Admin pending-pickup filter (GET /parcels?deliveryStatus=pending-pickup) returns the new request', foundInPending);
 
         // Must be a real, approved technician document now that
-        // assignRiderToParcel validates riderId as an ObjectId and looks the
+        // assignTechnicianToRepairRequest validates riderId as an ObjectId and looks the
         // technician up (Phase 2.5 Unit 2).
         const realRiderForAssignment = await collections.technicians.findOne({ email: RIDER_EMAIL });
-        await parcelController.assignRiderToParcel(
+        await parcelController.assignTechnicianToRepairRequest(
             {
                 params: { id },
                 body: { riderId: realRiderForAssignment._id.toString(), riderName: realRiderForAssignment.name, riderEmail: RIDER_EMAIL, trackingId: stored.trackingId }
             },
             fakeRes()
         );
-        const afterAssignment = await models.Parcel.findById(id);
+        const afterAssignment = await models.RepairRequest.findById(id);
         logTest('Assignment changes status to driver_assigned', afterAssignment.deliveryStatus === 'driver_assigned');
     } finally {
         await new Promise(resolve => setTimeout(resolve, 300));
@@ -502,7 +502,7 @@ async function testSecureCheckoutSession() {
         const controllers = initializeControllers(models, collections);
         const paymentController = controllers.payment;
 
-        async function createTestParcel(marker, cost) {
+        async function createTestRepairRequest(marker, cost) {
             const doc = {
                 parcelName: marker,
                 cost,
@@ -525,7 +525,7 @@ async function testSecureCheckoutSession() {
 
         // --- Owner can create a checkout session; a fake client-supplied
         // amount and email must have no effect on what Stripe receives. ---
-        const main = await createTestParcel(`TEST-PAYMENT-${Date.now()}`, 49.99);
+        const main = await createTestRepairRequest(`TEST-PAYMENT-${Date.now()}`, 49.99);
         const sessionsBefore = capturedStripeSessionParams.length;
         let res = await checkout(main.id, CUSTOMER_EMAIL, { cost: 1, senderEmail: 'attacker@example.com' });
         logTest('Owner can create checkout session', res.statusCode === 200 && !!res.body.url);
@@ -572,16 +572,16 @@ async function testSecureCheckoutSession() {
         logTest('Invalid ObjectId rejected', res.statusCode === 400);
 
         // --- Invalid stored amount. ---
-        const zeroCost = await createTestParcel(`TEST-PAYMENT-ZERO-${Date.now()}`, 0);
+        const zeroCost = await createTestRepairRequest(`TEST-PAYMENT-ZERO-${Date.now()}`, 0);
         res = await checkout(zeroCost.id, CUSTOMER_EMAIL);
         logTest('Zero stored amount rejected', res.statusCode === 400);
 
-        const badCost = await createTestParcel(`TEST-PAYMENT-BAD-${Date.now()}`, 'not-a-number');
+        const badCost = await createTestRepairRequest(`TEST-PAYMENT-BAD-${Date.now()}`, 'not-a-number');
         res = await checkout(badCost.id, CUSTOMER_EMAIL);
         logTest('Non-numeric stored amount rejected', res.statusCode === 400);
 
         // --- Already-paid request rejected. ---
-        const paid = await createTestParcel(`TEST-PAYMENT-PAID-${Date.now()}`, 25);
+        const paid = await createTestRepairRequest(`TEST-PAYMENT-PAID-${Date.now()}`, 25);
         await collections.repairRequests.updateOne({ _id: new ObjectId(paid.id) }, { $set: { paymentStatus: 'paid' } });
         res = await checkout(paid.id, CUSTOMER_EMAIL);
         logTest('Already-paid request rejected', res.statusCode === 409);
@@ -659,7 +659,7 @@ async function testSecurePaymentSuccess() {
         const controllers = initializeControllers(models, collections);
         const paymentController = controllers.payment;
 
-        async function createTestParcel(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, deliveryStatus, paymentStatus } = {}) {
+        async function createTestRepairRequest(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, deliveryStatus, paymentStatus } = {}) {
             const doc = {
                 parcelName: marker,
                 cost,
@@ -714,26 +714,26 @@ async function testSecurePaymentSuccess() {
         logTest('Nonexistent Stripe session rejected', res.statusCode === 404);
 
         // --- 6. Session exists but unpaid - no mutation ---
-        const unpaidParcel = await createTestParcel(`TEST-PAYSUCCESS-UNPAID-${Date.now()}`, { cost: 30 });
+        const unpaidParcel = await createTestRepairRequest(`TEST-PAYSUCCESS-UNPAID-${Date.now()}`, { cost: 30 });
         const unpaidSid = newSessionId('unpaid');
         stripeSessionFixtures.set(unpaidSid, makeSession({
             parcelId: unpaidParcel.id, trackingId: unpaidParcel.trackingId, payment_status: 'unpaid'
         }));
         res = await verify(unpaidSid, CUSTOMER_EMAIL);
-        const afterUnpaid = await models.Parcel.findById(unpaidParcel.id);
+        const afterUnpaid = await models.RepairRequest.findById(unpaidParcel.id);
         logTest(
             'Unpaid session rejected with no mutation',
             res.statusCode === 409 && afterUnpaid.paymentStatus !== 'paid'
         );
 
         // --- 7. Session mode is not "payment" - no mutation ---
-        const badModeParcel = await createTestParcel(`TEST-PAYSUCCESS-MODE-${Date.now()}`, { cost: 30 });
+        const badModeParcel = await createTestRepairRequest(`TEST-PAYSUCCESS-MODE-${Date.now()}`, { cost: 30 });
         const badModeSid = newSessionId('badmode');
         stripeSessionFixtures.set(badModeSid, makeSession({
             parcelId: badModeParcel.id, trackingId: badModeParcel.trackingId, mode: 'setup'
         }));
         res = await verify(badModeSid, CUSTOMER_EMAIL);
-        const afterBadMode = await models.Parcel.findById(badModeParcel.id);
+        const afterBadMode = await models.RepairRequest.findById(badModeParcel.id);
         logTest(
             'Non-payment session mode rejected with no mutation',
             res.statusCode === 409 && afterBadMode.paymentStatus !== 'paid'
@@ -760,7 +760,7 @@ async function testSecurePaymentSuccess() {
         logTest('Session referencing a nonexistent parcel rejected', res.statusCode === 404);
 
         // --- 11 & 20 & 21. Authenticated caller does not own the parcel ---
-        const ownerParcel = await createTestParcel(`TEST-PAYSUCCESS-OWNER-${Date.now()}`, { cost: 30 });
+        const ownerParcel = await createTestRepairRequest(`TEST-PAYSUCCESS-OWNER-${Date.now()}`, { cost: 30 });
         const wrongCallerSid = newSessionId('wrongcaller');
         stripeSessionFixtures.set(wrongCallerSid, makeSession({
             parcelId: ownerParcel.id, trackingId: ownerParcel.trackingId
@@ -776,7 +776,7 @@ async function testSecurePaymentSuccess() {
         logTest('Non-owner admin caller rejected (test 20)', res.statusCode === 403);
 
         // --- 12. Stripe customer email does not match owner ---
-        const emailMismatchParcel = await createTestParcel(`TEST-PAYSUCCESS-EMAILMISMATCH-${Date.now()}`, { cost: 30 });
+        const emailMismatchParcel = await createTestRepairRequest(`TEST-PAYSUCCESS-EMAILMISMATCH-${Date.now()}`, { cost: 30 });
         const emailMismatchSid = newSessionId('emailmismatch');
         stripeSessionFixtures.set(emailMismatchSid, makeSession({
             parcelId: emailMismatchParcel.id, trackingId: emailMismatchParcel.trackingId,
@@ -793,7 +793,7 @@ async function testSecurePaymentSuccess() {
         );
 
         // --- 14. Stripe amount does not match Mongo cost ---
-        const amountMismatchParcel = await createTestParcel(`TEST-PAYSUCCESS-AMOUNT-${Date.now()}`, { cost: 30 });
+        const amountMismatchParcel = await createTestRepairRequest(`TEST-PAYSUCCESS-AMOUNT-${Date.now()}`, { cost: 30 });
         const amountMismatchSid = newSessionId('amountmismatch');
         stripeSessionFixtures.set(amountMismatchSid, makeSession({
             parcelId: amountMismatchParcel.id, trackingId: amountMismatchParcel.trackingId,
@@ -803,7 +803,7 @@ async function testSecurePaymentSuccess() {
         logTest('Stripe amount mismatch rejected', res.statusCode === 409);
 
         // --- 15. Stripe currency does not match expected currency ---
-        const currencyMismatchParcel = await createTestParcel(`TEST-PAYSUCCESS-CURRENCY-${Date.now()}`, { cost: 30 });
+        const currencyMismatchParcel = await createTestRepairRequest(`TEST-PAYSUCCESS-CURRENCY-${Date.now()}`, { cost: 30 });
         const currencyMismatchSid = newSessionId('currencymismatch');
         stripeSessionFixtures.set(currencyMismatchSid, makeSession({
             parcelId: currencyMismatchParcel.id, trackingId: currencyMismatchParcel.trackingId,
@@ -815,13 +815,13 @@ async function testSecurePaymentSuccess() {
         // --- 16. Valid paid session succeeds, for every starting deliveryStatus ---
         const startingStatuses = ['pending-pickup', 'driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered'];
         for (const startStatus of startingStatuses) {
-            const p = await createTestParcel(`TEST-PAYSUCCESS-LIFECYCLE-${startStatus}-${Date.now()}`, {
+            const p = await createTestRepairRequest(`TEST-PAYSUCCESS-LIFECYCLE-${startStatus}-${Date.now()}`, {
                 cost: 30, deliveryStatus: startStatus
             });
             const sid = newSessionId(`lifecycle_${startStatus.replace(/-/g, '_')}`);
             stripeSessionFixtures.set(sid, makeSession({ parcelId: p.id, trackingId: p.trackingId }));
             res = await verify(sid, CUSTOMER_EMAIL);
-            const afterPay = await models.Parcel.findById(p.id);
+            const afterPay = await models.RepairRequest.findById(p.id);
             const paymentCount = await collections.payments.countDocuments({ sessionId: sid });
             logTest(
                 `Valid payment succeeds and preserves deliveryStatus (${startStatus})`,
@@ -835,7 +835,7 @@ async function testSecurePaymentSuccess() {
         }
 
         // --- 17. Same valid session called twice - idempotent, no duplicate row ---
-        const idemParcel = await createTestParcel(`TEST-PAYSUCCESS-IDEMPOTENT-${Date.now()}`, { cost: 30 });
+        const idemParcel = await createTestRepairRequest(`TEST-PAYSUCCESS-IDEMPOTENT-${Date.now()}`, { cost: 30 });
         const idemSid = newSessionId('idempotent');
         stripeSessionFixtures.set(idemSid, makeSession({ parcelId: idemParcel.id, trackingId: idemParcel.trackingId }));
         const firstCall = await verify(idemSid, CUSTOMER_EMAIL);
@@ -850,7 +850,7 @@ async function testSecurePaymentSuccess() {
         );
 
         // --- 18. Same session referenced by a caller who owns a different parcel - rejected ---
-        await createTestParcel(`TEST-PAYSUCCESS-OTHEROWNER-${Date.now()}`, {
+        await createTestRepairRequest(`TEST-PAYSUCCESS-OTHEROWNER-${Date.now()}`, {
             cost: 30, senderEmail: 'other-customer@example.com'
         });
         res = await verify(idemSid, 'other-customer@example.com');
@@ -860,7 +860,7 @@ async function testSecurePaymentSuccess() {
         );
 
         // --- 19. Parcel already paid by a different session - controlled conflict ---
-        const alreadyPaidParcel = await createTestParcel(`TEST-PAYSUCCESS-ALREADYPAID-${Date.now()}`, {
+        const alreadyPaidParcel = await createTestRepairRequest(`TEST-PAYSUCCESS-ALREADYPAID-${Date.now()}`, {
             cost: 30, paymentStatus: 'paid'
         });
         const differentSessionSid = newSessionId('differentsession');
@@ -871,24 +871,24 @@ async function testSecurePaymentSuccess() {
         logTest('Parcel already paid via a different session rejected', res.statusCode === 409);
 
         // --- 22. Raw browser-supplied fields ignored ---
-        const tamperedParcel = await createTestParcel(`TEST-PAYSUCCESS-TAMPERED-${Date.now()}`, { cost: 30 });
+        const tamperedParcel = await createTestRepairRequest(`TEST-PAYSUCCESS-TAMPERED-${Date.now()}`, { cost: 30 });
         const tamperedSid = newSessionId('tampered');
         stripeSessionFixtures.set(tamperedSid, makeSession({ parcelId: tamperedParcel.id, trackingId: tamperedParcel.trackingId }));
         res = await verify(tamperedSid, CUSTOMER_EMAIL, {
             parcelId: '000000000000000000000000', email: 'attacker@example.com', amount: 1, paymentStatus: 'paid'
         });
-        const afterTampered = await models.Parcel.findById(tamperedParcel.id);
+        const afterTampered = await models.RepairRequest.findById(tamperedParcel.id);
         logTest(
             'Tampered client body fields ignored - real metadata parcel is the one paid',
             res.statusCode === 200 && res.body.trackingId === tamperedParcel.trackingId && afterTampered.paymentStatus === 'paid'
         );
 
         // --- 23. Stripe failure (not just "not found") - controlled, no leakage, no mutation ---
-        const outageParcel = await createTestParcel(`TEST-PAYSUCCESS-OUTAGE-${Date.now()}`, { cost: 30 });
+        const outageParcel = await createTestRepairRequest(`TEST-PAYSUCCESS-OUTAGE-${Date.now()}`, { cost: 30 });
         const outageSid = newSessionId('outage');
         stripeSessionFixtures.set(outageSid, { __simulateOutage: true });
         res = await verify(outageSid, CUSTOMER_EMAIL);
-        const afterOutage = await models.Parcel.findById(outageParcel.id);
+        const afterOutage = await models.RepairRequest.findById(outageParcel.id);
         logTest(
             'Simulated Stripe outage returns a safe error with no mutation',
             res.statusCode === 404 &&
@@ -993,7 +993,7 @@ async function testStripeWebhook() {
         const controllers = initializeControllers(models, collections);
         const paymentController = controllers.payment;
 
-        async function createTestParcel(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, deliveryStatus, paymentStatus } = {}) {
+        async function createTestRepairRequest(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, deliveryStatus, paymentStatus } = {}) {
             const doc = {
                 parcelName: marker,
                 cost,
@@ -1057,7 +1057,7 @@ async function testStripeWebhook() {
         {
             const savedSecret = process.env.STRIPE_WEBHOOK_SECRET;
             delete process.env.STRIPE_WEBHOOK_SECRET;
-            const p = await createTestParcel(`TEST-HOOK-NOSECRET-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-NOSECRET-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('nosecret');
             const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }));
             let res;
@@ -1071,11 +1071,11 @@ async function testStripeWebhook() {
 
         // --- 2 & 5. Invalid signature rejected regardless of a well-formed body. ---
         {
-            const p = await createTestParcel(`TEST-HOOK-BADSIG-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-BADSIG-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('badsig');
             const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }));
             const res = await callWebhook(event, 'not_the_valid_signature');
-            const after = await models.Parcel.findById(p.id);
+            const after = await models.RepairRequest.findById(p.id);
             logTest(
                 'Invalid signature rejected even with a well-formed, parseable body',
                 res.statusCode === 400 && after.paymentStatus !== 'paid'
@@ -1084,7 +1084,7 @@ async function testStripeWebhook() {
 
         // --- 4. Handler receives the raw Buffer (mock enforces this itself). ---
         {
-            const p = await createTestParcel(`TEST-HOOK-NONBUFFER-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-NONBUFFER-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('nonbuffer');
             const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }));
             const res = await paymentController.handleStripeWebhook(
@@ -1101,14 +1101,14 @@ async function testStripeWebhook() {
 
         // --- 6. Valid irrelevant event type -> 200, no mutation. ---
         {
-            const p = await createTestParcel(`TEST-HOOK-IRRELEVANT-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-IRRELEVANT-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('irrelevant');
             const event = makeEvent(
                 makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }),
                 { type: 'payment_intent.created' }
             );
             const res = await callWebhook(event);
-            const after = await models.Parcel.findById(p.id);
+            const after = await models.RepairRequest.findById(p.id);
             const paymentCount = await collections.payments.countDocuments({ sessionId: sid });
             logTest(
                 'Irrelevant event type ignored safely (200, no mutation)',
@@ -1119,13 +1119,13 @@ async function testStripeWebhook() {
         // --- 7 & 17. Valid checkout.session.completed for every starting deliveryStatus. ---
         const startingStatuses = ['pending-pickup', 'driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered'];
         for (const startStatus of startingStatuses) {
-            const p = await createTestParcel(`TEST-HOOK-LIFECYCLE-${startStatus}-${Date.now()}`, {
+            const p = await createTestRepairRequest(`TEST-HOOK-LIFECYCLE-${startStatus}-${Date.now()}`, {
                 cost: 30, deliveryStatus: startStatus
             });
             const sid = newSessionId(`lifecycle_${startStatus.replace(/-/g, '_')}`);
             const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }));
             const res = await callWebhook(event);
-            const after = await models.Parcel.findById(p.id);
+            const after = await models.RepairRequest.findById(p.id);
             const paymentCount = await collections.payments.countDocuments({ sessionId: sid });
             logTest(
                 `Webhook records payment and preserves deliveryStatus (${startStatus})`,
@@ -1139,21 +1139,21 @@ async function testStripeWebhook() {
 
         // --- 8. Unpaid completed session -> no mutation. ---
         {
-            const p = await createTestParcel(`TEST-HOOK-UNPAID-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-UNPAID-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('unpaid');
             const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId, payment_status: 'unpaid' }));
             const res = await callWebhook(event);
-            const after = await models.Parcel.findById(p.id);
+            const after = await models.RepairRequest.findById(p.id);
             logTest('Unpaid completed session causes no mutation (200 ack)', res.statusCode === 200 && after.paymentStatus !== 'paid');
         }
 
         // --- 9. Wrong mode -> no mutation. ---
         {
-            const p = await createTestParcel(`TEST-HOOK-MODE-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-MODE-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('mode');
             const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId, mode: 'setup' }));
             const res = await callWebhook(event);
-            const after = await models.Parcel.findById(p.id);
+            const after = await models.RepairRequest.findById(p.id);
             logTest('Non-payment session mode causes no mutation (200 ack)', res.statusCode === 200 && after.paymentStatus !== 'paid');
         }
 
@@ -1183,13 +1183,13 @@ async function testStripeWebhook() {
 
         // --- 13. Customer-email mismatch -> no mutation. ---
         {
-            const p = await createTestParcel(`TEST-HOOK-EMAILMISMATCH-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-EMAILMISMATCH-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('emailmismatch');
             const event = makeEvent(makeSessionObject(sid, {
                 parcelId: p.id, trackingId: p.trackingId, customer_email: 'someone-else@example.com'
             }));
             const res = await callWebhook(event);
-            const after = await models.Parcel.findById(p.id);
+            const after = await models.RepairRequest.findById(p.id);
             logTest('Stripe customer_email mismatch causes no mutation (200 ack)', res.statusCode === 200 && after.paymentStatus !== 'paid');
         }
 
@@ -1202,27 +1202,27 @@ async function testStripeWebhook() {
 
         // --- 15. Amount mismatch -> no mutation. ---
         {
-            const p = await createTestParcel(`TEST-HOOK-AMOUNT-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-AMOUNT-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('amount');
             const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId, amount_total: 100 }));
             const res = await callWebhook(event);
-            const after = await models.Parcel.findById(p.id);
+            const after = await models.RepairRequest.findById(p.id);
             logTest('Amount mismatch causes no mutation (200 ack)', res.statusCode === 200 && after.paymentStatus !== 'paid');
         }
 
         // --- 16. Currency mismatch -> no mutation. ---
         {
-            const p = await createTestParcel(`TEST-HOOK-CURRENCY-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-CURRENCY-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('currency');
             const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId, currency: 'eur' }));
             const res = await callWebhook(event);
-            const after = await models.Parcel.findById(p.id);
+            const after = await models.RepairRequest.findById(p.id);
             logTest('Currency mismatch causes no mutation (200 ack)', res.statusCode === 200 && after.paymentStatus !== 'paid');
         }
 
         // --- 18. Same event delivered twice -> one payment row. ---
         {
-            const p = await createTestParcel(`TEST-HOOK-SAMEEVENT-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-SAMEEVENT-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('sameevent');
             const eventId = newEventId('dup');
             const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }), { eventId });
@@ -1237,7 +1237,7 @@ async function testStripeWebhook() {
 
         // --- 19. Different event IDs, same session -> one payment row (Stripe redelivery with a new delivery attempt id). ---
         {
-            const p = await createTestParcel(`TEST-HOOK-DIFFEVENT-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-DIFFEVENT-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('diffevent');
             const sessionObj = makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId });
             const first = await callWebhook(makeEvent(sessionObj, { eventId: newEventId('a') }));
@@ -1251,7 +1251,7 @@ async function testStripeWebhook() {
 
         // --- 20. Browser processes first, webhook arrives later -> idempotent. ---
         {
-            const p = await createTestParcel(`TEST-HOOK-BROWSERFIRST-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-BROWSERFIRST-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('browserfirst');
             const sessionObj = makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId });
             stripeSessionFixtures.set(sid, sessionObj);
@@ -1268,7 +1268,7 @@ async function testStripeWebhook() {
 
         // --- 21. Webhook processes first, browser arrives later -> idempotent. ---
         {
-            const p = await createTestParcel(`TEST-HOOK-WEBHOOKFIRST-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-WEBHOOKFIRST-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('webhookfirst');
             const sessionObj = makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId });
             stripeSessionFixtures.set(sid, sessionObj);
@@ -1285,7 +1285,7 @@ async function testStripeWebhook() {
 
         // --- 22. Concurrent webhook processing -> one payment row. ---
         {
-            const p = await createTestParcel(`TEST-HOOK-CONCURRENT-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-CONCURRENT-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('concurrent');
             const sessionObj = makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId });
             const results = await Promise.all([
@@ -1294,7 +1294,7 @@ async function testStripeWebhook() {
                 callWebhook(makeEvent(sessionObj, { eventId: newEventId('c3') }))
             ]);
             const count = await collections.payments.countDocuments({ sessionId: sid });
-            const afterConcurrent = await models.Parcel.findById(p.id);
+            const afterConcurrent = await models.RepairRequest.findById(p.id);
             // Under genuine simultaneous contention on the same two documents,
             // MongoDB may abort one transaction with a transient error even
             // after the driver's built-in retries (a real, expected
@@ -1314,7 +1314,7 @@ async function testStripeWebhook() {
 
         // --- 23. Parcel already paid by a conflicting session -> no overwrite. ---
         {
-            const paidParcel = await createTestParcel(`TEST-HOOK-CONFLICT-${Date.now()}`, { cost: 30, paymentStatus: 'paid' });
+            const paidParcel = await createTestRepairRequest(`TEST-HOOK-CONFLICT-${Date.now()}`, { cost: 30, paymentStatus: 'paid' });
             const sid = newSessionId('conflict');
             const event = makeEvent(makeSessionObject(sid, { parcelId: paidParcel.id, trackingId: paidParcel.trackingId }));
             const res = await callWebhook(event);
@@ -1327,7 +1327,7 @@ async function testStripeWebhook() {
 
         // --- 24 & 25. Database failure -> retryable non-2xx, no raw error leaked. ---
         {
-            const p = await createTestParcel(`TEST-HOOK-DBFAIL-${Date.now()}`, { cost: 30 });
+            const p = await createTestRepairRequest(`TEST-HOOK-DBFAIL-${Date.now()}`, { cost: 30 });
             const sid = newSessionId('dbfail');
             const event = makeEvent(makeSessionObject(sid, { parcelId: p.id, trackingId: p.trackingId }));
 
@@ -1403,7 +1403,7 @@ async function testDuplicateCheckoutPrevention() {
         const controllers = initializeControllers(models, collections);
         const paymentController = controllers.payment;
 
-        async function createTestParcel(marker, cost = 30) {
+        async function createTestRepairRequest(marker, cost = 30) {
             const doc = {
                 parcelName: marker,
                 cost,
@@ -1439,7 +1439,7 @@ async function testDuplicateCheckoutPrevention() {
 
         // --- 1. First checkout creates one session, with a checkout row
         // recorded (open, sessionId only - never a persisted URL). ---
-        const p1 = await createTestParcel(`TEST-DUPCHK-FIRST-${Date.now()}`, 40);
+        const p1 = await createTestRepairRequest(`TEST-DUPCHK-FIRST-${Date.now()}`, 40);
         let sessionsBefore = capturedStripeSessionParams.length;
         let res = await checkout(p1.id, CUSTOMER_EMAIL);
         logTest(
@@ -1456,7 +1456,7 @@ async function testDuplicateCheckoutPrevention() {
 
         // --- 2 & 3. Two concurrent calls create only one Stripe session; both
         // callers receive the same reusable session or a controlled conflict. ---
-        const p2 = await createTestParcel(`TEST-DUPCHK-CONCURRENT-${Date.now()}`, 55);
+        const p2 = await createTestRepairRequest(`TEST-DUPCHK-CONCURRENT-${Date.now()}`, 55);
         sessionsBefore = capturedStripeSessionParams.length;
         const [ra, rb] = await Promise.all([checkout(p2.id, CUSTOMER_EMAIL), checkout(p2.id, CUSTOMER_EMAIL)]);
         logTest(
@@ -1486,7 +1486,7 @@ async function testDuplicateCheckoutPrevention() {
         logTest("Different user cannot access another owner's checkout session", res.statusCode === 403);
 
         // --- 6. Paid parcel rejected, no checkout row created. ---
-        const paidParcel = await createTestParcel(`TEST-DUPCHK-PAID-${Date.now()}`, 20);
+        const paidParcel = await createTestRepairRequest(`TEST-DUPCHK-PAID-${Date.now()}`, 20);
         await collections.repairRequests.updateOne({ _id: new ObjectId(paidParcel.id) }, { $set: { paymentStatus: 'paid' } });
         res = await checkout(paidParcel.id, CUSTOMER_EMAIL);
         const paidRow = await activeRowFor(paidParcel.id);
@@ -1496,7 +1496,7 @@ async function testDuplicateCheckoutPrevention() {
         );
 
         // --- 7. Expired session can be replaced. ---
-        const p3 = await createTestParcel(`TEST-DUPCHK-EXPIRED-${Date.now()}`, 33);
+        const p3 = await createTestRepairRequest(`TEST-DUPCHK-EXPIRED-${Date.now()}`, 33);
         res = await checkout(p3.id, CUSTOMER_EMAIL);
         const openRow = await activeRowFor(p3.id);
         await collections.checkoutSessions.updateOne({ _id: openRow._id }, { $set: { expiresAt: new Date(Date.now() - 1000) } });
@@ -1512,7 +1512,7 @@ async function testDuplicateCheckoutPrevention() {
 
         // --- 8. A failed Stripe creation attempt releases the lock instead
         // of permanently locking the parcel out of future checkout attempts. ---
-        const p4 = await createTestParcel(`TEST-DUPCHK-STRIPEFAIL-${Date.now()}`, 15);
+        const p4 = await createTestRepairRequest(`TEST-DUPCHK-STRIPEFAIL-${Date.now()}`, 15);
         forceNextCreateFailure = true;
         res = await checkout(p4.id, CUSTOMER_EMAIL);
         const failedRow = await activeRowFor(p4.id);
@@ -1525,12 +1525,12 @@ async function testDuplicateCheckoutPrevention() {
 
         // --- 9 & 10. Invalid stored amount rejected (no checkout row
         // created); a client-supplied fake amount is still ignored. ---
-        const zeroCost = await createTestParcel(`TEST-DUPCHK-ZERO-${Date.now()}`, 0);
+        const zeroCost = await createTestRepairRequest(`TEST-DUPCHK-ZERO-${Date.now()}`, 0);
         res = await checkout(zeroCost.id, CUSTOMER_EMAIL);
         const zeroRow = await activeRowFor(zeroCost.id);
         logTest('Invalid stored amount rejected with no checkout row created', res.statusCode === 400 && !zeroRow);
 
-        const p5 = await createTestParcel(`TEST-DUPCHK-FAKEAMOUNT-${Date.now()}`, 60);
+        const p5 = await createTestRepairRequest(`TEST-DUPCHK-FAKEAMOUNT-${Date.now()}`, 60);
         sessionsBefore = capturedStripeSessionParams.length;
         res = await checkout(p5.id, CUSTOMER_EMAIL, { cost: 1 });
         const captured = capturedStripeSessionParams[capturedStripeSessionParams.length - 1];
@@ -1541,7 +1541,7 @@ async function testDuplicateCheckoutPrevention() {
         );
 
         // --- 11. Webhook completion reconciles the active checkout state. ---
-        const p6 = await createTestParcel(`TEST-DUPCHK-WEBHOOKRECON-${Date.now()}`, 70);
+        const p6 = await createTestRepairRequest(`TEST-DUPCHK-WEBHOOKRECON-${Date.now()}`, 70);
         res = await checkout(p6.id, CUSTOMER_EMAIL);
         const p6Row = await activeRowFor(p6.id);
         const p6PaidSession = {
@@ -1574,7 +1574,7 @@ async function testDuplicateCheckoutPrevention() {
         );
 
         // --- 12. Browser success fallback reconciles the active checkout state. ---
-        const p7 = await createTestParcel(`TEST-DUPCHK-BROWSERRECON-${Date.now()}`, 80);
+        const p7 = await createTestRepairRequest(`TEST-DUPCHK-BROWSERRECON-${Date.now()}`, 80);
         res = await checkout(p7.id, CUSTOMER_EMAIL);
         const p7Row = await activeRowFor(p7.id);
         stripeSessionFixtures.set(p7Row.sessionId, {
@@ -1598,7 +1598,7 @@ async function testDuplicateCheckoutPrevention() {
         // deliberately does not subscribe to it; expiry is instead handled
         // lazily, the next time a checkout attempt for that parcel is made
         // (see findActive() in services/checkoutSessionManager.js). ---
-        const p8 = await createTestParcel(`TEST-DUPCHK-EXPIREDEVENT-${Date.now()}`, 45);
+        const p8 = await createTestRepairRequest(`TEST-DUPCHK-EXPIREDEVENT-${Date.now()}`, 45);
         res = await checkout(p8.id, CUSTOMER_EMAIL);
         const p8Row = await activeRowFor(p8.id);
         const expiredRes = await callWebhookWithSession(
@@ -1686,7 +1686,7 @@ async function testCurrencyAndEligibility() {
         const controllers = initializeControllers(models, collections);
         const paymentController = controllers.payment;
 
-        async function createTestParcel(marker, { cost = 40, deliveryStatus, paymentStatus } = {}) {
+        async function createTestRepairRequest(marker, { cost = 40, deliveryStatus, paymentStatus } = {}) {
             const doc = {
                 parcelName: marker,
                 cost,
@@ -1714,7 +1714,7 @@ async function testCurrencyAndEligibility() {
         }
 
         // --- 1, 7. Checkout uses the canonical currency and correct smallest-unit conversion. ---
-        const p1 = await createTestParcel(`TEST-CURR-BASIC-${Date.now()}`, { cost: 45 });
+        const p1 = await createTestRepairRequest(`TEST-CURR-BASIC-${Date.now()}`, { cost: 45 });
         let res = await checkout(p1.id, CUSTOMER_EMAIL);
         let captured = capturedStripeSessionParams[capturedStripeSessionParams.length - 1];
         logTest(
@@ -1725,7 +1725,7 @@ async function testCurrencyAndEligibility() {
         );
 
         // --- 4, 22. Client-supplied currency/status are ignored entirely. ---
-        const p2 = await createTestParcel(`TEST-CURR-FAKECURRENCY-${Date.now()}`, { cost: 50 });
+        const p2 = await createTestRepairRequest(`TEST-CURR-FAKECURRENCY-${Date.now()}`, { cost: 50 });
         res = await checkout(p2.id, CUSTOMER_EMAIL, { currency: 'bdt', deliveryStatus: 'parcel_delivered' });
         captured = capturedStripeSessionParams[capturedStripeSessionParams.length - 1];
         logTest(
@@ -1755,7 +1755,7 @@ async function testCurrencyAndEligibility() {
 
         // --- 10. Eligible status creates checkout - one call per known real status. ---
         for (const status of ELIGIBLE_STATUSES) {
-            const p = await createTestParcel(`TEST-CURR-ELIGIBLE-${status}-${Date.now()}`, {
+            const p = await createTestRepairRequest(`TEST-CURR-ELIGIBLE-${status}-${Date.now()}`, {
                 cost: 33,
                 deliveryStatus: status === 'pending-pickup' ? undefined : status
             });
@@ -1776,7 +1776,7 @@ async function testCurrencyAndEligibility() {
         );
 
         // --- 12, 18, 19. Unknown status rejected safely, no claim, no Stripe call. ---
-        const p3 = await createTestParcel(`TEST-CURR-UNKNOWNSTATUS-${Date.now()}`, { cost: 40, deliveryStatus: 'totally_bogus_status_xyz' });
+        const p3 = await createTestRepairRequest(`TEST-CURR-UNKNOWNSTATUS-${Date.now()}`, { cost: 40, deliveryStatus: 'totally_bogus_status_xyz' });
         let sessionsBefore = capturedStripeSessionParams.length;
         res = await checkout(p3.id, CUSTOMER_EMAIL);
         const p3Row = await activeRowFor(p3.id);
@@ -1787,27 +1787,27 @@ async function testCurrencyAndEligibility() {
         );
 
         // --- 13. Missing deliveryStatus is treated as pending-pickup (eligible). ---
-        const p4 = await createTestParcel(`TEST-CURR-MISSINGSTATUS-${Date.now()}`, { cost: 40 });
+        const p4 = await createTestRepairRequest(`TEST-CURR-MISSINGSTATUS-${Date.now()}`, { cost: 40 });
         res = await checkout(p4.id, CUSTOMER_EMAIL);
         logTest('Missing deliveryStatus is treated as pending-pickup and is eligible', res.statusCode === 200);
 
         // --- 15, 17. Already-paid and invalid-cost rejections carry stable codes. ---
-        const paidParcel = await createTestParcel(`TEST-CURR-PAID-${Date.now()}`, { cost: 40 });
+        const paidParcel = await createTestRepairRequest(`TEST-CURR-PAID-${Date.now()}`, { cost: 40 });
         await collections.repairRequests.updateOne({ _id: new ObjectId(paidParcel.id) }, { $set: { paymentStatus: 'paid' } });
         res = await checkout(paidParcel.id, CUSTOMER_EMAIL);
         logTest('Already-paid request rejected with ALREADY_PAID', res.statusCode === 409 && res.body.code === 'ALREADY_PAID');
 
-        const zeroCostParcel = await createTestParcel(`TEST-CURR-ZEROCOST-${Date.now()}`, { cost: 0 });
+        const zeroCostParcel = await createTestRepairRequest(`TEST-CURR-ZEROCOST-${Date.now()}`, { cost: 0 });
         res = await checkout(zeroCostParcel.id, CUSTOMER_EMAIL);
         logTest('Invalid stored cost rejected with INVALID_PAYMENT_AMOUNT', res.statusCode === 400 && res.body.code === 'INVALID_PAYMENT_AMOUNT');
 
         // --- 16. Wrong owner rejected (unaffected by eligibility changes). ---
-        const p5 = await createTestParcel(`TEST-CURR-WRONGOWNER-${Date.now()}`, { cost: 40 });
+        const p5 = await createTestRepairRequest(`TEST-CURR-WRONGOWNER-${Date.now()}`, { cost: 40 });
         res = await checkout(p5.id, RIDER_EMAIL);
         logTest('Wrong owner rejected regardless of eligibility', res.statusCode === 403);
 
         // --- 20. Active-session reuse only occurs while still eligible. ---
-        const p6 = await createTestParcel(`TEST-CURR-REUSEELIGIBLE-${Date.now()}`, { cost: 40 });
+        const p6 = await createTestRepairRequest(`TEST-CURR-REUSEELIGIBLE-${Date.now()}`, { cost: 40 });
         res = await checkout(p6.id, CUSTOMER_EMAIL);
         sessionsBefore = capturedStripeSessionParams.length;
         await collections.repairRequests.updateOne({ _id: new ObjectId(p6.id) }, { $set: { deliveryStatus: 'totally_bogus_status_xyz' } });
@@ -1820,7 +1820,7 @@ async function testCurrencyAndEligibility() {
 
         // --- 21, 24. A session validly created earlier still completes via
         // webhook after the lifecycle changes; deliveryStatus is preserved. ---
-        const p7 = await createTestParcel(`TEST-CURR-WEBHOOKAFTERLIFECYCLE-${Date.now()}`, { cost: 40, deliveryStatus: 'pending-pickup' });
+        const p7 = await createTestRepairRequest(`TEST-CURR-WEBHOOKAFTERLIFECYCLE-${Date.now()}`, { cost: 40, deliveryStatus: 'pending-pickup' });
         res = await checkout(p7.id, CUSTOMER_EMAIL);
         const p7Row = await activeRowFor(p7.id);
         await collections.repairRequests.updateOne({ _id: new ObjectId(p7.id) }, { $set: { deliveryStatus: 'parcel_delivered' } });
@@ -1832,7 +1832,7 @@ async function testCurrencyAndEligibility() {
             { headers: { 'stripe-signature': 'test_valid_signature' }, body: Buffer.from(JSON.stringify(event)) },
             hookRes
         );
-        const p7After = await models.Parcel.findById(p7.id);
+        const p7After = await models.RepairRequest.findById(p7.id);
         logTest(
             'A session validly created earlier still completes via webhook after the lifecycle changed, deliveryStatus preserved',
             hookRes.statusCode === 200 && p7After.paymentStatus === 'paid' && p7After.deliveryStatus === 'parcel_delivered'
@@ -1922,9 +1922,9 @@ async function testPublicTracking() {
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
         const trackingController = controllers.tracking;
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
 
-        async function createTestParcel(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, riderEmail, deliveryStatus, trackingId } = {}) {
+        async function createTestRepairRequest(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, riderEmail, deliveryStatus, trackingId } = {}) {
             const doc = {
                 parcelName: marker,
                 cost,
@@ -1958,7 +1958,7 @@ async function testPublicTracking() {
         }
 
         // --- 1. Public endpoint requires no Firebase token (real HTTP, no Authorization header). ---
-        const p1 = await createTestParcel(`TEST-TRACK-BASIC-${Date.now()}`, { riderEmail: RIDER_EMAIL, deliveryStatus: 'driver_assigned' });
+        const p1 = await createTestRepairRequest(`TEST-TRACK-BASIC-${Date.now()}`, { riderEmail: RIDER_EMAIL, deliveryStatus: 'driver_assigned' });
         await addLog(p1.trackingId, 'parcel_created');
         await addLog(p1.trackingId, 'driver_assigned');
         {
@@ -2010,10 +2010,10 @@ async function testPublicTracking() {
 
         // --- 14. Database failure returns a safe 500, no raw error leaked. ---
         {
-            const original = models.Parcel.findPublicProjectionByTrackingId.bind(models.Parcel);
-            models.Parcel.findPublicProjectionByTrackingId = () => { throw new Error('simulated database outage - do not leak this text'); };
+            const original = models.RepairRequest.findPublicProjectionByTrackingId.bind(models.RepairRequest);
+            models.RepairRequest.findPublicProjectionByTrackingId = () => { throw new Error('simulated database outage - do not leak this text'); };
             res = await callPublic(p1.trackingId);
-            models.Parcel.findPublicProjectionByTrackingId = original;
+            models.RepairRequest.findPublicProjectionByTrackingId = original;
             logTest(
                 'Database failure returns a safe 500 with no internal leakage',
                 res.statusCode === 500 && !JSON.stringify(res.body).includes('simulated database outage')
@@ -2021,7 +2021,7 @@ async function testPublicTracking() {
         }
 
         // --- 15. Timeline entries are returned in chronological order. ---
-        const p2 = await createTestParcel(`TEST-TRACK-ORDER-${Date.now()}`);
+        const p2 = await createTestRepairRequest(`TEST-TRACK-ORDER-${Date.now()}`);
         const now = Date.now();
         await addLog(p2.trackingId, 'parcel_delivered', new Date(now + 3000));
         await addLog(p2.trackingId, 'parcel_created', new Date(now));
@@ -2034,7 +2034,7 @@ async function testPublicTracking() {
         );
 
         // --- 16. Missing logs handled safely - current status still returned, empty timeline. ---
-        const p3 = await createTestParcel(`TEST-TRACK-NOLOGS-${Date.now()}`);
+        const p3 = await createTestRepairRequest(`TEST-TRACK-NOLOGS-${Date.now()}`);
         res = await callPublic(p3.trackingId);
         logTest(
             'A tracking code with no logs yet returns current status and an empty timeline',
@@ -2042,7 +2042,7 @@ async function testPublicTracking() {
         );
 
         // --- 17. Duplicate consecutive identical-status logs are collapsed into one entry. ---
-        const p4 = await createTestParcel(`TEST-TRACK-DUP-${Date.now()}`);
+        const p4 = await createTestRepairRequest(`TEST-TRACK-DUP-${Date.now()}`);
         await addLog(p4.trackingId, 'parcel_created', new Date(now));
         await addLog(p4.trackingId, 'driver_assigned', new Date(now + 1000));
         await addLog(p4.trackingId, 'driver_assigned', new Date(now + 1500)); // retried/duplicate
@@ -2068,7 +2068,7 @@ async function testPublicTracking() {
         logTest('Assigned technician still accesses the private endpoint', res.statusCode === 200);
         res = await callPrivate(p1.trackingId, ADMIN_EMAIL);
         logTest('Admin still accesses the private endpoint', res.statusCode === 200);
-        const unrelatedParcel = await createTestParcel(`TEST-TRACK-UNRELATED-${Date.now()}`, { senderEmail: 'unrelated-customer@example.com' });
+        const unrelatedParcel = await createTestRepairRequest(`TEST-TRACK-UNRELATED-${Date.now()}`, { senderEmail: 'unrelated-customer@example.com' });
         res = await callPrivate(unrelatedParcel.trackingId, CUSTOMER_EMAIL);
         logTest('Unrelated customer still receives 403 on the private endpoint', res.statusCode === 403);
 
@@ -2081,9 +2081,9 @@ async function testPublicTracking() {
 
         // --- 25. A simulated tracking-code collision is retried and still succeeds. ---
         {
-            const originalCreate = models.Parcel.create.bind(models.Parcel);
+            const originalCreate = models.RepairRequest.create.bind(models.RepairRequest);
             let createCallCount = 0;
-            models.Parcel.create = async parcelData => {
+            models.RepairRequest.create = async parcelData => {
                 createCallCount++;
                 if (createCallCount === 1) {
                     const err = new Error('E11000 duplicate key error simulated');
@@ -2093,14 +2093,14 @@ async function testPublicTracking() {
                 return originalCreate(parcelData);
             };
             const createRes = fakeRes();
-            await parcelController.createParcel(
+            await parcelController.createRepairRequest(
                 { body: { parcelName: `TEST-TRACK-COLLISION-${Date.now()}`, cost: 25 }, decoded_email: CUSTOMER_EMAIL },
                 createRes
             );
-            models.Parcel.create = originalCreate;
+            models.RepairRequest.create = originalCreate;
             if (createRes.body && createRes.body.insertedId) {
                 createdParcelIds.push(createRes.body.insertedId.toString());
-                const created = await models.Parcel.findById(createRes.body.insertedId.toString());
+                const created = await models.RepairRequest.findById(createRes.body.insertedId.toString());
                 if (created) createdTrackingIds.push(created.trackingId);
             }
             logTest(
@@ -2111,7 +2111,7 @@ async function testPublicTracking() {
 
         // --- 26. Existing legacy-format tracking codes still resolve through the public endpoint. ---
         const legacyCode = `PRCL-19990101-${Math.random().toString(16).slice(2, 8).toUpperCase()}`;
-        const legacyParcel = await createTestParcel(`TEST-TRACK-LEGACY-${Date.now()}`, { trackingId: legacyCode });
+        const legacyParcel = await createTestRepairRequest(`TEST-TRACK-LEGACY-${Date.now()}`, { trackingId: legacyCode });
         await addLog(legacyCode, 'parcel_created');
         res = await callPublic(legacyCode);
         logTest('Existing legacy-format (PRCL-...) tracking codes still resolve', res.statusCode === 200 && res.body.trackingCode === legacyCode);
@@ -2203,11 +2203,11 @@ async function testRequestCancellation() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
         const paymentController = controllers.payment;
         const trackingController = controllers.tracking;
         // Must be a real, approved technician document now that
-        // assignRiderToParcel validates riderId as an ObjectId and looks the
+        // assignTechnicianToRepairRequest validates riderId as an ObjectId and looks the
         // technician up (Phase 2.5 Unit 2) - reuses the same known,
         // persistent local-dev rider account used elsewhere in this file.
         const realRider = await collections.technicians.findOne({ email: RIDER_EMAIL });
@@ -2216,7 +2216,7 @@ async function testRequestCancellation() {
         // workStatus - capture the original value now and restore it below.
         originalRiderWorkStatus = realRider?.workStatus ?? null;
 
-        async function createTestParcel(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, deliveryStatus, riderEmail, paymentStatus } = {}) {
+        async function createTestRepairRequest(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL, deliveryStatus, riderEmail, paymentStatus } = {}) {
             const doc = {
                 parcelName: marker,
                 cost,
@@ -2235,12 +2235,12 @@ async function testRequestCancellation() {
 
         function cancelReq(id, decoded_email, decoded_email_verified = true) {
             const res = fakeRes();
-            return parcelController.cancelParcel({ params: { id }, decoded_email, decoded_email_verified }, res).then(() => res);
+            return parcelController.cancelRepairRequest({ params: { id }, decoded_email, decoded_email_verified }, res).then(() => res);
         }
 
         function assignReq(id, body) {
             const res = fakeRes();
-            return parcelController.assignRiderToParcel({ params: { id }, body }, res).then(() => res);
+            return parcelController.assignTechnicianToRepairRequest({ params: { id }, body }, res).then(() => res);
         }
 
         function checkoutReq(id, decoded_email, extraBody = {}) {
@@ -2270,7 +2270,7 @@ async function testRequestCancellation() {
         logTest('Missing request rejected (404)', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND');
 
         // --- 5. Non-owner rejected. ---
-        const p1 = await createTestParcel(`TEST-CANCEL-NONOWNER-${Date.now()}`);
+        const p1 = await createTestRepairRequest(`TEST-CANCEL-NONOWNER-${Date.now()}`);
         res = await cancelReq(p1.id, RIDER_EMAIL);
         logTest('Non-owner rejected (403)', res.statusCode === 403 && res.body.code === 'NOT_REQUEST_OWNER');
 
@@ -2279,24 +2279,24 @@ async function testRequestCancellation() {
         // verification only ever gates the request's own owner and never leaks
         // ownership. An unverified owner is blocked and the request is NOT
         // cancelled; verifying then lets the same owner cancel.
-        const pVerCancel = await createTestParcel(`TEST-CANCEL-UNVERIFIED-${Date.now()}`, { deliveryStatus: 'pending-pickup' });
+        const pVerCancel = await createTestRepairRequest(`TEST-CANCEL-UNVERIFIED-${Date.now()}`, { deliveryStatus: 'pending-pickup' });
         res = await cancelReq(pVerCancel.id, CUSTOMER_EMAIL, false);
-        const pVerAfter = await models.Parcel.findById(pVerCancel.id);
+        const pVerAfter = await models.RepairRequest.findById(pVerCancel.id);
         logTest('8.1A cancel: unverified owner blocked (403 EMAIL_NOT_VERIFIED), request not cancelled', res.statusCode === 403 && res.body.code === 'EMAIL_NOT_VERIFIED' && pVerAfter.deliveryStatus !== 'cancelled');
         res = await cancelReq(pVerCancel.id, CUSTOMER_EMAIL, true);
         logTest('8.1A cancel: verified owner succeeds', res.statusCode === 200 && res.body.status === 'cancelled');
 
         // --- 6. Owner cancels a pending, unassigned, unpaid request - success. ---
-        const p2 = await createTestParcel(`TEST-CANCEL-SUCCESS-${Date.now()}`, { deliveryStatus: 'pending-pickup' });
+        const p2 = await createTestRepairRequest(`TEST-CANCEL-SUCCESS-${Date.now()}`, { deliveryStatus: 'pending-pickup' });
         res = await cancelReq(p2.id, CUSTOMER_EMAIL);
-        const p2After = await models.Parcel.findById(p2.id);
+        const p2After = await models.RepairRequest.findById(p2.id);
         logTest(
             'Owner cancels a pending unassigned unpaid request',
             res.statusCode === 200 && res.body.status === 'cancelled' && res.body.alreadyCancelled === false && p2After.deliveryStatus === 'cancelled'
         );
 
         // --- 7. Missing legacy status treated as pending-pickup - success. ---
-        const p3 = await createTestParcel(`TEST-CANCEL-MISSINGSTATUS-${Date.now()}`);
+        const p3 = await createTestRepairRequest(`TEST-CANCEL-MISSINGSTATUS-${Date.now()}`);
         res = await cancelReq(p3.id, CUSTOMER_EMAIL);
         logTest('Missing deliveryStatus is treated as pending-pickup and can be cancelled', res.statusCode === 200 && res.body.alreadyCancelled === false);
 
@@ -2311,23 +2311,23 @@ async function testRequestCancellation() {
 
         // --- 9, 10, 11, 12. Every assigned/in-progress status rejected. ---
         for (const status of ['driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered']) {
-            const p = await createTestParcel(`TEST-CANCEL-${status}-${Date.now()}`, { deliveryStatus: status, riderEmail: status === 'driver_assigned' ? RIDER_EMAIL : undefined });
+            const p = await createTestRepairRequest(`TEST-CANCEL-${status}-${Date.now()}`, { deliveryStatus: status, riderEmail: status === 'driver_assigned' ? RIDER_EMAIL : undefined });
             const r = await cancelReq(p.id, CUSTOMER_EMAIL);
             logTest(`'${status}' request rejected (409)`, r.statusCode === 409 && r.body.code === 'REQUEST_ALREADY_ASSIGNED');
         }
 
         // --- 13. Unknown status rejected. ---
-        const p4 = await createTestParcel(`TEST-CANCEL-UNKNOWNSTATUS-${Date.now()}`, { deliveryStatus: 'totally_bogus_status_xyz' });
+        const p4 = await createTestRepairRequest(`TEST-CANCEL-UNKNOWNSTATUS-${Date.now()}`, { deliveryStatus: 'totally_bogus_status_xyz' });
         res = await cancelReq(p4.id, CUSTOMER_EMAIL);
         logTest('Unknown/corrupted status rejected (400)', res.statusCode === 400 && res.body.code === 'INVALID_REQUEST_STATUS');
 
         // --- 14. Paid parcel rejected. ---
-        const p5 = await createTestParcel(`TEST-CANCEL-PAID-${Date.now()}`, { paymentStatus: 'paid' });
+        const p5 = await createTestRepairRequest(`TEST-CANCEL-PAID-${Date.now()}`, { paymentStatus: 'paid' });
         res = await cancelReq(p5.id, CUSTOMER_EMAIL);
         logTest('Paid request rejected (409)', res.statusCode === 409 && res.body.code === 'REQUEST_ALREADY_PAID');
 
         // --- 15. A completed payment record causes rejection even if paymentStatus is missing. ---
-        const p6 = await createTestParcel(`TEST-CANCEL-PAYMENTRECORD-${Date.now()}`);
+        const p6 = await createTestRepairRequest(`TEST-CANCEL-PAYMENTRECORD-${Date.now()}`);
         await collections.payments.insertOne({
             sessionId: `cs_test_cancel_${Date.now()}`, transactionId: 'pi_test_cancel', parcelId: p6.id,
             trackingId: p6.trackingId, customerEmail: CUSTOMER_EMAIL, amount: 30, currency: 'usd',
@@ -2340,7 +2340,7 @@ async function testRequestCancellation() {
         );
 
         // --- 16. A cancelled request cannot create a checkout session (existing payment-eligibility integration). ---
-        const p7 = await createTestParcel(`TEST-CANCEL-NOCHECKOUT-${Date.now()}`);
+        const p7 = await createTestRepairRequest(`TEST-CANCEL-NOCHECKOUT-${Date.now()}`);
         await cancelReq(p7.id, CUSTOMER_EMAIL);
         const sessionsBefore = capturedStripeSessionParams.length;
         res = await checkoutReq(p7.id, CUSTOMER_EMAIL);
@@ -2350,7 +2350,7 @@ async function testRequestCancellation() {
         );
 
         // --- 17, 18. Active checkout state is released and the real Stripe session is expired (mocked). ---
-        const p8 = await createTestParcel(`TEST-CANCEL-ACTIVECHECKOUT-${Date.now()}`, { cost: 40 });
+        const p8 = await createTestRepairRequest(`TEST-CANCEL-ACTIVECHECKOUT-${Date.now()}`, { cost: 40 });
         const checkoutRes = await checkoutReq(p8.id, CUSTOMER_EMAIL);
         const activeRowBefore = await collections.checkoutSessions.findOne({ parcelId: p8.id, active: true });
         res = await cancelReq(p8.id, CUSTOMER_EMAIL);
@@ -2366,22 +2366,22 @@ async function testRequestCancellation() {
         logTest('A cancelled request cannot create a new checkout after an old active session existed', res.statusCode === 409 && res.body.code === 'PAYMENT_NOT_AVAILABLE');
 
         // --- 19. A cancelled request cannot be assigned. ---
-        const p9 = await createTestParcel(`TEST-CANCEL-NOASSIGN-${Date.now()}`);
+        const p9 = await createTestRepairRequest(`TEST-CANCEL-NOASSIGN-${Date.now()}`);
         await cancelReq(p9.id, CUSTOMER_EMAIL);
         res = await assignReq(p9.id, { riderId: realRider._id.toString(), riderName: realRider.name, riderEmail: RIDER_EMAIL, trackingId: p9.trackingId });
-        const p9After = await models.Parcel.findById(p9.id);
+        const p9After = await models.RepairRequest.findById(p9.id);
         logTest(
             'A cancelled request cannot be assigned',
             res.statusCode === 409 && res.body.code === 'REQUEST_CANCELLED' && !p9After.riderEmail
         );
 
         // --- 20, 22. Cancellation-versus-assignment race has exactly one winner; loser writes no tracking log. ---
-        const p10 = await createTestParcel(`TEST-CANCEL-RACE-ASSIGN-${Date.now()}`);
+        const p10 = await createTestRepairRequest(`TEST-CANCEL-RACE-ASSIGN-${Date.now()}`);
         const [raceCancelRes, raceAssignRes] = await Promise.all([
             cancelReq(p10.id, CUSTOMER_EMAIL),
             assignReq(p10.id, { riderId: realRider._id.toString(), riderName: realRider.name, riderEmail: RIDER_EMAIL, trackingId: p10.trackingId })
         ]);
-        const p10After = await models.Parcel.findById(p10.id);
+        const p10After = await models.RepairRequest.findById(p10.id);
         const p10Logs = await trackingLogsFor(p10.trackingId);
         const raceStatuses = [raceCancelRes.statusCode, raceAssignRes.statusCode].sort().join(',');
         const consistentFinalState =
@@ -2398,7 +2398,7 @@ async function testRequestCancellation() {
         );
 
         // --- 21. Cancellation-versus-payment race has exactly one winner (Case 3). ---
-        const p11 = await createTestParcel(`TEST-CANCEL-RACE-PAY-${Date.now()}`, { cost: 35 });
+        const p11 = await createTestRepairRequest(`TEST-CANCEL-RACE-PAY-${Date.now()}`, { cost: 35 });
         const raceSid = `cs_test_cancelrace_${Date.now()}`;
         stripeSessionFixtures.set(raceSid, {
             mode: 'payment', payment_status: 'paid', payment_intent: `pi_test_${p11.id}`,
@@ -2414,7 +2414,7 @@ async function testRequestCancellation() {
             ).then(() => webhookRes);
         }
         await Promise.all([cancelReq(p11.id, CUSTOMER_EMAIL), callWebhook(raceEvent)]);
-        const p11After = await models.Parcel.findById(p11.id);
+        const p11After = await models.RepairRequest.findById(p11.id);
         const p11PaymentCount = await collections.payments.countDocuments({ parcelId: p11.id });
         const p11Consistent =
             (p11After.deliveryStatus === 'cancelled' && p11PaymentCount === 0) ||
@@ -2423,7 +2423,7 @@ async function testRequestCancellation() {
         createdTrackingIds.push(p11.trackingId); // ensure cleanup covers any payment inserted under this trackingId's tracking log too
 
         // --- 24, 25. Public tracking shows cancelled safely, no private detail. ---
-        const p12 = await createTestParcel(`TEST-CANCEL-PUBLIC-${Date.now()}`);
+        const p12 = await createTestRepairRequest(`TEST-CANCEL-PUBLIC-${Date.now()}`);
         await cancelReq(p12.id, CUSTOMER_EMAIL);
         res = await publicTrackReq(p12.trackingId);
         const serializedPublic = JSON.stringify(res.body);
@@ -2451,8 +2451,8 @@ async function testRequestCancellation() {
         );
 
         // --- 29, 30. No hard deletion; request remains queryable. ---
-        const p12StillExists = await models.Parcel.findById(p12.id);
-        const p12InList = await models.Parcel.findAll({ senderEmail: CUSTOMER_EMAIL, trackingId: p12.trackingId });
+        const p12StillExists = await models.RepairRequest.findById(p12.id);
+        const p12InList = await models.RepairRequest.findAll({ senderEmail: CUSTOMER_EMAIL, trackingId: p12.trackingId });
         logTest(
             'Cancellation never hard-deletes the document, and it remains queryable',
             !!p12StillExists && p12StillExists.deliveryStatus === 'cancelled' && p12InList.length === 1
@@ -2489,7 +2489,7 @@ async function testRequestCancellation() {
 }
 
 // Phase 2.5 Unit 2: Make Technician Assignment Transaction-Safe. Exercises
-// the rewritten assignRiderToParcel end-to-end: pre-transaction validation
+// the rewritten assignTechnicianToRepairRequest end-to-end: pre-transaction validation
 // ordering and error codes, the atomic parcel+technician+tracking-log
 // transaction and its rollback under injected failures (technician-update
 // failure, tracking-insert failure, transaction-commit failure), session
@@ -2528,7 +2528,7 @@ async function testTechnicianAssignment() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
         const trackingController = controllers.tracking;
 
         // Reuses the same known, persistent local-dev rider account used
@@ -2539,7 +2539,7 @@ async function testTechnicianAssignment() {
         const realRider = await collections.technicians.findOne({ email: RIDER_EMAIL });
         originalRiderWorkStatus = realRider?.workStatus ?? null;
 
-        async function createTestParcel(marker, { deliveryStatus = 'pending-pickup', omitStatus = false } = {}) {
+        async function createTestRepairRequest(marker, { deliveryStatus = 'pending-pickup', omitStatus = false } = {}) {
             const doc = {
                 parcelName: marker,
                 cost: 30,
@@ -2554,7 +2554,7 @@ async function testTechnicianAssignment() {
             return { id: result.insertedId.toString(), ...doc };
         }
 
-        async function createTestRider(marker, { status = 'approved', workStatus = 'available' } = {}) {
+        async function createTestTechnician(marker, { status = 'approved', workStatus = 'available' } = {}) {
             const doc = {
                 name: marker,
                 email: `${marker.toLowerCase()}@test.local`,
@@ -2569,12 +2569,12 @@ async function testTechnicianAssignment() {
 
         function assignReq(parcelId, body) {
             const res = fakeRes();
-            return parcelController.assignRiderToParcel({ params: { id: parcelId }, body }, res).then(() => res);
+            return parcelController.assignTechnicianToRepairRequest({ params: { id: parcelId }, body }, res).then(() => res);
         }
 
         function cancelReq(id, decoded_email, decoded_email_verified = true) {
             const res = fakeRes();
-            return parcelController.cancelParcel({ params: { id }, decoded_email, decoded_email_verified }, res).then(() => res);
+            return parcelController.cancelRepairRequest({ params: { id }, decoded_email, decoded_email_verified }, res).then(() => res);
         }
 
         function publicTrackReq(trackingCode) {
@@ -2590,7 +2590,7 @@ async function testTechnicianAssignment() {
         let res = await assignReq('not-a-valid-object-id', { riderId: realRider._id.toString() });
         logTest('Invalid request id rejected (400)', res.statusCode === 400 && res.body.code === 'INVALID_REQUEST_ID');
 
-        const p1 = await createTestParcel(`TEST-ASSIGN-VALID-${Date.now()}`);
+        const p1 = await createTestRepairRequest(`TEST-ASSIGN-VALID-${Date.now()}`);
         res = await assignReq(p1.id, { riderId: 'not-a-valid-object-id' });
         logTest(
             'Invalid technician id rejected (400) and never causes a post-commit 500',
@@ -2606,18 +2606,18 @@ async function testTechnicianAssignment() {
         res = await assignReq(p1.id, { riderId: new ObjectId().toString() });
         logTest('Missing technician rejected (404)', res.statusCode === 404 && res.body.code === 'TECHNICIAN_NOT_FOUND');
 
-        const pendingTechnician = await createTestRider(`TEST-RIDER-PENDING-${Date.now()}`, { status: 'pending' });
+        const pendingTechnician = await createTestTechnician(`TEST-RIDER-PENDING-${Date.now()}`, { status: 'pending' });
         res = await assignReq(p1.id, { riderId: pendingTechnician.id });
         logTest('Unapproved technician rejected (409)', res.statusCode === 409 && res.body.code === 'TECHNICIAN_NOT_APPROVED');
 
-        const p1After = await models.Parcel.findById(p1.id);
+        const p1After = await models.RepairRequest.findById(p1.id);
         logTest(
             'None of the above rejected validation attempts ever mutated the request',
             p1After.deliveryStatus === 'pending-pickup' && !p1After.riderId
         );
 
         // --- 7-10. Successful assignment: full three-part invariant. ---
-        const p2 = await createTestParcel(`TEST-ASSIGN-SUCCESS-${Date.now()}`);
+        const p2 = await createTestRepairRequest(`TEST-ASSIGN-SUCCESS-${Date.now()}`);
         const beforeCount = (await trackingLogsFor(p2.trackingId)).length;
         res = await assignReq(p2.id, {
             riderId: realRider._id.toString(),
@@ -2632,7 +2632,7 @@ async function testTechnicianAssignment() {
             res.statusCode === 200 && res.body.acknowledged === true && res.body.modifiedCount === 1 && res.body.deliveryStatus === 'driver_assigned'
         );
 
-        const p2After = await models.Parcel.findById(p2.id);
+        const p2After = await models.RepairRequest.findById(p2.id);
         logTest(
             'Parcel updated with server-derived technician identity, never the client-supplied fields',
             p2After.deliveryStatus === 'driver_assigned' &&
@@ -2653,8 +2653,8 @@ async function testTechnicianAssignment() {
         );
 
         // --- 11. Technician-update failure mid-transaction rolls back everything. ---
-        const p3 = await createTestParcel(`TEST-ASSIGN-RIDERFAIL-${Date.now()}`);
-        const riderForFailure = await createTestRider(`TEST-RIDER-FAIL-${Date.now()}`);
+        const p3 = await createTestRepairRequest(`TEST-ASSIGN-RIDERFAIL-${Date.now()}`);
+        const riderForFailure = await createTestTechnician(`TEST-RIDER-FAIL-${Date.now()}`);
         const originalRiderUpdateOne = collections.technicians.updateOne.bind(collections.technicians);
         collections.technicians.updateOne = async () => ({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
         try {
@@ -2671,7 +2671,7 @@ async function testTechnicianAssignment() {
             'Technician-update failure surfaces as 409 ASSIGNMENT_CONFLICT',
             res.statusCode === 409 && res.body.code === 'ASSIGNMENT_CONFLICT'
         );
-        const p3After = await models.Parcel.findById(p3.id);
+        const p3After = await models.RepairRequest.findById(p3.id);
         const p3Logs = await trackingLogsFor(p3.trackingId);
         logTest(
             'Parcel update rolled back and no tracking log left behind on technician-update failure',
@@ -2679,8 +2679,8 @@ async function testTechnicianAssignment() {
         );
 
         // --- 12. Tracking-insert failure mid-transaction rolls back everything. ---
-        const p4 = await createTestParcel(`TEST-ASSIGN-TRACKFAIL-${Date.now()}`);
-        const riderForTrackFailure = await createTestRider(`TEST-RIDER-TRACKFAIL-${Date.now()}`);
+        const p4 = await createTestRepairRequest(`TEST-ASSIGN-TRACKFAIL-${Date.now()}`);
+        const riderForTrackFailure = await createTestTechnician(`TEST-RIDER-TRACKFAIL-${Date.now()}`);
         const originalTrackingInsertOne = collections.trackingEvents.insertOne.bind(collections.trackingEvents);
         collections.trackingEvents.insertOne = async () => { throw new Error('simulated tracking insert outage'); };
         try {
@@ -2689,7 +2689,7 @@ async function testTechnicianAssignment() {
             collections.trackingEvents.insertOne = originalTrackingInsertOne;
         }
         logTest('Tracking-insert failure surfaces as 500 ASSIGNMENT_FAILED', res.statusCode === 500 && res.body.code === 'ASSIGNMENT_FAILED');
-        const p4After = await models.Parcel.findById(p4.id);
+        const p4After = await models.RepairRequest.findById(p4.id);
         const riderAfterTrackFailure = await collections.technicians.findOne({ _id: new ObjectId(riderForTrackFailure.id) });
         logTest(
             'Parcel and technician both rolled back on tracking-insert failure',
@@ -2697,8 +2697,8 @@ async function testTechnicianAssignment() {
         );
 
         // --- 13. Transaction commit failure rolls back and always ends the session. ---
-        const p5 = await createTestParcel(`TEST-ASSIGN-COMMITFAIL-${Date.now()}`);
-        const riderForCommitFailure = await createTestRider(`TEST-RIDER-COMMITFAIL-${Date.now()}`);
+        const p5 = await createTestRepairRequest(`TEST-ASSIGN-COMMITFAIL-${Date.now()}`);
+        const riderForCommitFailure = await createTestTechnician(`TEST-RIDER-COMMITFAIL-${Date.now()}`);
         const commitFailSession = client.startSession();
         commitFailSession.commitTransaction = async () => { throw new Error('simulated commit failure'); };
         const originalStartSession = client.startSession.bind(client);
@@ -2710,7 +2710,7 @@ async function testTechnicianAssignment() {
         }
         logTest('Transaction commit failure surfaces as 500 ASSIGNMENT_FAILED', res.statusCode === 500 && res.body.code === 'ASSIGNMENT_FAILED');
         logTest('Session is always ended, even after a commit failure', commitFailSession.hasEnded === true);
-        const p5After = await models.Parcel.findById(p5.id);
+        const p5After = await models.RepairRequest.findById(p5.id);
         const riderAfterCommitFailure = await collections.technicians.findOne({ _id: new ObjectId(riderForCommitFailure.id) });
         const p5Logs = await trackingLogsFor(p5.trackingId);
         logTest(
@@ -2720,9 +2720,9 @@ async function testTechnicianAssignment() {
         );
 
         // --- 14-15. Idempotency: repeated assignment, same or different technician. ---
-        const p6 = await createTestParcel(`TEST-ASSIGN-REPEAT-${Date.now()}`);
-        const riderA = await createTestRider(`TEST-RIDER-A-${Date.now()}`);
-        const riderB = await createTestRider(`TEST-RIDER-B-${Date.now()}`);
+        const p6 = await createTestRepairRequest(`TEST-ASSIGN-REPEAT-${Date.now()}`);
+        const riderA = await createTestTechnician(`TEST-RIDER-A-${Date.now()}`);
+        const riderB = await createTestTechnician(`TEST-RIDER-B-${Date.now()}`);
         res = await assignReq(p6.id, { riderId: riderA.id });
         logTest('First assignment for the repeat-assignment test succeeds', res.statusCode === 200);
 
@@ -2746,9 +2746,9 @@ async function testTechnicianAssignment() {
         );
 
         // --- 16. Concurrent assignment race (two different technicians): exactly one winner. ---
-        const p7 = await createTestParcel(`TEST-ASSIGN-RACE-${Date.now()}`);
-        const riderC = await createTestRider(`TEST-RIDER-C-${Date.now()}`);
-        const riderD = await createTestRider(`TEST-RIDER-D-${Date.now()}`);
+        const p7 = await createTestRepairRequest(`TEST-ASSIGN-RACE-${Date.now()}`);
+        const riderC = await createTestTechnician(`TEST-RIDER-C-${Date.now()}`);
+        const riderD = await createTestTechnician(`TEST-RIDER-D-${Date.now()}`);
         const [raceResC, raceResD] = await Promise.all([
             assignReq(p7.id, { riderId: riderC.id }),
             assignReq(p7.id, { riderId: riderD.id })
@@ -2774,13 +2774,13 @@ async function testTechnicianAssignment() {
         // --- Cancellation-vs-assignment race: reconfirms the Unit 1 one-winner
         // guarantee still holds under the new transactional assignment path,
         // using fixtures independent of section 19's own p10 test. ---
-        const p8 = await createTestParcel(`TEST-ASSIGN-CANCELRACE-${Date.now()}`);
-        const riderE = await createTestRider(`TEST-RIDER-E-${Date.now()}`);
+        const p8 = await createTestRepairRequest(`TEST-ASSIGN-CANCELRACE-${Date.now()}`);
+        const riderE = await createTestTechnician(`TEST-RIDER-E-${Date.now()}`);
         await Promise.all([
             cancelReq(p8.id, CUSTOMER_EMAIL),
             assignReq(p8.id, { riderId: riderE.id })
         ]);
-        const p8After = await models.Parcel.findById(p8.id);
+        const p8After = await models.RepairRequest.findById(p8.id);
         const p8Logs = await trackingLogsFor(p8.trackingId);
         logTest(
             'Cancellation-vs-assignment race still produces exactly one coherent winner',
@@ -2793,13 +2793,13 @@ async function testTechnicianAssignment() {
         );
 
         // --- 18-19. Legacy missing-status still assignable; unknown status rejected. ---
-        const p9 = await createTestParcel(`TEST-ASSIGN-LEGACY-${Date.now()}`, { omitStatus: true });
-        const riderF = await createTestRider(`TEST-RIDER-F-${Date.now()}`);
+        const p9 = await createTestRepairRequest(`TEST-ASSIGN-LEGACY-${Date.now()}`, { omitStatus: true });
+        const riderF = await createTestTechnician(`TEST-RIDER-F-${Date.now()}`);
         res = await assignReq(p9.id, { riderId: riderF.id });
         logTest('Legacy request with no deliveryStatus field at all is still assignable', res.statusCode === 200);
 
-        const p10 = await createTestParcel(`TEST-ASSIGN-UNKNOWN-${Date.now()}`, { deliveryStatus: 'some_bogus_status' });
-        const riderG = await createTestRider(`TEST-RIDER-G-${Date.now()}`);
+        const p10 = await createTestRepairRequest(`TEST-ASSIGN-UNKNOWN-${Date.now()}`, { deliveryStatus: 'some_bogus_status' });
+        const riderG = await createTestTechnician(`TEST-RIDER-G-${Date.now()}`);
         res = await assignReq(p10.id, { riderId: riderG.id });
         // The controller's post-conflict reason-detection only special-cases
         // 'cancelled'; any other non-pending-pickup value (including a
@@ -2829,45 +2829,45 @@ async function testTechnicianAssignment() {
         // --- Phase 6.2 Unit 2 (BL-004): technician double-booking prevention. ---
 
         // 3. Rejected technician's own application status.
-        const pRejectedTarget = await createTestParcel(`TEST-ASSIGN-REJECTEDRIDER-${Date.now()}`);
-        const rejectedTechnician = await createTestRider(`TEST-RIDER-REJECTED-${Date.now()}`, { status: 'rejected' });
+        const pRejectedTarget = await createTestRepairRequest(`TEST-ASSIGN-REJECTEDRIDER-${Date.now()}`);
+        const rejectedTechnician = await createTestTechnician(`TEST-RIDER-REJECTED-${Date.now()}`, { status: 'rejected' });
         res = await assignReq(pRejectedTarget.id, { riderId: rejectedTechnician.id });
         logTest('Rejected technician rejected (409 TECHNICIAN_NOT_APPROVED)', res.statusCode === 409 && res.body.code === 'TECHNICIAN_NOT_APPROVED');
 
         // 4. Approved but currently busy (workStatus in_delivery) technician.
-        const pUnavailableTarget = await createTestParcel(`TEST-ASSIGN-UNAVAILABLE-${Date.now()}`);
-        const busyTechnician = await createTestRider(`TEST-RIDER-BUSY-${Date.now()}`, { workStatus: 'in_delivery' });
+        const pUnavailableTarget = await createTestRepairRequest(`TEST-ASSIGN-UNAVAILABLE-${Date.now()}`);
+        const busyTechnician = await createTestTechnician(`TEST-RIDER-BUSY-${Date.now()}`, { workStatus: 'in_delivery' });
         res = await assignReq(pUnavailableTarget.id, { riderId: busyTechnician.id });
         logTest('Unavailable (busy) technician rejected (409 RIDER_UNAVAILABLE)', res.statusCode === 409 && res.body.code === 'RIDER_UNAVAILABLE');
-        const pUnavailableTargetAfter = await models.Parcel.findById(pUnavailableTarget.id);
+        const pUnavailableTargetAfter = await models.RepairRequest.findById(pUnavailableTarget.id);
         logTest('Rejected-for-unavailability attempt leaves the target request unchanged', pUnavailableTargetAfter.deliveryStatus === 'pending-pickup' && !pUnavailableTargetAfter.riderId);
 
         // 5. Defense in depth: workStatus says available, but another active
         // request still names this technician - simulates historical drift,
         // not reachable through the API itself under the new invariant.
-        const driftedTechnician = await createTestRider(`TEST-RIDER-DRIFT-${Date.now()}`, { workStatus: 'available' });
-        const pDriftExisting = await createTestParcel(`TEST-ASSIGN-DRIFT-EXISTING-${Date.now()}`, { deliveryStatus: 'rider_arriving' });
+        const driftedTechnician = await createTestTechnician(`TEST-RIDER-DRIFT-${Date.now()}`, { workStatus: 'available' });
+        const pDriftExisting = await createTestRepairRequest(`TEST-ASSIGN-DRIFT-EXISTING-${Date.now()}`, { deliveryStatus: 'rider_arriving' });
         await collections.repairRequests.updateOne({ _id: new ObjectId(pDriftExisting.id) }, { $set: { riderId: driftedTechnician.id, riderEmail: driftedTechnician.email } });
-        const pDriftNew = await createTestParcel(`TEST-ASSIGN-DRIFT-NEW-${Date.now()}`);
+        const pDriftNew = await createTestRepairRequest(`TEST-ASSIGN-DRIFT-NEW-${Date.now()}`);
         res = await assignReq(pDriftNew.id, { riderId: driftedTechnician.id });
         logTest(
             'Technician with an existing active assignment rejected even though workStatus says available',
             res.statusCode === 409 && res.body.code === 'RIDER_ALREADY_ASSIGNED'
         );
-        const pDriftNewAfter = await models.Parcel.findById(pDriftNew.id);
+        const pDriftNewAfter = await models.RepairRequest.findById(pDriftNew.id);
         logTest('Drift-defense rejection leaves the new target request unchanged', pDriftNewAfter.deliveryStatus === 'pending-pickup' && !pDriftNewAfter.riderId);
 
         // 7. Completed parcel rejected.
-        const pCompleted = await createTestParcel(`TEST-ASSIGN-COMPLETED-${Date.now()}`, { deliveryStatus: 'parcel_delivered' });
-        const riderForCompleted = await createTestRider(`TEST-RIDER-FORCOMPLETED-${Date.now()}`);
+        const pCompleted = await createTestRepairRequest(`TEST-ASSIGN-COMPLETED-${Date.now()}`, { deliveryStatus: 'parcel_delivered' });
+        const riderForCompleted = await createTestTechnician(`TEST-RIDER-FORCOMPLETED-${Date.now()}`);
         res = await assignReq(pCompleted.id, { riderId: riderForCompleted.id });
         logTest('Completed request rejected for assignment (409)', res.statusCode === 409 && ['REQUEST_ALREADY_ASSIGNED', 'ASSIGNMENT_NOT_ALLOWED'].includes(res.body.code));
         const riderForCompletedAfter = await collections.technicians.findOne({ _id: new ObjectId(riderForCompleted.id) });
         logTest('Technician untouched after a rejected completed-request assignment', riderForCompletedAfter.workStatus === 'available');
 
         // 8. Cancelled parcel rejected (direct, not just via the cancellation race).
-        const pCancelledTarget = await createTestParcel(`TEST-ASSIGN-CANCELLEDDIRECT-${Date.now()}`, { deliveryStatus: 'cancelled' });
-        const riderForCancelled = await createTestRider(`TEST-RIDER-FORCANCELLED-${Date.now()}`);
+        const pCancelledTarget = await createTestRepairRequest(`TEST-ASSIGN-CANCELLEDDIRECT-${Date.now()}`, { deliveryStatus: 'cancelled' });
+        const riderForCancelled = await createTestTechnician(`TEST-RIDER-FORCANCELLED-${Date.now()}`);
         res = await assignReq(pCancelledTarget.id, { riderId: riderForCancelled.id });
         logTest('Cancelled request rejected for assignment (409 REQUEST_CANCELLED)', res.statusCode === 409 && res.body.code === 'REQUEST_CANCELLED');
 
@@ -2886,9 +2886,9 @@ async function testTechnicianAssignment() {
         // 22/24/25. Core BL-004 test: two concurrent assignments of two
         // DIFFERENT parcels to the SAME technician must produce exactly one
         // winner, never two, and never a duplicated/orphaned notification.
-        const pRaceX = await createTestParcel(`TEST-ASSIGN-SAMERIDER-X-${Date.now()}`);
-        const pRaceY = await createTestParcel(`TEST-ASSIGN-SAMERIDER-Y-${Date.now()}`);
-        const sharedTechnician = await createTestRider(`TEST-RIDER-SHARED-${Date.now()}`);
+        const pRaceX = await createTestRepairRequest(`TEST-ASSIGN-SAMERIDER-X-${Date.now()}`);
+        const pRaceY = await createTestRepairRequest(`TEST-ASSIGN-SAMERIDER-Y-${Date.now()}`);
+        const sharedTechnician = await createTestTechnician(`TEST-RIDER-SHARED-${Date.now()}`);
         const [sameRiderResX, sameRiderResY] = await Promise.all([
             assignReq(pRaceX.id, { riderId: sharedTechnician.id }),
             assignReq(pRaceY.id, { riderId: sharedTechnician.id })
@@ -2901,8 +2901,8 @@ async function testTechnicianAssignment() {
         const sharedTechnicianAfter = await collections.technicians.findOne({ _id: new ObjectId(sharedTechnician.id) });
         logTest('Winning assignment leaves the shared technician busy exactly once (not double-booked)', sharedTechnicianAfter.workStatus === 'in_delivery');
 
-        const pRaceXAfter = await models.Parcel.findById(pRaceX.id);
-        const pRaceYAfter = await models.Parcel.findById(pRaceY.id);
+        const pRaceXAfter = await models.RepairRequest.findById(pRaceX.id);
+        const pRaceYAfter = await models.RepairRequest.findById(pRaceY.id);
         const winningParcel = pRaceXAfter.deliveryStatus === 'driver_assigned' ? pRaceXAfter : pRaceYAfter;
         const losingParcel = pRaceXAfter.deliveryStatus === 'driver_assigned' ? pRaceYAfter : pRaceXAfter;
         logTest(
@@ -2952,7 +2952,7 @@ async function testTechnicianAssignment() {
             await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
         // Phase 5.2 Unit 3 wired real notification creation into
-        // assignRiderToParcel, so every successful assignment above (which
+        // assignTechnicianToRepairRequest, so every successful assignment above (which
         // uses the real CUSTOMER_EMAIL fixture as senderEmail by default) now
         // also creates real technician_assigned/new_repair_assignment
         // documents - scoped and removed here by entityId (this function's
@@ -3023,7 +3023,7 @@ async function testP0AuthorizationFixes() {
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
         const userController = controllers.user;
-        const riderController = controllers.rider;
+        const riderController = controllers.technician;
         const paymentController = controllers.payment;
 
         function callCreateUser(decoded_email, body) {
@@ -3041,7 +3041,7 @@ async function testP0AuthorizationFixes() {
         function callGetAllRiders(decoded_email, query = {}) {
             const req = { query, decoded_email };
             const res = fakeRes();
-            return riderController.getAllRiders(req, res).then(() => res);
+            return riderController.getTechnicians(req, res).then(() => res);
         }
 
         function callGetAllPayments(decoded_email, query = {}) {
@@ -3260,7 +3260,7 @@ async function testP0AuthorizationFixes() {
 }
 
 // Phase 3.0 Unit 3: Make Technician Approval Transaction-Safe. Exercises the
-// rewritten updateRiderStatus end-to-end: pre-transaction validation ordering
+// rewritten updateTechnicianStatus end-to-end: pre-transaction validation ordering
 // and error codes, the atomic technician-status + linked-user-role
 // transaction and its rollback under injected failures, admin-linked-user
 // protection, idempotency for a genuinely-consistent repeat request, and
@@ -3302,10 +3302,10 @@ async function testTechnicianApprovalTransaction() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const riderController = controllers.rider;
-        const parcelController = controllers.parcel;
+        const riderController = controllers.technician;
+        const parcelController = controllers.repairRequest;
 
-        async function createTestParcel(marker, { deliveryStatus = 'pending-pickup', riderId } = {}) {
+        async function createTestRepairRequest(marker, { deliveryStatus = 'pending-pickup', riderId } = {}) {
             const doc = {
                 parcelName: marker,
                 cost: 30,
@@ -3322,19 +3322,19 @@ async function testTechnicianApprovalTransaction() {
 
         function callAssign(parcelId, riderId) {
             const r = fakeRes();
-            return parcelController.assignRiderToParcel({ params: { id: parcelId }, body: { riderId } }, r).then(() => r);
+            return parcelController.assignTechnicianToRepairRequest({ params: { id: parcelId }, body: { riderId } }, r).then(() => r);
         }
 
         function callCompleteStatus(parcelId) {
             const r = fakeRes();
-            return parcelController.updateParcelStatus({ params: { id: parcelId }, body: { deliveryStatus: 'parcel_delivered' }, decoded_email: ADMIN_EMAIL }, r).then(() => r);
+            return parcelController.updateRepairRequestStatus({ params: { id: parcelId }, body: { deliveryStatus: 'parcel_delivered' }, decoded_email: ADMIN_EMAIL }, r).then(() => r);
         }
 
         // Phase 8.7A: a matchable technician needs a valid, non-empty canonical
         // expertise array (approval now gates on it). Default to one so existing
         // approval-flow fixtures stay approvable; pass expertise: null to
         // simulate a legacy/incomplete application that approval must block.
-        async function createTestRider(marker, { status = 'pending', email, workStatus = 'available', expertise = [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2 }] } = {}) {
+        async function createTestTechnician(marker, { status = 'pending', email, workStatus = 'available', expertise = [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['display-screen'], level: 'intermediate', experienceYears: 2 }] } = {}) {
             const doc = {
                 name: marker,
                 email: email || `${marker.toLowerCase()}@test.local`,
@@ -3362,7 +3362,7 @@ async function testTechnicianApprovalTransaction() {
         function callUpdateRiderStatus(riderId, body) {
             const req = { params: { id: riderId }, body };
             const res = fakeRes();
-            return riderController.updateRiderStatus(req, res).then(() => res);
+            return riderController.updateTechnicianStatus(req, res).then(() => res);
         }
 
         // --- 1. Anonymous PATCH rejected (real HTTP, real middleware chain). ---
@@ -3377,7 +3377,7 @@ async function testTechnicianApprovalTransaction() {
         );
 
         // --- 2. Non-admin rejected by the shared verifyAdmin middleware (same
-        // function already gates this exact route - see routes/riders.js). ---
+        // function already gates this exact route - see routes/technicians.js). ---
         let mw = await callVerifyAdmin(CUSTOMER_EMAIL);
         logTest('PATCH /riders/:id: customer rejected by verifyAdmin (403)', mw.res.statusCode === 403 && !mw.nextCalled);
         mw = await callVerifyAdmin(RIDER_EMAIL);
@@ -3390,7 +3390,7 @@ async function testTechnicianApprovalTransaction() {
         logTest('Invalid technician id rejected (400)', res.statusCode === 400 && res.body.code === 'INVALID_TECHNICIAN_ID');
 
         // --- 4. Invalid requested status. ---
-        const r1 = await createTestRider(`TEST-APPROVAL-VALID-${Date.now()}`);
+        const r1 = await createTestTechnician(`TEST-APPROVAL-VALID-${Date.now()}`);
         res = await callUpdateRiderStatus(r1.id, { status: 'pending' });
         logTest('Requesting "pending" as a target status is rejected (400)', res.statusCode === 400 && res.body.code === 'INVALID_TECHNICIAN_STATUS');
         res = await callUpdateRiderStatus(r1.id, { status: 'totally_bogus' });
@@ -3401,7 +3401,7 @@ async function testTechnicianApprovalTransaction() {
         logTest('Missing technician rejected (404)', res.statusCode === 404 && res.body.code === 'TECHNICIAN_NOT_FOUND');
 
         // --- 6. Linked user missing -> controlled failure, no technician update. ---
-        const r2 = await createTestRider(`TEST-APPROVAL-NOUSER-${Date.now()}`, { email: `test-approval-nouser-${Date.now()}@test.local` });
+        const r2 = await createTestTechnician(`TEST-APPROVAL-NOUSER-${Date.now()}`, { email: `test-approval-nouser-${Date.now()}@test.local` });
         res = await callUpdateRiderStatus(r2.id, { status: 'approved' });
         logTest('Missing linked user rejected (404)', res.statusCode === 404 && res.body.code === 'LINKED_USER_NOT_FOUND');
         let riderAfter = await collections.technicians.findOne({ _id: new ObjectId(r2.id) });
@@ -3409,7 +3409,7 @@ async function testTechnicianApprovalTransaction() {
 
         // --- 7. Approval success updates technician and user atomically. ---
         const email3 = `test-approval-success-${Date.now()}@test.local`;
-        const r3 = await createTestRider(`TEST-APPROVAL-SUCCESS-${Date.now()}`, { email: email3 });
+        const r3 = await createTestTechnician(`TEST-APPROVAL-SUCCESS-${Date.now()}`, { email: email3 });
         await createTestUser(email3, 'user');
         res = await callUpdateRiderStatus(r3.id, { status: 'approved' });
         logTest('Approval succeeds (200)', res.statusCode === 200 && res.body.alreadyConsistent === false);
@@ -3422,7 +3422,7 @@ async function testTechnicianApprovalTransaction() {
 
         // --- 8. Rejection success updates technician and user atomically. ---
         const email4 = `test-rejection-success-${Date.now()}@test.local`;
-        const r4 = await createTestRider(`TEST-REJECTION-SUCCESS-${Date.now()}`, { status: 'approved', email: email4 });
+        const r4 = await createTestTechnician(`TEST-REJECTION-SUCCESS-${Date.now()}`, { status: 'approved', email: email4 });
         await createTestUser(email4, 'rider');
         res = await callUpdateRiderStatus(r4.id, { status: 'rejected' });
         logTest('Rejection succeeds (200)', res.statusCode === 200 && res.body.alreadyConsistent === false);
@@ -3435,7 +3435,7 @@ async function testTechnicianApprovalTransaction() {
 
         // --- 9. User-update failure rolls back the technician update. ---
         const email5 = `test-userfail-${Date.now()}@test.local`;
-        const r5 = await createTestRider(`TEST-USERFAIL-${Date.now()}`, { email: email5 });
+        const r5 = await createTestTechnician(`TEST-USERFAIL-${Date.now()}`, { email: email5 });
         await createTestUser(email5, 'user');
         const originalUsersUpdateOne = collections.users.updateOne.bind(collections.users);
         collections.users.updateOne = async () => ({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
@@ -3454,7 +3454,7 @@ async function testTechnicianApprovalTransaction() {
 
         // --- 10. Technician-update (guarded write) failure leaves the user unchanged. ---
         const email6 = `test-riderfail-${Date.now()}@test.local`;
-        const r6 = await createTestRider(`TEST-RIDERFAIL-${Date.now()}`, { email: email6 });
+        const r6 = await createTestTechnician(`TEST-RIDERFAIL-${Date.now()}`, { email: email6 });
         await createTestUser(email6, 'user');
         const originalRidersUpdateOne = collections.technicians.updateOne.bind(collections.technicians);
         collections.technicians.updateOne = async () => ({ acknowledged: true, matchedCount: 0, modifiedCount: 0 });
@@ -3473,7 +3473,7 @@ async function testTechnicianApprovalTransaction() {
 
         // --- 11, 12. Transaction commit failure rolls back and always ends the session. ---
         const email7 = `test-commitfail-${Date.now()}@test.local`;
-        const r7 = await createTestRider(`TEST-COMMITFAIL-${Date.now()}`, { email: email7 });
+        const r7 = await createTestTechnician(`TEST-COMMITFAIL-${Date.now()}`, { email: email7 });
         await createTestUser(email7, 'user');
         const commitFailSession = client.startSession();
         commitFailSession.commitTransaction = async () => { throw new Error('simulated commit failure'); };
@@ -3492,7 +3492,7 @@ async function testTechnicianApprovalTransaction() {
 
         // --- 13, 14. Body-supplied email is ignored; technician-record email is authoritative. ---
         const email8 = `test-spoofcheck-${Date.now()}@test.local`;
-        const r8 = await createTestRider(`TEST-SPOOFCHECK-${Date.now()}`, { email: email8 });
+        const r8 = await createTestTechnician(`TEST-SPOOFCHECK-${Date.now()}`, { email: email8 });
         await createTestUser(email8, 'user');
         res = await callUpdateRiderStatus(r8.id, { status: 'approved', email: 'attacker-spoof@example.com' });
         const spoofedUser = await collections.users.findOne({ email: 'attacker-spoof@example.com' });
@@ -3504,7 +3504,7 @@ async function testTechnicianApprovalTransaction() {
 
         // --- 15. Admin-linked user is not downgraded. ---
         const email9 = `test-adminlink-${Date.now()}@test.local`;
-        const r9 = await createTestRider(`TEST-ADMINLINK-${Date.now()}`, { email: email9 });
+        const r9 = await createTestTechnician(`TEST-ADMINLINK-${Date.now()}`, { email: email9 });
         await createTestUser(email9, 'admin');
         res = await callUpdateRiderStatus(r9.id, { status: 'approved' });
         logTest('Admin-linked technician approval rejected as a controlled conflict (409)', res.statusCode === 409 && res.body.code === 'LINKED_USER_ROLE_CONFLICT');
@@ -3518,13 +3518,13 @@ async function testTechnicianApprovalTransaction() {
         // --- 16, 17. Repeated approval/rejection with both sides already
         // consistent is idempotent. ---
         const email10 = `test-idempotent-approve-${Date.now()}@test.local`;
-        const r10 = await createTestRider(`TEST-IDEMPOTENT-APPROVE-${Date.now()}`, { status: 'approved', email: email10 });
+        const r10 = await createTestTechnician(`TEST-IDEMPOTENT-APPROVE-${Date.now()}`, { status: 'approved', email: email10 });
         await createTestUser(email10, 'rider');
         res = await callUpdateRiderStatus(r10.id, { status: 'approved' });
         logTest('Repeated approval with both sides already consistent is idempotent (200)', res.statusCode === 200 && res.body.alreadyConsistent === true);
 
         const email11 = `test-idempotent-reject-${Date.now()}@test.local`;
-        const r11 = await createTestRider(`TEST-IDEMPOTENT-REJECT-${Date.now()}`, { status: 'rejected', email: email11 });
+        const r11 = await createTestTechnician(`TEST-IDEMPOTENT-REJECT-${Date.now()}`, { status: 'rejected', email: email11 });
         await createTestUser(email11, 'user');
         res = await callUpdateRiderStatus(r11.id, { status: 'rejected' });
         logTest('Repeated rejection with both sides already consistent is idempotent (200)', res.statusCode === 200 && res.body.alreadyConsistent === true);
@@ -3532,7 +3532,7 @@ async function testTechnicianApprovalTransaction() {
         // --- 18. Approved technician with linked user role "user" is not
         // falsely reported as success on a repeated approval request. ---
         const email12 = `test-inconsistent-approve-${Date.now()}@test.local`;
-        const r12 = await createTestRider(`TEST-INCONSISTENT-APPROVE-${Date.now()}`, { status: 'approved', email: email12 });
+        const r12 = await createTestTechnician(`TEST-INCONSISTENT-APPROVE-${Date.now()}`, { status: 'approved', email: email12 });
         await createTestUser(email12, 'user');
         res = await callUpdateRiderStatus(r12.id, { status: 'approved' });
         logTest(
@@ -3543,7 +3543,7 @@ async function testTechnicianApprovalTransaction() {
         // --- 19. Rejected technician with linked user role "rider" is not
         // falsely reported as success on a repeated rejection request. ---
         const email13 = `test-inconsistent-reject-${Date.now()}@test.local`;
-        const r13 = await createTestRider(`TEST-INCONSISTENT-REJECT-${Date.now()}`, { status: 'rejected', email: email13 });
+        const r13 = await createTestTechnician(`TEST-INCONSISTENT-REJECT-${Date.now()}`, { status: 'rejected', email: email13 });
         await createTestUser(email13, 'rider');
         res = await callUpdateRiderStatus(r13.id, { status: 'rejected' });
         logTest(
@@ -3553,7 +3553,7 @@ async function testTechnicianApprovalTransaction() {
 
         // --- 20. Unknown current technician status is rejected. ---
         const email14 = `test-unknownstatus-${Date.now()}@test.local`;
-        const r14 = await createTestRider(`TEST-UNKNOWNSTATUS-${Date.now()}`, { status: 'under_review', email: email14 });
+        const r14 = await createTestTechnician(`TEST-UNKNOWNSTATUS-${Date.now()}`, { status: 'under_review', email: email14 });
         await createTestUser(email14, 'user');
         res = await callUpdateRiderStatus(r14.id, { status: 'approved' });
         logTest('Unrecognized current technician status is rejected as a conflict (409)', res.statusCode === 409 && res.body.code === 'TECHNICIAN_STATUS_CONFLICT');
@@ -3573,7 +3573,7 @@ async function testTechnicianApprovalTransaction() {
 
         // 1. Pending -> approved, no active assignment: workStatus available.
         const emailIdle1 = `test-approve-idle1-${Date.now()}@test.local`;
-        const rIdle1 = await createTestRider(`TEST-APPROVE-IDLE1-${Date.now()}`, { email: emailIdle1 });
+        const rIdle1 = await createTestTechnician(`TEST-APPROVE-IDLE1-${Date.now()}`, { email: emailIdle1 });
         await createTestUser(emailIdle1, 'user');
         res = await callUpdateRiderStatus(rIdle1.id, { status: 'approved' });
         riderAfter = await collections.technicians.findOne({ _id: new ObjectId(rIdle1.id) });
@@ -3584,7 +3584,7 @@ async function testTechnicianApprovalTransaction() {
 
         // 2. Rejected -> approved, no active assignment: workStatus available.
         const emailIdle2 = `test-approve-idle2-${Date.now()}@test.local`;
-        const rIdle2 = await createTestRider(`TEST-APPROVE-IDLE2-${Date.now()}`, { status: 'rejected', email: emailIdle2 });
+        const rIdle2 = await createTestTechnician(`TEST-APPROVE-IDLE2-${Date.now()}`, { status: 'rejected', email: emailIdle2 });
         await createTestUser(emailIdle2, 'user');
         res = await callUpdateRiderStatus(rIdle2.id, { status: 'approved' });
         riderAfter = await collections.technicians.findOne({ _id: new ObjectId(rIdle2.id) });
@@ -3597,9 +3597,9 @@ async function testTechnicianApprovalTransaction() {
         // manual-data-inconsistency scenario): must become in_delivery, never
         // available, and the approval itself must still be allowed to succeed.
         const emailActive1 = `test-approve-active-${Date.now()}@test.local`;
-        const rActive1 = await createTestRider(`TEST-APPROVE-ACTIVE-${Date.now()}`, { email: emailActive1 });
+        const rActive1 = await createTestTechnician(`TEST-APPROVE-ACTIVE-${Date.now()}`, { email: emailActive1 });
         await createTestUser(emailActive1, 'user');
-        const pActive1 = await createTestParcel(`TEST-APPROVE-ACTIVE-${Date.now()}`, { deliveryStatus: 'driver_assigned', riderId: rActive1.id });
+        const pActive1 = await createTestRepairRequest(`TEST-APPROVE-ACTIVE-${Date.now()}`, { deliveryStatus: 'driver_assigned', riderId: rActive1.id });
         res = await callUpdateRiderStatus(rActive1.id, { status: 'approved' });
         riderAfter = await collections.technicians.findOne({ _id: new ObjectId(rActive1.id) });
         logTest(
@@ -3610,9 +3610,9 @@ async function testTechnicianApprovalTransaction() {
         // 4. Reapproval (approved -> approved) of a technician who genuinely
         // still holds an active assignment: in_delivery preserved.
         const emailReapproveActive = `test-reapprove-active-${Date.now()}@test.local`;
-        const rReapproveActive = await createTestRider(`TEST-REAPPROVE-ACTIVE-${Date.now()}`, { status: 'approved', workStatus: 'in_delivery', email: emailReapproveActive });
+        const rReapproveActive = await createTestTechnician(`TEST-REAPPROVE-ACTIVE-${Date.now()}`, { status: 'approved', workStatus: 'in_delivery', email: emailReapproveActive });
         await createTestUser(emailReapproveActive, 'rider');
-        const pReapproveActive = await createTestParcel(`TEST-REAPPROVE-ACTIVE-${Date.now()}`, { deliveryStatus: 'rider_arriving', riderId: rReapproveActive.id });
+        const pReapproveActive = await createTestRepairRequest(`TEST-REAPPROVE-ACTIVE-${Date.now()}`, { deliveryStatus: 'rider_arriving', riderId: rReapproveActive.id });
         res = await callUpdateRiderStatus(rReapproveActive.id, { status: 'approved' });
         riderAfter = await collections.technicians.findOne({ _id: new ObjectId(rReapproveActive.id) });
         logTest(
@@ -3624,7 +3624,7 @@ async function testTechnicianApprovalTransaction() {
         // (incorrectly) in_delivery but who holds no active assignment at
         // all: corrected to available.
         const emailReapproveIdle = `test-reapprove-idle-${Date.now()}@test.local`;
-        const rReapproveIdle = await createTestRider(`TEST-REAPPROVE-IDLE-${Date.now()}`, { status: 'approved', workStatus: 'in_delivery', email: emailReapproveIdle });
+        const rReapproveIdle = await createTestTechnician(`TEST-REAPPROVE-IDLE-${Date.now()}`, { status: 'approved', workStatus: 'in_delivery', email: emailReapproveIdle });
         await createTestUser(emailReapproveIdle, 'rider');
         res = await callUpdateRiderStatus(rReapproveIdle.id, { status: 'approved' });
         riderAfter = await collections.technicians.findOne({ _id: new ObjectId(rReapproveIdle.id) });
@@ -3636,9 +3636,9 @@ async function testTechnicianApprovalTransaction() {
         // 7/8/9/10. Rejection of an actively-assigned technician is blocked
         // outright - no rider field, no user role, and no notification change.
         const emailRejectActive = `test-reject-active-${Date.now()}@test.local`;
-        const rRejectActive = await createTestRider(`TEST-REJECT-ACTIVE-${Date.now()}`, { status: 'approved', workStatus: 'in_delivery', email: emailRejectActive });
+        const rRejectActive = await createTestTechnician(`TEST-REJECT-ACTIVE-${Date.now()}`, { status: 'approved', workStatus: 'in_delivery', email: emailRejectActive });
         await createTestUser(emailRejectActive, 'rider');
-        const pRejectActive = await createTestParcel(`TEST-REJECT-ACTIVE-${Date.now()}`, { deliveryStatus: 'parcel_picked_up', riderId: rRejectActive.id });
+        const pRejectActive = await createTestRepairRequest(`TEST-REJECT-ACTIVE-${Date.now()}`, { deliveryStatus: 'parcel_picked_up', riderId: rRejectActive.id });
         const notifBeforeRejectActive = await collections.notifications.countDocuments({ entityId: rRejectActive.id });
         res = await callUpdateRiderStatus(rRejectActive.id, { status: 'rejected' });
         logTest('7. Rejection of an actively-assigned technician is blocked (409 TECHNICIAN_HAS_ACTIVE_ASSIGNMENT)', res.statusCode === 409 && res.body.code === 'TECHNICIAN_HAS_ACTIVE_ASSIGNMENT');
@@ -3667,15 +3667,15 @@ async function testTechnicianApprovalTransaction() {
         // technician: whichever order they land in, the final workStatus must
         // match whether the assignment actually committed.
         const emailRaceApprove = `test-race-approveassign-${Date.now()}@test.local`;
-        const rRaceApprove = await createTestRider(`TEST-RACE-APPROVEASSIGN-${Date.now()}`, { status: 'approved', email: emailRaceApprove });
+        const rRaceApprove = await createTestTechnician(`TEST-RACE-APPROVEASSIGN-${Date.now()}`, { status: 'approved', email: emailRaceApprove });
         await createTestUser(emailRaceApprove, 'rider');
-        const pRaceApprove = await createTestParcel(`TEST-RACE-APPROVEASSIGN-${Date.now()}`);
+        const pRaceApprove = await createTestRepairRequest(`TEST-RACE-APPROVEASSIGN-${Date.now()}`);
         const [reapproveRaceRes, assignRaceRes] = await Promise.all([
             callUpdateRiderStatus(rRaceApprove.id, { status: 'approved' }),
             callAssign(pRaceApprove.id, rRaceApprove.id)
         ]);
         const riderRaceApproveAfter = await collections.technicians.findOne({ _id: new ObjectId(rRaceApprove.id) });
-        const pRaceApproveAfter = await models.Parcel.findById(pRaceApprove.id);
+        const pRaceApproveAfter = await models.RepairRequest.findById(pRaceApprove.id);
         const raceApproveAssignmentSucceeded = pRaceApproveAfter.riderId === rRaceApprove.id && pRaceApproveAfter.deliveryStatus === 'driver_assigned';
         logTest(
             '18. Concurrent reapproval vs. assignment: final workStatus always matches whether the assignment actually committed',
@@ -3687,15 +3687,15 @@ async function testTechnicianApprovalTransaction() {
         // technician: must never end up rejected while holding an active
         // assignment, regardless of which one wins.
         const emailRaceReject = `test-race-rejectassign-${Date.now()}@test.local`;
-        const rRaceReject = await createTestRider(`TEST-RACE-REJECTASSIGN-${Date.now()}`, { status: 'approved', email: emailRaceReject });
+        const rRaceReject = await createTestTechnician(`TEST-RACE-REJECTASSIGN-${Date.now()}`, { status: 'approved', email: emailRaceReject });
         await createTestUser(emailRaceReject, 'rider');
-        const pRaceReject = await createTestParcel(`TEST-RACE-REJECTASSIGN-${Date.now()}`);
+        const pRaceReject = await createTestRepairRequest(`TEST-RACE-REJECTASSIGN-${Date.now()}`);
         const [assignRaceRes2, rejectRaceRes] = await Promise.all([
             callAssign(pRaceReject.id, rRaceReject.id),
             callUpdateRiderStatus(rRaceReject.id, { status: 'rejected' })
         ]);
         const riderRaceRejectAfter = await collections.technicians.findOne({ _id: new ObjectId(rRaceReject.id) });
-        const pRaceRejectAfter = await models.Parcel.findById(pRaceReject.id);
+        const pRaceRejectAfter = await models.RepairRequest.findById(pRaceReject.id);
         const neverRejectedWithActiveAssignment = !(
             riderRaceRejectAfter.status === 'rejected' &&
             pRaceRejectAfter.riderId === rRaceReject.id &&
@@ -3711,15 +3711,15 @@ async function testTechnicianApprovalTransaction() {
         // assignment that completion legitimately finishes, the technician
         // must converge to available regardless of interleaving.
         const emailRaceComplete = `test-race-completereapprove-${Date.now()}@test.local`;
-        const rRaceComplete = await createTestRider(`TEST-RACE-COMPLETEREAPPROVE-${Date.now()}`, { status: 'approved', workStatus: 'in_delivery', email: emailRaceComplete });
+        const rRaceComplete = await createTestTechnician(`TEST-RACE-COMPLETEREAPPROVE-${Date.now()}`, { status: 'approved', workStatus: 'in_delivery', email: emailRaceComplete });
         await createTestUser(emailRaceComplete, 'rider');
-        const pRaceComplete = await createTestParcel(`TEST-RACE-COMPLETEREAPPROVE-${Date.now()}`, { deliveryStatus: 'parcel_picked_up', riderId: rRaceComplete.id });
+        const pRaceComplete = await createTestRepairRequest(`TEST-RACE-COMPLETEREAPPROVE-${Date.now()}`, { deliveryStatus: 'parcel_picked_up', riderId: rRaceComplete.id });
         const [completeRaceRes, reapproveRaceRes2] = await Promise.all([
             callCompleteStatus(pRaceComplete.id),
             callUpdateRiderStatus(rRaceComplete.id, { status: 'approved' })
         ]);
         const riderRaceCompleteAfter = await collections.technicians.findOne({ _id: new ObjectId(rRaceComplete.id) });
-        const pRaceCompleteAfter = await models.Parcel.findById(pRaceComplete.id);
+        const pRaceCompleteAfter = await models.RepairRequest.findById(pRaceComplete.id);
         logTest(
             '20. Concurrent completion vs. reapproval: request completes and technician converges to available',
             completeRaceRes.statusCode === 200 && reapproveRaceRes2.statusCode === 200 &&
@@ -3727,7 +3727,7 @@ async function testTechnicianApprovalTransaction() {
         );
     } finally {
         // Phase 5.2 Unit 3 wired real notification creation into
-        // updateRiderStatus, so every genuine approval/rejection transition
+        // updateTechnicianStatus, so every genuine approval/rejection transition
         // above now also creates a real technician_application_approved/
         // rejected document - scoped and removed here by entityId (this
         // function's own created rider ids).
@@ -3757,7 +3757,7 @@ async function testTechnicianApprovalTransaction() {
 }
 
 // Phase 3.0 Unit 4: Make Repair Completion Transaction-Safe. Exercises the
-// rewritten updateParcelStatus/completeParcel end-to-end: server-derived
+// rewritten updateRepairRequestStatus/completeRepairRequest end-to-end: server-derived
 // technician identity (a client-supplied riderId is never trusted), the
 // atomic request-status + technician-workStatus + completion-tracking
 // transaction and its rollback under injected failures, the status-transition
@@ -3795,7 +3795,7 @@ async function testRepairCompletionTransaction() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
         const trackingController = controllers.tracking;
 
         async function createTestTechnician(marker, { workStatus = 'in_delivery' } = {}) {
@@ -3816,7 +3816,7 @@ async function testRepairCompletionTransaction() {
             return { id: result.insertedId.toString(), email };
         }
 
-        async function createTestParcel(marker, { deliveryStatus = 'parcel_picked_up', riderId, riderEmail, riderName } = {}) {
+        async function createTestRepairRequest(marker, { deliveryStatus = 'parcel_picked_up', riderId, riderEmail, riderName } = {}) {
             const doc = {
                 parcelName: marker,
                 cost: 30,
@@ -3837,7 +3837,7 @@ async function testRepairCompletionTransaction() {
         function callUpdateStatus(parcelId, status, decoded_email, extraBody = {}) {
             const req = { params: { id: parcelId }, body: { deliveryStatus: status, ...extraBody }, decoded_email };
             const res = fakeRes();
-            return parcelController.updateParcelStatus(req, res).then(() => res);
+            return parcelController.updateRepairRequestStatus(req, res).then(() => res);
         }
 
         function trackingLogsFor(trackingId) {
@@ -3858,7 +3858,7 @@ async function testRepairCompletionTransaction() {
         // --- 2, 3. Authorization: unrelated customer and unrelated technician. ---
         const techMain = await createTestTechnician(`TEST-COMPLETE-MAIN-${Date.now()}`);
         const techOther = await createTestTechnician(`TEST-COMPLETE-OTHER-${Date.now()}`);
-        const pMain = await createTestParcel(`TEST-COMPLETE-MAIN-${Date.now()}`, {
+        const pMain = await createTestRepairRequest(`TEST-COMPLETE-MAIN-${Date.now()}`, {
             riderId: techMain.id, riderEmail: techMain.email, riderName: techMain.name
         });
 
@@ -3877,19 +3877,19 @@ async function testRepairCompletionTransaction() {
         logTest('Missing repair request rejected (404)', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND');
 
         // --- 6. Missing assignment entirely -> controlled conflict. ---
-        const pUnassigned = await createTestParcel(`TEST-COMPLETE-UNASSIGNED-${Date.now()}`);
+        const pUnassigned = await createTestRepairRequest(`TEST-COMPLETE-UNASSIGNED-${Date.now()}`);
         res = await callUpdateStatus(pUnassigned.id, 'parcel_delivered', ADMIN_EMAIL);
         logTest('Repair request with no assigned technician rejected (409 REQUEST_NOT_ASSIGNED)', res.statusCode === 409 && res.body.code === 'REQUEST_NOT_ASSIGNED');
 
         // --- 7. Malformed stored riderId -> controlled failure. ---
-        const pMalformed = await createTestParcel(`TEST-COMPLETE-MALFORMED-${Date.now()}`, {
+        const pMalformed = await createTestRepairRequest(`TEST-COMPLETE-MALFORMED-${Date.now()}`, {
             riderId: 'not-a-valid-object-id', riderEmail: techMain.email
         });
         res = await callUpdateStatus(pMalformed.id, 'parcel_delivered', techMain.email);
         logTest('Malformed stored riderId rejected (409 REQUEST_NOT_ASSIGNED)', res.statusCode === 409 && res.body.code === 'REQUEST_NOT_ASSIGNED');
 
         // --- 8. Linked technician missing -> controlled failure. ---
-        const pGhost = await createTestParcel(`TEST-COMPLETE-GHOST-${Date.now()}`, {
+        const pGhost = await createTestRepairRequest(`TEST-COMPLETE-GHOST-${Date.now()}`, {
             riderId: new ObjectId().toString(), riderEmail: 'ghost-tech@test.local'
         });
         res = await callUpdateStatus(pGhost.id, 'parcel_delivered', ADMIN_EMAIL);
@@ -3908,7 +3908,7 @@ async function testRepairCompletionTransaction() {
             res.statusCode === 200 && res.body.deliveryStatus === 'parcel_delivered'
         );
 
-        const pMainAfter = await models.Parcel.findById(pMain.id);
+        const pMainAfter = await models.RepairRequest.findById(pMain.id);
         logTest('Repair request status is parcel_delivered', pMainAfter.deliveryStatus === 'parcel_delivered');
 
         const techMainAfter = await collections.technicians.findOne({ _id: new ObjectId(techMain.id) });
@@ -3935,7 +3935,7 @@ async function testRepairCompletionTransaction() {
 
         // --- 14. Technician reset failure mid-transaction rolls back everything. ---
         const techRiderFail = await createTestTechnician(`TEST-COMPLETE-RIDERFAIL-${Date.now()}`);
-        const pRiderFail = await createTestParcel(`TEST-COMPLETE-RIDERFAIL-${Date.now()}`, {
+        const pRiderFail = await createTestRepairRequest(`TEST-COMPLETE-RIDERFAIL-${Date.now()}`, {
             riderId: techRiderFail.id, riderEmail: techRiderFail.email
         });
         const originalRidersUpdateOne = collections.technicians.updateOne.bind(collections.technicians);
@@ -3946,7 +3946,7 @@ async function testRepairCompletionTransaction() {
             collections.technicians.updateOne = originalRidersUpdateOne;
         }
         logTest('Technician-reset failure surfaces as 500 COMPLETION_FAILED', res.statusCode === 500 && res.body.code === 'COMPLETION_FAILED');
-        const pRiderFailAfter = await models.Parcel.findById(pRiderFail.id);
+        const pRiderFailAfter = await models.RepairRequest.findById(pRiderFail.id);
         const riderFailLogs = await trackingLogsFor(pRiderFail.trackingId);
         logTest(
             'Repair request rolled back to parcel_picked_up and no tracking log left behind',
@@ -3955,7 +3955,7 @@ async function testRepairCompletionTransaction() {
 
         // --- 15. Tracking-insert failure mid-transaction rolls back everything. ---
         const techTrackFail = await createTestTechnician(`TEST-COMPLETE-TRACKFAIL-${Date.now()}`);
-        const pTrackFail = await createTestParcel(`TEST-COMPLETE-TRACKFAIL-${Date.now()}`, {
+        const pTrackFail = await createTestRepairRequest(`TEST-COMPLETE-TRACKFAIL-${Date.now()}`, {
             riderId: techTrackFail.id, riderEmail: techTrackFail.email
         });
         const originalTrackingsInsertOne = collections.trackingEvents.insertOne.bind(collections.trackingEvents);
@@ -3966,7 +3966,7 @@ async function testRepairCompletionTransaction() {
             collections.trackingEvents.insertOne = originalTrackingsInsertOne;
         }
         logTest('Tracking-insert failure surfaces as 500 COMPLETION_FAILED', res.statusCode === 500 && res.body.code === 'COMPLETION_FAILED');
-        const pTrackFailAfter = await models.Parcel.findById(pTrackFail.id);
+        const pTrackFailAfter = await models.RepairRequest.findById(pTrackFail.id);
         const techTrackFailAfter = await collections.technicians.findOne({ _id: new ObjectId(techTrackFail.id) });
         logTest(
             'Repair request and technician both rolled back on tracking-insert failure',
@@ -3975,7 +3975,7 @@ async function testRepairCompletionTransaction() {
 
         // --- 16, 17. Transaction commit failure rolls back and always ends the session. ---
         const techCommitFail = await createTestTechnician(`TEST-COMPLETE-COMMITFAIL-${Date.now()}`);
-        const pCommitFail = await createTestParcel(`TEST-COMPLETE-COMMITFAIL-${Date.now()}`, {
+        const pCommitFail = await createTestRepairRequest(`TEST-COMPLETE-COMMITFAIL-${Date.now()}`, {
             riderId: techCommitFail.id, riderEmail: techCommitFail.email
         });
         const commitFailSession = client.startSession();
@@ -3989,7 +3989,7 @@ async function testRepairCompletionTransaction() {
         }
         logTest('Transaction commit failure surfaces as 500 COMPLETION_FAILED', res.statusCode === 500 && res.body.code === 'COMPLETION_FAILED');
         logTest('Session is always ended, even after a commit failure', commitFailSession.hasEnded === true);
-        const pCommitFailAfter = await models.Parcel.findById(pCommitFail.id);
+        const pCommitFailAfter = await models.RepairRequest.findById(pCommitFail.id);
         const techCommitFailAfter = await collections.technicians.findOne({ _id: new ObjectId(techCommitFail.id) });
         const commitFailLogs = await trackingLogsFor(pCommitFail.trackingId);
         logTest(
@@ -4001,7 +4001,7 @@ async function testRepairCompletionTransaction() {
 
         // --- 18. Skipped transition rejected (driver_assigned -> parcel_delivered). ---
         const techSkip = await createTestTechnician(`TEST-COMPLETE-SKIP-${Date.now()}`);
-        const pSkip = await createTestParcel(`TEST-COMPLETE-SKIP-${Date.now()}`, {
+        const pSkip = await createTestRepairRequest(`TEST-COMPLETE-SKIP-${Date.now()}`, {
             deliveryStatus: 'driver_assigned', riderId: techSkip.id, riderEmail: techSkip.email
         });
         res = await callUpdateStatus(pSkip.id, 'parcel_delivered', techSkip.email);
@@ -4009,7 +4009,7 @@ async function testRepairCompletionTransaction() {
 
         // --- 19. Backward transition rejected (general, non-completion path). ---
         const techBackward = await createTestTechnician(`TEST-COMPLETE-BACKWARD-${Date.now()}`);
-        const pBackward = await createTestParcel(`TEST-COMPLETE-BACKWARD-${Date.now()}`, {
+        const pBackward = await createTestRepairRequest(`TEST-COMPLETE-BACKWARD-${Date.now()}`, {
             deliveryStatus: 'parcel_picked_up', riderId: techBackward.id, riderEmail: techBackward.email
         });
         res = await callUpdateStatus(pBackward.id, 'rider_arriving', techBackward.email);
@@ -4017,7 +4017,7 @@ async function testRepairCompletionTransaction() {
 
         // --- 20. Cancelled request rejected. ---
         const techCancelled = await createTestTechnician(`TEST-COMPLETE-CANCELLED-${Date.now()}`);
-        const pCancelled = await createTestParcel(`TEST-COMPLETE-CANCELLED-${Date.now()}`, {
+        const pCancelled = await createTestRepairRequest(`TEST-COMPLETE-CANCELLED-${Date.now()}`, {
             deliveryStatus: 'cancelled', riderId: techCancelled.id, riderEmail: techCancelled.email
         });
         res = await callUpdateStatus(pCancelled.id, 'parcel_delivered', techCancelled.email);
@@ -4025,7 +4025,7 @@ async function testRepairCompletionTransaction() {
 
         // --- 21. Unknown current status rejected. ---
         const techUnknown = await createTestTechnician(`TEST-COMPLETE-UNKNOWN-${Date.now()}`);
-        const pUnknown = await createTestParcel(`TEST-COMPLETE-UNKNOWN-${Date.now()}`, {
+        const pUnknown = await createTestRepairRequest(`TEST-COMPLETE-UNKNOWN-${Date.now()}`, {
             deliveryStatus: 'some_bogus_status', riderId: techUnknown.id, riderEmail: techUnknown.email
         });
         res = await callUpdateStatus(pUnknown.id, 'parcel_delivered', techUnknown.email);
@@ -4041,7 +4041,7 @@ async function testRepairCompletionTransaction() {
         // --- 24. Completed-but-technician-still-busy inconsistency is never
         // falsely reported as success. ---
         const techInconsistent = await createTestTechnician(`TEST-COMPLETE-INCONSISTENT-${Date.now()}`, { workStatus: 'in_delivery' });
-        const pInconsistent = await createTestParcel(`TEST-COMPLETE-INCONSISTENT-${Date.now()}`, {
+        const pInconsistent = await createTestRepairRequest(`TEST-COMPLETE-INCONSISTENT-${Date.now()}`, {
             deliveryStatus: 'parcel_delivered', riderId: techInconsistent.id, riderEmail: techInconsistent.email
         });
         res = await callUpdateStatus(pInconsistent.id, 'parcel_delivered', ADMIN_EMAIL);
@@ -4052,7 +4052,7 @@ async function testRepairCompletionTransaction() {
 
         // --- 25, 26. Concurrent completion race: exactly one final completion, one log. ---
         const techRace = await createTestTechnician(`TEST-COMPLETE-RACE-${Date.now()}`);
-        const pRace = await createTestParcel(`TEST-COMPLETE-RACE-${Date.now()}`, {
+        const pRace = await createTestRepairRequest(`TEST-COMPLETE-RACE-${Date.now()}`, {
             riderId: techRace.id, riderEmail: techRace.email
         });
         const [raceRes1, raceRes2] = await Promise.all([
@@ -4069,7 +4069,7 @@ async function testRepairCompletionTransaction() {
             'Concurrent completion of the same request produces exactly one new completion and one safe repeat response',
             newlyCompletedCount === 1 && safeRepeatCount === 1
         );
-        const pRaceAfter = await models.Parcel.findById(pRace.id);
+        const pRaceAfter = await models.RepairRequest.findById(pRace.id);
         const techRaceAfter = await collections.technicians.findOne({ _id: new ObjectId(techRace.id) });
         const pRaceLogs = await trackingLogsFor(pRace.trackingId);
         logTest(
@@ -4094,7 +4094,7 @@ async function testRepairCompletionTransaction() {
         const customerViewRes = await (() => {
             const req = { params: { id: pMain.id }, decoded_email: CUSTOMER_EMAIL };
             const r = fakeRes();
-            return parcelController.getParcelById(req, r).then(() => r);
+            return parcelController.getRepairRequestById(req, r).then(() => r);
         })();
         logTest('Customer sees final parcel_delivered state', customerViewRes.statusCode === 200 && customerViewRes.body.deliveryStatus === 'parcel_delivered');
 
@@ -4103,7 +4103,7 @@ async function testRepairCompletionTransaction() {
         const completedListRes = await (() => {
             const req = { query: { deliveryStatus: 'parcel_delivered' }, decoded_email: techMain.email };
             const r = fakeRes();
-            return parcelController.getRiderParcels(req, r).then(() => r);
+            return parcelController.getTechnicianRepairRequests(req, r).then(() => r);
         })();
         logTest(
             'Completed Repairs query includes the completed request',
@@ -4113,7 +4113,7 @@ async function testRepairCompletionTransaction() {
         const assignedListRes = await (() => {
             const req = { query: { deliveryStatus: 'driver_assigned' }, decoded_email: techMain.email };
             const r = fakeRes();
-            return parcelController.getRiderParcels(req, r).then(() => r);
+            return parcelController.getTechnicianRepairRequests(req, r).then(() => r);
         })();
         logTest(
             'Assigned Repairs query no longer includes the completed request',
@@ -4137,10 +4137,10 @@ async function testRepairCompletionTransaction() {
         // through the API itself - it's simulated directly here as the kind
         // of historical/manual-edit drift the defense in depth exists for. ---
         const techDualBusy = await createTestTechnician(`TEST-COMPLETE-DUALACTIVE-${Date.now()}`, { workStatus: 'in_delivery' });
-        const pDualMain = await createTestParcel(`TEST-COMPLETE-DUALACTIVE-MAIN-${Date.now()}`, {
+        const pDualMain = await createTestRepairRequest(`TEST-COMPLETE-DUALACTIVE-MAIN-${Date.now()}`, {
             deliveryStatus: 'parcel_picked_up', riderId: techDualBusy.id, riderEmail: techDualBusy.email
         });
-        const pDualOther = await createTestParcel(`TEST-COMPLETE-DUALACTIVE-OTHER-${Date.now()}`, {
+        const pDualOther = await createTestRepairRequest(`TEST-COMPLETE-DUALACTIVE-OTHER-${Date.now()}`, {
             deliveryStatus: 'driver_assigned', riderId: techDualBusy.id, riderEmail: techDualBusy.email
         });
         res = await callUpdateStatus(pDualMain.id, 'parcel_delivered', techDualBusy.email);
@@ -4153,7 +4153,7 @@ async function testRepairCompletionTransaction() {
             'Technician is NOT freed to available while another active assignment (pDualOther) still exists',
             techDualBusyAfter.workStatus === 'in_delivery'
         );
-        const pDualOtherAfter = await models.Parcel.findById(pDualOther.id);
+        const pDualOtherAfter = await models.RepairRequest.findById(pDualOther.id);
         logTest(
             'The other active request itself is completely untouched by the unrelated completion',
             pDualOtherAfter.deliveryStatus === 'driver_assigned'
@@ -4166,7 +4166,7 @@ async function testRepairCompletionTransaction() {
             await collections.trackingEvents.deleteMany({ trackingId: { $in: createdTrackingIds } });
         }
         // Phase 5.2 Unit 4 wired real notification creation into
-        // completeParcel, so every genuine completion above (which uses the
+        // completeRepairRequest, so every genuine completion above (which uses the
         // real CUSTOMER_EMAIL fixture as senderEmail by default) now also
         // creates a real repair_completed document - scoped and removed here
         // by entityId (this function's own created parcel ids), never by
@@ -4230,12 +4230,12 @@ async function testAdminParcelsList() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
 
         function callGetAdminParcels(query = {}) {
             const req = { query, decoded_email: ADMIN_EMAIL };
             const res = fakeRes();
-            return parcelController.getAdminParcels(req, res).then(() => res);
+            return parcelController.getAdminRepairRequests(req, res).then(() => res);
         }
 
         async function insertFixture(suffix, overrides = {}) {
@@ -5329,7 +5329,7 @@ async function testNotificationReadAPIs() {
 
 // Phase 5.2 Unit 3 - Technician Application and Assignment Notification
 // Integration. Exercises the 5 real notification instances wired into
-// createRider/updateRiderStatus/assignRiderToParcel, using the real shared
+// createTechnicianApplication/updateTechnicianStatus/assignTechnicianToRepairRequest, using the real shared
 // controllers (not stubs) so the actual transaction/session behavior is
 // exercised - failure scenarios monkey-patch a single collection method
 // (the same convention already used throughout this file) rather than
@@ -5373,12 +5373,12 @@ async function testTechnicianNotificationIntegration() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const riderController = controllers.rider;
-        const parcelController = controllers.parcel;
+        const riderController = controllers.technician;
+        const parcelController = controllers.repairRequest;
 
         // Phase 8.7A: approval now gates on a matchable profile, so pending
         // fixtures carry a valid canonical expertise array by default.
-        async function createTestRider(marker, { status = 'pending', email } = {}) {
+        async function createTestTechnician(marker, { status = 'pending', email } = {}) {
             const doc = {
                 name: marker,
                 email: email || `${marker.toLowerCase()}-${runId}@test.local`,
@@ -5397,7 +5397,7 @@ async function testTechnicianNotificationIntegration() {
             await collections.users.insertOne({ email, role, createdAt: new Date() });
         }
 
-        async function createTestParcel(marker, { senderEmail = CUSTOMER_EMAIL, deliveryStatus = 'pending-pickup' } = {}) {
+        async function createTestRepairRequest(marker, { senderEmail = CUSTOMER_EMAIL, deliveryStatus = 'pending-pickup' } = {}) {
             const doc = {
                 parcelName: marker, cost: 30, senderEmail,
                 trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
@@ -5412,19 +5412,19 @@ async function testTechnicianNotificationIntegration() {
         function callCreateRider(body) {
             const req = { body };
             const res = fakeRes();
-            return riderController.createRider(req, res).then(() => res);
+            return riderController.createTechnicianApplication(req, res).then(() => res);
         }
 
         function callUpdateRiderStatus(riderId, body, decoded_email = ADMIN_EMAIL) {
             const req = { params: { id: riderId }, body, decoded_email };
             const res = fakeRes();
-            return riderController.updateRiderStatus(req, res).then(() => res);
+            return riderController.updateTechnicianStatus(req, res).then(() => res);
         }
 
         function callAssign(parcelId, riderId, decoded_email = ADMIN_EMAIL, extraBody = {}) {
             const req = { params: { id: parcelId }, body: { riderId, ...extraBody }, decoded_email };
             const res = fakeRes();
-            return parcelController.assignRiderToParcel(req, res).then(() => res);
+            return parcelController.assignTechnicianToRepairRequest(req, res).then(() => res);
         }
 
         let res;
@@ -5433,7 +5433,7 @@ async function testTechnicianNotificationIntegration() {
         const extraAdminEmail = `test-notification-unit3-admin-${runId}@test.local`;
         await createTestUser(extraAdminEmail, 'admin');
 
-        // createRider itself performs the insert - no pre-existing rider
+        // createTechnicianApplication itself performs the insert - no pre-existing rider
         // fixture is created here, unlike the approval/rejection tests below
         // where the rider must already exist.
         const applicantEmail1 = `test-unit3-applicant-${runId}@test.local`;
@@ -5512,7 +5512,7 @@ async function testTechnicianNotificationIntegration() {
 
         // ================= APPROVAL (10-14) =================
         const approveEmail = `test-unit3-approve-${runId}@test.local`;
-        const r10 = await createTestRider(`TEST-UNIT3-APPROVE-${runId}`, { email: approveEmail });
+        const r10 = await createTestTechnician(`TEST-UNIT3-APPROVE-${runId}`, { email: approveEmail });
         await createTestUser(approveEmail, 'user');
         res = await callUpdateRiderStatus(r10.id, { status: 'approved' });
         logTest('10. Approval still succeeds (200) with notification integrated', res.statusCode === 200 && res.body.alreadyConsistent === false);
@@ -5526,7 +5526,7 @@ async function testTechnicianNotificationIntegration() {
 
         // Forced notification failure aborts the whole approval transaction.
         const approveFailEmail = `test-unit3-approvefail-${runId}@test.local`;
-        const rApproveFail = await createTestRider(`TEST-UNIT3-APPROVEFAIL-${runId}`, { email: approveFailEmail });
+        const rApproveFail = await createTestTechnician(`TEST-UNIT3-APPROVEFAIL-${runId}`, { email: approveFailEmail });
         await createTestUser(approveFailEmail, 'user');
         collections.notifications.insertOne = async (doc, options) => {
             if (doc.type === 'technician_application_approved') throw new Error('simulated notification outage');
@@ -5555,7 +5555,7 @@ async function testTechnicianNotificationIntegration() {
 
         // ================= REJECTION (16-21) =================
         const rejectEmail = `test-unit3-reject-${runId}@test.local`;
-        const r16 = await createTestRider(`TEST-UNIT3-REJECT-${runId}`, { email: rejectEmail });
+        const r16 = await createTestTechnician(`TEST-UNIT3-REJECT-${runId}`, { email: rejectEmail });
         await createTestUser(rejectEmail, 'user');
         res = await callUpdateRiderStatus(r16.id, { status: 'rejected' });
         logTest('16. Rejection still succeeds (200) with notification integrated', res.statusCode === 200 && res.body.alreadyConsistent === false);
@@ -5573,7 +5573,7 @@ async function testTechnicianNotificationIntegration() {
 
         // Forced notification failure aborts the whole rejection transaction.
         const rejectFailEmail = `test-unit3-rejectfail-${runId}@test.local`;
-        const rRejectFail = await createTestRider(`TEST-UNIT3-REJECTFAIL-${runId}`, { email: rejectFailEmail });
+        const rRejectFail = await createTestTechnician(`TEST-UNIT3-REJECTFAIL-${runId}`, { email: rejectFailEmail });
         await createTestUser(rejectFailEmail, 'user');
         collections.notifications.insertOne = async (doc, options) => {
             if (doc.type === 'technician_application_rejected') throw new Error('simulated notification outage');
@@ -5605,16 +5605,16 @@ async function testTechnicianNotificationIntegration() {
         const badRoleOwnerEmail = `test-unit3-badroleowner-${runId}@test.local`;
         await createTestUser(badRoleOwnerEmail, 'legacy_role');
 
-        const assignTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-${runId}`, { status: 'approved' });
+        const assignTech = await createTestTechnician(`TEST-UNIT3-ASSIGNTECH-${runId}`, { status: 'approved' });
 
         async function assignScenario(marker, senderEmail, techRider) {
-            const parcel = await createTestParcel(marker, { senderEmail });
+            const parcel = await createTestRepairRequest(marker, { senderEmail });
             const assignRes = await callAssign(parcel.id, techRider.id);
             return { parcel, assignRes };
         }
 
         // Customer-owned (real CUSTOMER_EMAIL, role user).
-        const custTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-CUST-${runId}`, { status: 'approved' });
+        const custTech = await createTestTechnician(`TEST-UNIT3-ASSIGNTECH-CUST-${runId}`, { status: 'approved' });
         const { parcel: custParcel, assignRes: custAssignRes } = await assignScenario(`TEST-UNIT3-ASSIGN-CUST-${runId}`, CUSTOMER_EMAIL, custTech);
         logTest('23. Assignment succeeds for a customer-owned parcel', custAssignRes.statusCode === 200);
         let custNotifs = await notificationsFor(custParcel.id, 'technician_assigned');
@@ -5623,32 +5623,32 @@ async function testTechnicianNotificationIntegration() {
         logTest('25. Technician copy created alongside the customer copy (dedup keys coexist)', custTechNotifs.length === 1 && custTechNotifs[0].recipientRole === 'rider' && custTechNotifs[0].recipientEmail === custTech.email);
 
         // Rider-owned parcel (a technician who submitted their own repair request).
-        const riderOwnerTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-RIDEROWNER-${runId}`, { status: 'approved' });
+        const riderOwnerTech = await createTestTechnician(`TEST-UNIT3-ASSIGNTECH-RIDEROWNER-${runId}`, { status: 'approved' });
         const { parcel: riderOwnedParcel, assignRes: riderOwnedAssignRes } = await assignScenario(`TEST-UNIT3-ASSIGN-RIDEROWNER-${runId}`, riderOwnerEmail, riderOwnerTech);
         logTest('26. Assignment succeeds for a rider-owned parcel', riderOwnedAssignRes.statusCode === 200);
         const riderOwnedNotifs = await notificationsFor(riderOwnedParcel.id, 'technician_assigned');
         logTest('27. Rider-owned parcel stores recipientRole "rider" (loaded from users collection, not defaulted)', riderOwnedNotifs.length === 1 && riderOwnedNotifs[0].recipientRole === 'rider');
 
         // Admin-owned parcel (an admin who submitted their own repair request).
-        const adminOwnerTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-ADMINOWNER-${runId}`, { status: 'approved' });
+        const adminOwnerTech = await createTestTechnician(`TEST-UNIT3-ASSIGNTECH-ADMINOWNER-${runId}`, { status: 'approved' });
         const { parcel: adminOwnedParcel, assignRes: adminOwnedAssignRes } = await assignScenario(`TEST-UNIT3-ASSIGN-ADMINOWNER-${runId}`, ADMIN_EMAIL, adminOwnerTech);
         logTest('28. Assignment succeeds for an admin-owned parcel', adminOwnedAssignRes.statusCode === 200);
         const adminOwnedNotifs = await notificationsFor(adminOwnedParcel.id, 'technician_assigned');
         logTest('29. Admin-owned parcel stores recipientRole "admin"', adminOwnedNotifs.length === 1 && adminOwnedNotifs[0].recipientRole === 'admin' && adminOwnedNotifs[0].recipientEmail === ADMIN_EMAIL.toLowerCase());
 
         // Spoofed request-body role has no effect - the controller never reads a role from the body.
-        const spoofTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-SPOOF-${runId}`, { status: 'approved' });
-        const spoofParcel = await createTestParcel(`TEST-UNIT3-ASSIGN-SPOOF-${runId}`, { senderEmail: CUSTOMER_EMAIL });
+        const spoofTech = await createTestTechnician(`TEST-UNIT3-ASSIGNTECH-SPOOF-${runId}`, { status: 'approved' });
+        const spoofParcel = await createTestRepairRequest(`TEST-UNIT3-ASSIGN-SPOOF-${runId}`, { senderEmail: CUSTOMER_EMAIL });
         const spoofRes = await callAssign(spoofParcel.id, spoofTech.id, ADMIN_EMAIL, { role: 'admin', recipientRole: 'admin' });
         const spoofNotifs = await notificationsFor(spoofParcel.id, 'technician_assigned');
         logTest('30. Spoofed request-body role field has no effect on the resolved owner role', spoofRes.statusCode === 200 && spoofNotifs.length === 1 && spoofNotifs[0].recipientRole === 'user');
 
         // Missing owner user record aborts the assignment before anything commits.
-        const orphanTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-ORPHAN-${runId}`, { status: 'approved' });
-        const orphanParcel = await createTestParcel(`TEST-UNIT3-ASSIGN-ORPHAN-${runId}`, { senderEmail: orphanOwnerEmail });
+        const orphanTech = await createTestTechnician(`TEST-UNIT3-ASSIGNTECH-ORPHAN-${runId}`, { status: 'approved' });
+        const orphanParcel = await createTestRepairRequest(`TEST-UNIT3-ASSIGN-ORPHAN-${runId}`, { senderEmail: orphanOwnerEmail });
         const orphanRes = await callAssign(orphanParcel.id, orphanTech.id);
         logTest('31. Missing owner user record aborts assignment (409 REPAIR_OWNER_ROLE_UNRESOLVED)', orphanRes.statusCode === 409 && orphanRes.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
-        const orphanParcelAfter = await models.Parcel.findById(orphanParcel.id);
+        const orphanParcelAfter = await models.RepairRequest.findById(orphanParcel.id);
         const orphanTechAfter = await collections.technicians.findOne({ _id: new ObjectId(orphanTech.id) });
         const orphanTrackingLogs = await collections.trackingEvents.find({ trackingId: orphanParcel.trackingId }).toArray();
         const orphanNotifs = await notificationsFor(orphanParcel.id, 'technician_assigned');
@@ -5659,16 +5659,16 @@ async function testTechnicianNotificationIntegration() {
         logTest('35. Missing-owner failure creates neither notification', orphanNotifs.length === 0 && orphanTechNotifs.length === 0);
 
         // Invalid stored owner role (not in the recognized role set) is treated identically.
-        const badRoleTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-BADROLE-${runId}`, { status: 'approved' });
-        const badRoleParcel = await createTestParcel(`TEST-UNIT3-ASSIGN-BADROLE-${runId}`, { senderEmail: badRoleOwnerEmail });
+        const badRoleTech = await createTestTechnician(`TEST-UNIT3-ASSIGNTECH-BADROLE-${runId}`, { status: 'approved' });
+        const badRoleParcel = await createTestRepairRequest(`TEST-UNIT3-ASSIGN-BADROLE-${runId}`, { senderEmail: badRoleOwnerEmail });
         const badRoleRes = await callAssign(badRoleParcel.id, badRoleTech.id);
         logTest('36. Invalid stored owner role aborts assignment (409 REPAIR_OWNER_ROLE_UNRESOLVED)', badRoleRes.statusCode === 409 && badRoleRes.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
-        const badRoleParcelAfter = await models.Parcel.findById(badRoleParcel.id);
+        const badRoleParcelAfter = await models.RepairRequest.findById(badRoleParcel.id);
         logTest('37. Invalid-role failure leaves the parcel unassigned too', badRoleParcelAfter.deliveryStatus === 'pending-pickup' && !badRoleParcelAfter.riderId);
 
         // Forced notification failure (customer copy) rolls back the entire assignment.
-        const notifFailTech = await createTestRider(`TEST-UNIT3-ASSIGNTECH-NOTIFFAIL-${runId}`, { status: 'approved' });
-        const notifFailParcel = await createTestParcel(`TEST-UNIT3-ASSIGN-NOTIFFAIL-${runId}`, { senderEmail: CUSTOMER_EMAIL });
+        const notifFailTech = await createTestTechnician(`TEST-UNIT3-ASSIGNTECH-NOTIFFAIL-${runId}`, { status: 'approved' });
+        const notifFailParcel = await createTestRepairRequest(`TEST-UNIT3-ASSIGN-NOTIFFAIL-${runId}`, { senderEmail: CUSTOMER_EMAIL });
         collections.notifications.insertOne = async (doc, options) => {
             if (doc.type === 'technician_assigned' && doc.entityId === notifFailParcel.id) throw new Error('simulated notification outage');
             return originalNotifInsertOne(doc, options);
@@ -5680,7 +5680,7 @@ async function testTechnicianNotificationIntegration() {
             collections.notifications.insertOne = originalNotifInsertOne;
         }
         logTest('38. Notification failure aborts the entire assignment transaction (500)', assignNotifFailRes.statusCode === 500);
-        const notifFailParcelAfter = await models.Parcel.findById(notifFailParcel.id);
+        const notifFailParcelAfter = await models.RepairRequest.findById(notifFailParcel.id);
         const notifFailTechAfter = await collections.technicians.findOne({ _id: new ObjectId(notifFailTech.id) });
         const notifFailTrackingLogs = await collections.trackingEvents.find({ trackingId: notifFailParcel.trackingId }).toArray();
         logTest(
@@ -5735,9 +5735,9 @@ async function testTechnicianNotificationIntegration() {
 }
 
 // Phase 5.2 Unit 4 - Repair Lifecycle Notification Integration. Exercises the
-// 3 real notification instances wired into updateParcelStatus (best-effort,
+// 3 real notification instances wired into updateRepairRequestStatus (best-effort,
 // non-transactional: technician_on_the_way, repair_in_progress) and
-// completeParcel (transaction-joined: repair_completed), using the real
+// completeRepairRequest (transaction-joined: repair_completed), using the real
 // shared controllers so actual transaction/session and best-effort-failure
 // behavior is exercised - failure scenarios monkey-patch a single collection
 // method, matching the convention already used throughout this file. The
@@ -5778,19 +5778,19 @@ async function testRepairLifecycleNotificationIntegration() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
 
         async function createTestUser(email, role) {
             createdUserEmails.push(email);
             await collections.users.insertOne({ email, role, createdAt: new Date() });
         }
 
-        // updateParcelStatus's authorization check reads the technician's
+        // updateRepairRequestStatus's authorization check reads the technician's
         // role from the users collection (this.User.findByEmail), not from
         // the riders collection alone - a linked users document with
         // role:'rider' is required for isAssignedRider to actually pass,
         // mirroring testRepairCompletionTransaction's createTestTechnician.
-        async function createTestRider(marker, { workStatus = 'in_delivery' } = {}) {
+        async function createTestTechnician(marker, { workStatus = 'in_delivery' } = {}) {
             const email = `${marker.toLowerCase()}@test.local`;
             const doc = {
                 name: marker, email, region: 'Test Region', district: 'Test District',
@@ -5802,7 +5802,7 @@ async function testRepairLifecycleNotificationIntegration() {
             return { id: result.insertedId.toString(), email };
         }
 
-        async function createTestParcel(marker, { senderEmail = CUSTOMER_EMAIL, deliveryStatus = 'driver_assigned', rider } = {}) {
+        async function createTestRepairRequest(marker, { senderEmail = CUSTOMER_EMAIL, deliveryStatus = 'driver_assigned', rider } = {}) {
             const doc = {
                 parcelName: marker, cost: 30, senderEmail, deliveryStatus,
                 trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
@@ -5822,7 +5822,7 @@ async function testRepairLifecycleNotificationIntegration() {
         function callUpdateStatus(parcelId, deliveryStatus, decoded_email, extraBody = {}) {
             const req = { params: { id: parcelId }, body: { deliveryStatus, ...extraBody }, decoded_email };
             const res = fakeRes();
-            return parcelController.updateParcelStatus(req, res).then(() => res);
+            return parcelController.updateRepairRequestStatus(req, res).then(() => res);
         }
 
         function trackingLogsFor(trackingId) {
@@ -5836,8 +5836,8 @@ async function testRepairLifecycleNotificationIntegration() {
         await createTestUser(badRoleOwnerEmail, 'legacy_role');
 
         // ================= ON-THE-WAY: rider_arriving (1-26) =================
-        const tech1 = await createTestRider(`TEST-UNIT4-TECH1-${runId}`);
-        const p1 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-CUST-${runId}`, { rider: tech1 });
+        const tech1 = await createTestTechnician(`TEST-UNIT4-TECH1-${runId}`);
+        const p1 = await createTestRepairRequest(`TEST-UNIT4-ONTHEWAY-CUST-${runId}`, { rider: tech1 });
         const res1 = await callUpdateStatus(p1.id, 'rider_arriving', tech1.email, { role: 'admin', recipientRole: 'admin' });
         logTest('1/17/18. Genuine transition to rider_arriving succeeds (200) with unchanged authorization/response shape', res1.statusCode === 200 && res1.body.matchedCount === 1 && res1.body.modifiedCount === 1);
 
@@ -5858,22 +5858,22 @@ async function testRepairLifecycleNotificationIntegration() {
         logTest('16. Notification visible copy contains no raw status value', otw1.length === 1 && !otw1[0].title.includes('rider_arriving') && !otw1[0].message.includes('rider_arriving'));
 
         // Rider-owned parcel.
-        const tech2 = await createTestRider(`TEST-UNIT4-TECH2-${runId}`);
-        const p2 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-RIDEROWNER-${runId}`, { senderEmail: riderOwnerEmail, rider: tech2 });
+        const tech2 = await createTestTechnician(`TEST-UNIT4-TECH2-${runId}`);
+        const p2 = await createTestRepairRequest(`TEST-UNIT4-ONTHEWAY-RIDEROWNER-${runId}`, { senderEmail: riderOwnerEmail, rider: tech2 });
         await callUpdateStatus(p2.id, 'rider_arriving', tech2.email);
         const otw2 = await notificationsFor(p2.id, 'technician_on_the_way');
         logTest('5. Rider-owned parcel stores recipientRole rider', otw2.length === 1 && otw2[0].recipientRole === 'rider');
 
         // Admin-owned parcel.
-        const tech3 = await createTestRider(`TEST-UNIT4-TECH3-${runId}`);
-        const p3 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-ADMINOWNER-${runId}`, { senderEmail: ADMIN_EMAIL, rider: tech3 });
+        const tech3 = await createTestTechnician(`TEST-UNIT4-TECH3-${runId}`);
+        const p3 = await createTestRepairRequest(`TEST-UNIT4-ONTHEWAY-ADMINOWNER-${runId}`, { senderEmail: ADMIN_EMAIL, rider: tech3 });
         await callUpdateStatus(p3.id, 'rider_arriving', tech3.email);
         const otw3 = await notificationsFor(p3.id, 'technician_on_the_way');
         logTest('6. Admin-owned parcel stores recipientRole admin', otw3.length === 1 && otw3[0].recipientRole === 'admin');
 
         // Invalid transition creates no notification.
-        const tech4 = await createTestRider(`TEST-UNIT4-TECH4-${runId}`);
-        const p4 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-INVALID-${runId}`, { rider: tech4 });
+        const tech4 = await createTestTechnician(`TEST-UNIT4-TECH4-${runId}`);
+        const p4 = await createTestRepairRequest(`TEST-UNIT4-ONTHEWAY-INVALID-${runId}`, { rider: tech4 });
         const invalidRes = await callUpdateStatus(p4.id, 'parcel_picked_up', tech4.email);
         const otw4 = await notificationsFor(p4.id, 'technician_on_the_way');
         logTest('19. Invalid transition creates no notification', invalidRes.statusCode === 409 && otw4.length === 0);
@@ -5884,22 +5884,22 @@ async function testRepairLifecycleNotificationIntegration() {
         logTest('20. Replay/no-op creates no second notification', replayRes.statusCode === 200 && replayRes.body.message === 'status unchanged' && otw1AfterReplay.length === 1);
 
         // Missing owner record does not fail the status transition.
-        const tech5 = await createTestRider(`TEST-UNIT4-TECH5-${runId}`);
-        const p5 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-ORPHAN-${runId}`, { senderEmail: orphanOwnerEmail, rider: tech5 });
+        const tech5 = await createTestTechnician(`TEST-UNIT4-TECH5-${runId}`);
+        const p5 = await createTestRepairRequest(`TEST-UNIT4-ONTHEWAY-ORPHAN-${runId}`, { senderEmail: orphanOwnerEmail, rider: tech5 });
         const orphanRes = await callUpdateStatus(p5.id, 'rider_arriving', tech5.email);
         const otw5 = await notificationsFor(p5.id, 'technician_on_the_way');
         logTest('21/23. Missing owner record does not fail the status transition, and creates no notification', orphanRes.statusCode === 200 && orphanRes.body.matchedCount === 1 && otw5.length === 0);
 
         // Invalid stored owner role does not fail the status transition.
-        const tech6 = await createTestRider(`TEST-UNIT4-TECH6-${runId}`);
-        const p6 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-BADROLE-${runId}`, { senderEmail: badRoleOwnerEmail, rider: tech6 });
+        const tech6 = await createTestTechnician(`TEST-UNIT4-TECH6-${runId}`);
+        const p6 = await createTestRepairRequest(`TEST-UNIT4-ONTHEWAY-BADROLE-${runId}`, { senderEmail: badRoleOwnerEmail, rider: tech6 });
         const badRoleRes = await callUpdateStatus(p6.id, 'rider_arriving', tech6.email);
         const otw6 = await notificationsFor(p6.id, 'technician_on_the_way');
         logTest('22/23(b). Invalid owner role does not fail the status transition, and creates no notification', badRoleRes.statusCode === 200 && badRoleRes.body.matchedCount === 1 && otw6.length === 0);
 
         // Notification DB failure does not fail the status transition.
-        const tech7 = await createTestRider(`TEST-UNIT4-TECH7-${runId}`);
-        const p7 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-NOTIFFAIL-${runId}`, { rider: tech7 });
+        const tech7 = await createTestTechnician(`TEST-UNIT4-TECH7-${runId}`);
+        const p7 = await createTestRepairRequest(`TEST-UNIT4-ONTHEWAY-NOTIFFAIL-${runId}`, { rider: tech7 });
         const originalNotifInsertOne = collections.notifications.insertOne.bind(collections.notifications);
         collections.notifications.insertOne = async (doc, options) => {
             if (doc.type === 'technician_on_the_way' && doc.entityId === p7.id) throw new Error('simulated notification outage');
@@ -5915,8 +5915,8 @@ async function testRepairLifecycleNotificationIntegration() {
         logTest('24/26. Notification DB failure does not fail the status transition, and no notification details leak into the response', notifFailRes.statusCode === 200 && notifFailRes.body.matchedCount === 1 && !('notification' in notifFailRes.body) && otw7.length === 0);
 
         // Duplicate notification result does not fail the status transition.
-        const tech8 = await createTestRider(`TEST-UNIT4-TECH8-${runId}`);
-        const p8 = await createTestParcel(`TEST-UNIT4-ONTHEWAY-DUP-${runId}`, { rider: tech8, deliveryStatus: 'rider_arriving' });
+        const tech8 = await createTestTechnician(`TEST-UNIT4-TECH8-${runId}`);
+        const p8 = await createTestRepairRequest(`TEST-UNIT4-ONTHEWAY-DUP-${runId}`, { rider: tech8, deliveryStatus: 'rider_arriving' });
         // Pre-seed the exact dedup key this transition would produce, so the
         // real insert below hits a genuine duplicate-key outcome.
         await collections.notifications.insertOne({
@@ -5935,8 +5935,8 @@ async function testRepairLifecycleNotificationIntegration() {
         logTest('25. Duplicate notification result does not fail the status transition', dupRes.statusCode === 200 && dupRes.body.matchedCount === 1 && otw8.length === 1);
 
         // ================= IN-PROGRESS: parcel_picked_up (27-47) =================
-        const tech9 = await createTestRider(`TEST-UNIT4-TECH9-${runId}`);
-        const p9 = await createTestParcel(`TEST-UNIT4-INPROGRESS-CUST-${runId}`, { rider: tech9, deliveryStatus: 'rider_arriving' });
+        const tech9 = await createTestTechnician(`TEST-UNIT4-TECH9-${runId}`);
+        const p9 = await createTestRepairRequest(`TEST-UNIT4-INPROGRESS-CUST-${runId}`, { rider: tech9, deliveryStatus: 'rider_arriving' });
         const res9 = await callUpdateStatus(p9.id, 'parcel_picked_up', tech9.email, { role: 'admin' });
         logTest('27/38/39. Genuine transition to parcel_picked_up succeeds (200) with unchanged response shape/authorization', res9.statusCode === 200 && res9.body.matchedCount === 1);
         const rip9 = await notificationsFor(p9.id, 'repair_in_progress');
@@ -5948,20 +5948,20 @@ async function testRepairLifecycleNotificationIntegration() {
         logTest('36. Entity and trackingId are correct', rip9.length === 1 && rip9[0].entityId === p9.id && rip9[0].metadata.trackingId === p9.trackingId);
         logTest('37. Action URL is correct', rip9.length === 1 && rip9[0].actionUrl === `/dashboard/my-requests/${p9.id}`);
 
-        const tech10 = await createTestRider(`TEST-UNIT4-TECH10-${runId}`);
-        const p10 = await createTestParcel(`TEST-UNIT4-INPROGRESS-RIDEROWNER-${runId}`, { senderEmail: riderOwnerEmail, rider: tech10, deliveryStatus: 'rider_arriving' });
+        const tech10 = await createTestTechnician(`TEST-UNIT4-TECH10-${runId}`);
+        const p10 = await createTestRepairRequest(`TEST-UNIT4-INPROGRESS-RIDEROWNER-${runId}`, { senderEmail: riderOwnerEmail, rider: tech10, deliveryStatus: 'rider_arriving' });
         await callUpdateStatus(p10.id, 'parcel_picked_up', tech10.email);
         const rip10 = await notificationsFor(p10.id, 'repair_in_progress');
         logTest('31. Rider-owned parcel stores role rider', rip10.length === 1 && rip10[0].recipientRole === 'rider');
 
-        const tech11 = await createTestRider(`TEST-UNIT4-TECH11-${runId}`);
-        const p11 = await createTestParcel(`TEST-UNIT4-INPROGRESS-ADMINOWNER-${runId}`, { senderEmail: ADMIN_EMAIL, rider: tech11, deliveryStatus: 'rider_arriving' });
+        const tech11 = await createTestTechnician(`TEST-UNIT4-TECH11-${runId}`);
+        const p11 = await createTestRepairRequest(`TEST-UNIT4-INPROGRESS-ADMINOWNER-${runId}`, { senderEmail: ADMIN_EMAIL, rider: tech11, deliveryStatus: 'rider_arriving' });
         await callUpdateStatus(p11.id, 'parcel_picked_up', tech11.email);
         const rip11 = await notificationsFor(p11.id, 'repair_in_progress');
         logTest('32/33. Admin-owned parcel stores role admin, loaded from users collection', rip11.length === 1 && rip11[0].recipientRole === 'admin');
 
-        const tech12 = await createTestRider(`TEST-UNIT4-TECH12-${runId}`);
-        const p12 = await createTestParcel(`TEST-UNIT4-INPROGRESS-INVALID-${runId}`, { rider: tech12 });
+        const tech12 = await createTestTechnician(`TEST-UNIT4-TECH12-${runId}`);
+        const p12 = await createTestRepairRequest(`TEST-UNIT4-INPROGRESS-INVALID-${runId}`, { rider: tech12 });
         const invalidRes12 = await callUpdateStatus(p12.id, 'parcel_picked_up', tech12.email);
         const rip12 = await notificationsFor(p12.id, 'repair_in_progress');
         logTest('40. Invalid transition creates no notification', invalidRes12.statusCode === 409 && rip12.length === 0);
@@ -5970,20 +5970,20 @@ async function testRepairLifecycleNotificationIntegration() {
         const rip9AfterReplay = await notificationsFor(p9.id, 'repair_in_progress');
         logTest('41. Replay creates no duplicate', replayRes9.statusCode === 200 && replayRes9.body.message === 'status unchanged' && rip9AfterReplay.length === 1);
 
-        const tech13 = await createTestRider(`TEST-UNIT4-TECH13-${runId}`);
-        const p13 = await createTestParcel(`TEST-UNIT4-INPROGRESS-ORPHAN-${runId}`, { senderEmail: orphanOwnerEmail, rider: tech13, deliveryStatus: 'rider_arriving' });
+        const tech13 = await createTestTechnician(`TEST-UNIT4-TECH13-${runId}`);
+        const p13 = await createTestRepairRequest(`TEST-UNIT4-INPROGRESS-ORPHAN-${runId}`, { senderEmail: orphanOwnerEmail, rider: tech13, deliveryStatus: 'rider_arriving' });
         const orphanRes13 = await callUpdateStatus(p13.id, 'parcel_picked_up', tech13.email);
         const rip13 = await notificationsFor(p13.id, 'repair_in_progress');
         logTest('42/44. Missing owner does not fail the status transition, and creates no notification (lookup failure)', orphanRes13.statusCode === 200 && orphanRes13.body.matchedCount === 1 && rip13.length === 0);
 
-        const tech14 = await createTestRider(`TEST-UNIT4-TECH14-${runId}`);
-        const p14 = await createTestParcel(`TEST-UNIT4-INPROGRESS-BADROLE-${runId}`, { senderEmail: badRoleOwnerEmail, rider: tech14, deliveryStatus: 'rider_arriving' });
+        const tech14 = await createTestTechnician(`TEST-UNIT4-TECH14-${runId}`);
+        const p14 = await createTestRepairRequest(`TEST-UNIT4-INPROGRESS-BADROLE-${runId}`, { senderEmail: badRoleOwnerEmail, rider: tech14, deliveryStatus: 'rider_arriving' });
         const badRoleRes14 = await callUpdateStatus(p14.id, 'parcel_picked_up', tech14.email);
         const rip14 = await notificationsFor(p14.id, 'repair_in_progress');
         logTest('43. Invalid owner role does not fail the status transition', badRoleRes14.statusCode === 200 && badRoleRes14.body.matchedCount === 1 && rip14.length === 0);
 
-        const tech15 = await createTestRider(`TEST-UNIT4-TECH15-${runId}`);
-        const p15 = await createTestParcel(`TEST-UNIT4-INPROGRESS-NOTIFFAIL-${runId}`, { rider: tech15, deliveryStatus: 'rider_arriving' });
+        const tech15 = await createTestTechnician(`TEST-UNIT4-TECH15-${runId}`);
+        const p15 = await createTestRepairRequest(`TEST-UNIT4-INPROGRESS-NOTIFFAIL-${runId}`, { rider: tech15, deliveryStatus: 'rider_arriving' });
         collections.notifications.insertOne = async (doc, options) => {
             if (doc.type === 'repair_in_progress' && doc.entityId === p15.id) throw new Error('simulated notification outage');
             return originalNotifInsertOne(doc, options);
@@ -5997,8 +5997,8 @@ async function testRepairLifecycleNotificationIntegration() {
         const rip15 = await notificationsFor(p15.id, 'repair_in_progress');
         logTest('45/47. Notification failure does not fail the status transition, and no private data/notification result is exposed', notifFailRes15.statusCode === 200 && notifFailRes15.body.matchedCount === 1 && !('notification' in notifFailRes15.body) && rip15.length === 0);
 
-        const tech16 = await createTestRider(`TEST-UNIT4-TECH16-${runId}`);
-        const p16 = await createTestParcel(`TEST-UNIT4-INPROGRESS-DUP-${runId}`, { rider: tech16, deliveryStatus: 'parcel_picked_up' });
+        const tech16 = await createTestTechnician(`TEST-UNIT4-TECH16-${runId}`);
+        const p16 = await createTestRepairRequest(`TEST-UNIT4-INPROGRESS-DUP-${runId}`, { rider: tech16, deliveryStatus: 'parcel_picked_up' });
         await collections.notifications.insertOne({
             recipientEmail: CUSTOMER_EMAIL.toLowerCase(), recipientRole: 'user', type: 'repair_in_progress',
             title: 'x', message: 'x', entityType: 'parcel', entityId: p16.id, actionUrl: '/x', priority: 'normal',
@@ -6011,8 +6011,8 @@ async function testRepairLifecycleNotificationIntegration() {
         logTest('46. Duplicate result is non-fatal', dupRes16.statusCode === 200 && dupRes16.body.matchedCount === 1 && rip16.length === 1);
 
         // ================= COMPLETION: parcel_delivered (48-73) =================
-        const tech17 = await createTestRider(`TEST-UNIT4-TECH17-${runId}`);
-        const p17 = await createTestParcel(`TEST-UNIT4-COMPLETE-CUST-${runId}`, { rider: tech17, deliveryStatus: 'parcel_picked_up' });
+        const tech17 = await createTestTechnician(`TEST-UNIT4-TECH17-${runId}`);
+        const p17 = await createTestRepairRequest(`TEST-UNIT4-COMPLETE-CUST-${runId}`, { rider: tech17, deliveryStatus: 'parcel_picked_up' });
         const res17 = await callUpdateStatus(p17.id, 'parcel_delivered', tech17.email);
         logTest('48/71/72. Genuine completion succeeds (200) with unchanged response shape/authorization', res17.statusCode === 200 && res17.body.alreadyCompleted === false && res17.body.deliveryStatus === 'parcel_delivered');
         const rc17 = await notificationsFor(p17.id, 'repair_completed');
@@ -6023,14 +6023,14 @@ async function testRepairLifecycleNotificationIntegration() {
         logTest('58. Action URL is request details', rc17.length === 1 && rc17[0].actionUrl === `/dashboard/my-requests/${p17.id}`);
         logTest('73. No notification ID appears in response', !('notificationId' in res17.body) && !('notification' in res17.body));
 
-        const tech18 = await createTestRider(`TEST-UNIT4-TECH18-${runId}`);
-        const p18 = await createTestParcel(`TEST-UNIT4-COMPLETE-RIDEROWNER-${runId}`, { senderEmail: riderOwnerEmail, rider: tech18, deliveryStatus: 'parcel_picked_up' });
+        const tech18 = await createTestTechnician(`TEST-UNIT4-TECH18-${runId}`);
+        const p18 = await createTestRepairRequest(`TEST-UNIT4-COMPLETE-RIDEROWNER-${runId}`, { senderEmail: riderOwnerEmail, rider: tech18, deliveryStatus: 'parcel_picked_up' });
         await callUpdateStatus(p18.id, 'parcel_delivered', tech18.email);
         const rc18 = await notificationsFor(p18.id, 'repair_completed');
         logTest('51. Rider-owned completion stores role rider', rc18.length === 1 && rc18[0].recipientRole === 'rider');
 
-        const tech19 = await createTestRider(`TEST-UNIT4-TECH19-${runId}`);
-        const p19 = await createTestParcel(`TEST-UNIT4-COMPLETE-ADMINOWNER-${runId}`, { senderEmail: ADMIN_EMAIL, rider: tech19, deliveryStatus: 'parcel_picked_up' });
+        const tech19 = await createTestTechnician(`TEST-UNIT4-TECH19-${runId}`);
+        const p19 = await createTestRepairRequest(`TEST-UNIT4-COMPLETE-ADMINOWNER-${runId}`, { senderEmail: ADMIN_EMAIL, rider: tech19, deliveryStatus: 'parcel_picked_up' });
         await callUpdateStatus(p19.id, 'parcel_delivered', tech19.email);
         const rc19 = await notificationsFor(p19.id, 'repair_completed');
         logTest('52/53/54. Admin-owned completion stores role admin, resolved in the active transaction session, spoofed role ignored', rc19.length === 1 && rc19[0].recipientRole === 'admin');
@@ -6038,8 +6038,8 @@ async function testRepairLifecycleNotificationIntegration() {
         logTest('59. Notification joins the completion transaction (same recipientRole resolution/session path as parcel+rider+tracking above)', rc17.length === 1);
 
         // Forced notification failure rolls back parcel/workload/tracking/notification together.
-        const tech20 = await createTestRider(`TEST-UNIT4-TECH20-${runId}`);
-        const p20 = await createTestParcel(`TEST-UNIT4-COMPLETE-NOTIFFAIL-${runId}`, { rider: tech20, deliveryStatus: 'parcel_picked_up' });
+        const tech20 = await createTestTechnician(`TEST-UNIT4-TECH20-${runId}`);
+        const p20 = await createTestRepairRequest(`TEST-UNIT4-COMPLETE-NOTIFFAIL-${runId}`, { rider: tech20, deliveryStatus: 'parcel_picked_up' });
         collections.notifications.insertOne = async (doc, options) => {
             if (doc.type === 'repair_completed' && doc.entityId === p20.id) throw new Error('simulated notification outage');
             return originalNotifInsertOne(doc, options);
@@ -6051,7 +6051,7 @@ async function testRepairLifecycleNotificationIntegration() {
             collections.notifications.insertOne = originalNotifInsertOne;
         }
         logTest('60/63. Forced notification failure surfaces a controlled 500 and leaves no notification', completeFailRes.statusCode === 500 && (await notificationsFor(p20.id, 'repair_completed')).length === 0);
-        const p20After = await models.Parcel.findById(p20.id);
+        const p20After = await models.RepairRequest.findById(p20.id);
         const tech20After = await collections.technicians.findOne({ _id: new ObjectId(tech20.id) });
         const p20Logs = await trackingLogsFor(p20.trackingId);
         logTest(
@@ -6061,11 +6061,11 @@ async function testRepairLifecycleNotificationIntegration() {
         logTest('62(tracking). Forced notification failure rolls back the completion tracking log too', !p20Logs.some(l => l.status === 'parcel_delivered'));
 
         // Missing/invalid owner role aborts completion before any write.
-        const tech21 = await createTestRider(`TEST-UNIT4-TECH21-${runId}`);
-        const p21 = await createTestParcel(`TEST-UNIT4-COMPLETE-ORPHAN-${runId}`, { senderEmail: orphanOwnerEmail, rider: tech21, deliveryStatus: 'parcel_picked_up' });
+        const tech21 = await createTestTechnician(`TEST-UNIT4-TECH21-${runId}`);
+        const p21 = await createTestRepairRequest(`TEST-UNIT4-COMPLETE-ORPHAN-${runId}`, { senderEmail: orphanOwnerEmail, rider: tech21, deliveryStatus: 'parcel_picked_up' });
         const orphanCompleteRes = await callUpdateStatus(p21.id, 'parcel_delivered', tech21.email);
         logTest('64. Missing owner record aborts completion (409 REPAIR_OWNER_ROLE_UNRESOLVED)', orphanCompleteRes.statusCode === 409 && orphanCompleteRes.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
-        const p21After = await models.Parcel.findById(p21.id);
+        const p21After = await models.RepairRequest.findById(p21.id);
         const tech21After = await collections.technicians.findOne({ _id: new ObjectId(tech21.id) });
         const p21Logs = await trackingLogsFor(p21.trackingId);
         logTest(
@@ -6073,8 +6073,8 @@ async function testRepairLifecycleNotificationIntegration() {
             p21After.deliveryStatus === 'parcel_picked_up' && tech21After.workStatus === 'in_delivery' && !p21Logs.some(l => l.status === 'parcel_delivered')
         );
 
-        const tech22 = await createTestRider(`TEST-UNIT4-TECH22-${runId}`);
-        const p22 = await createTestParcel(`TEST-UNIT4-COMPLETE-BADROLE-${runId}`, { senderEmail: badRoleOwnerEmail, rider: tech22, deliveryStatus: 'parcel_picked_up' });
+        const tech22 = await createTestTechnician(`TEST-UNIT4-TECH22-${runId}`);
+        const p22 = await createTestRepairRequest(`TEST-UNIT4-COMPLETE-BADROLE-${runId}`, { senderEmail: badRoleOwnerEmail, rider: tech22, deliveryStatus: 'parcel_picked_up' });
         const badRoleCompleteRes = await callUpdateStatus(p22.id, 'parcel_delivered', tech22.email);
         logTest('65. Invalid owner role aborts completion (409 REPAIR_OWNER_ROLE_UNRESOLVED)', badRoleCompleteRes.statusCode === 409 && badRoleCompleteRes.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
 
@@ -6107,26 +6107,26 @@ async function testRepairLifecycleNotificationIntegration() {
         }
 
         // --- On-the-way (1-9) ---
-        const techA1 = await createTestRider(`TEST-UNIT4-ACTOR-OTW-RIDER-${runId}`);
-        const pA1 = await createTestParcel(`TEST-UNIT4-ACTOR-OTW-RIDER-${runId}`, { rider: techA1 });
+        const techA1 = await createTestTechnician(`TEST-UNIT4-ACTOR-OTW-RIDER-${runId}`);
+        const pA1 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-OTW-RIDER-${runId}`, { rider: techA1 });
         await callUpdateStatus(pA1.id, 'rider_arriving', techA1.email);
         const otwA1 = await notificationsFor(pA1.id, 'technician_on_the_way');
         logTest('1. Rider-triggered on-the-way transition persists actorRole rider', otwA1.length === 1 && otwA1[0].actorRole === 'rider');
 
-        const techA2 = await createTestRider(`TEST-UNIT4-ACTOR-OTW-ADMIN-${runId}`);
-        const pA2 = await createTestParcel(`TEST-UNIT4-ACTOR-OTW-ADMIN-${runId}`, { rider: techA2 });
+        const techA2 = await createTestTechnician(`TEST-UNIT4-ACTOR-OTW-ADMIN-${runId}`);
+        const pA2 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-OTW-ADMIN-${runId}`, { rider: techA2 });
         await callUpdateStatus(pA2.id, 'rider_arriving', ADMIN_EMAIL);
         const otwA2 = await notificationsFor(pA2.id, 'technician_on_the_way');
         logTest('2/3. Admin-triggered on-the-way transition persists actorRole admin, actorEmail is the authenticated caller', otwA2.length === 1 && otwA2[0].actorRole === 'admin' && otwA2[0].actorEmail === ADMIN_EMAIL.toLowerCase());
 
-        const techA3 = await createTestRider(`TEST-UNIT4-ACTOR-OTW-SPOOF-${runId}`);
-        const pA3 = await createTestParcel(`TEST-UNIT4-ACTOR-OTW-SPOOF-${runId}`, { rider: techA3 });
+        const techA3 = await createTestTechnician(`TEST-UNIT4-ACTOR-OTW-SPOOF-${runId}`);
+        const pA3 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-OTW-SPOOF-${runId}`, { rider: techA3 });
         await callUpdateStatus(pA3.id, 'rider_arriving', techA3.email, { actorRole: 'admin', role: 'admin' });
         const otwA3 = await notificationsFor(pA3.id, 'technician_on_the_way');
         logTest('4. Spoofed body actorRole has no effect on on-the-way', otwA3.length === 1 && otwA3[0].actorRole === 'rider');
 
-        const techA4 = await createTestRider(`TEST-UNIT4-ACTOR-OTW-MISSING-${runId}`);
-        const pA4 = await createTestParcel(`TEST-UNIT4-ACTOR-OTW-MISSING-${runId}`, { rider: techA4 });
+        const techA4 = await createTestTechnician(`TEST-UNIT4-ACTOR-OTW-MISSING-${runId}`);
+        const pA4 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-OTW-MISSING-${runId}`, { rider: techA4 });
         interceptActorRoleLookup(techA4.email, null);
         let missingActorRes;
         try {
@@ -6137,8 +6137,8 @@ async function testRepairLifecycleNotificationIntegration() {
         const otwA4 = await notificationsFor(pA4.id, 'technician_on_the_way');
         logTest('5/6. Missing actor record does not fail the on-the-way transition, and creates no notification', missingActorRes.statusCode === 200 && missingActorRes.body.matchedCount === 1 && otwA4.length === 0);
 
-        const techA5 = await createTestRider(`TEST-UNIT4-ACTOR-OTW-INVALID-${runId}`);
-        const pA5 = await createTestParcel(`TEST-UNIT4-ACTOR-OTW-INVALID-${runId}`, { rider: techA5 });
+        const techA5 = await createTestTechnician(`TEST-UNIT4-ACTOR-OTW-INVALID-${runId}`);
+        const pA5 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-OTW-INVALID-${runId}`, { rider: techA5 });
         interceptActorRoleLookup(techA5.email, { role: 'legacy_role' });
         let invalidActorRes;
         try {
@@ -6150,26 +6150,26 @@ async function testRepairLifecycleNotificationIntegration() {
         logTest('7/8/9. Invalid actor role does not fail the transition, creates no notification, and no fallback rider role is persisted anywhere', invalidActorRes.statusCode === 200 && invalidActorRes.body.matchedCount === 1 && otwA5.length === 0);
 
         // --- Repair-in-progress (10-15) ---
-        const techA6 = await createTestRider(`TEST-UNIT4-ACTOR-RIP-RIDER-${runId}`);
-        const pA6 = await createTestParcel(`TEST-UNIT4-ACTOR-RIP-RIDER-${runId}`, { rider: techA6, deliveryStatus: 'rider_arriving' });
+        const techA6 = await createTestTechnician(`TEST-UNIT4-ACTOR-RIP-RIDER-${runId}`);
+        const pA6 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-RIP-RIDER-${runId}`, { rider: techA6, deliveryStatus: 'rider_arriving' });
         await callUpdateStatus(pA6.id, 'parcel_picked_up', techA6.email);
         const ripA6 = await notificationsFor(pA6.id, 'repair_in_progress');
         logTest('10. Rider-triggered repair-in-progress transition persists actorRole rider', ripA6.length === 1 && ripA6[0].actorRole === 'rider');
 
-        const techA7 = await createTestRider(`TEST-UNIT4-ACTOR-RIP-ADMIN-${runId}`);
-        const pA7 = await createTestParcel(`TEST-UNIT4-ACTOR-RIP-ADMIN-${runId}`, { rider: techA7, deliveryStatus: 'rider_arriving' });
+        const techA7 = await createTestTechnician(`TEST-UNIT4-ACTOR-RIP-ADMIN-${runId}`);
+        const pA7 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-RIP-ADMIN-${runId}`, { rider: techA7, deliveryStatus: 'rider_arriving' });
         await callUpdateStatus(pA7.id, 'parcel_picked_up', ADMIN_EMAIL);
         const ripA7 = await notificationsFor(pA7.id, 'repair_in_progress');
         logTest('11. Admin-triggered repair-in-progress transition persists actorRole admin', ripA7.length === 1 && ripA7[0].actorRole === 'admin');
 
-        const techA8 = await createTestRider(`TEST-UNIT4-ACTOR-RIP-SPOOF-${runId}`);
-        const pA8 = await createTestParcel(`TEST-UNIT4-ACTOR-RIP-SPOOF-${runId}`, { rider: techA8, deliveryStatus: 'rider_arriving' });
+        const techA8 = await createTestTechnician(`TEST-UNIT4-ACTOR-RIP-SPOOF-${runId}`);
+        const pA8 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-RIP-SPOOF-${runId}`, { rider: techA8, deliveryStatus: 'rider_arriving' });
         await callUpdateStatus(pA8.id, 'parcel_picked_up', techA8.email, { actorRole: 'admin' });
         const ripA8 = await notificationsFor(pA8.id, 'repair_in_progress');
         logTest('12. Spoofed body actorRole has no effect on repair-in-progress', ripA8.length === 1 && ripA8[0].actorRole === 'rider');
 
-        const techA9 = await createTestRider(`TEST-UNIT4-ACTOR-RIP-MISSING-${runId}`);
-        const pA9 = await createTestParcel(`TEST-UNIT4-ACTOR-RIP-MISSING-${runId}`, { rider: techA9, deliveryStatus: 'rider_arriving' });
+        const techA9 = await createTestTechnician(`TEST-UNIT4-ACTOR-RIP-MISSING-${runId}`);
+        const pA9 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-RIP-MISSING-${runId}`, { rider: techA9, deliveryStatus: 'rider_arriving' });
         interceptActorRoleLookup(techA9.email, null);
         let missingActorRes9;
         try {
@@ -6180,8 +6180,8 @@ async function testRepairLifecycleNotificationIntegration() {
         const ripA9 = await notificationsFor(pA9.id, 'repair_in_progress');
         logTest('13/15(a). Missing actor role remains non-fatal for repair-in-progress, and creates no notification', missingActorRes9.statusCode === 200 && missingActorRes9.body.matchedCount === 1 && ripA9.length === 0);
 
-        const techA10 = await createTestRider(`TEST-UNIT4-ACTOR-RIP-INVALID-${runId}`);
-        const pA10 = await createTestParcel(`TEST-UNIT4-ACTOR-RIP-INVALID-${runId}`, { rider: techA10, deliveryStatus: 'rider_arriving' });
+        const techA10 = await createTestTechnician(`TEST-UNIT4-ACTOR-RIP-INVALID-${runId}`);
+        const pA10 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-RIP-INVALID-${runId}`, { rider: techA10, deliveryStatus: 'rider_arriving' });
         interceptActorRoleLookup(techA10.email, { role: 'legacy_role' });
         let invalidActorRes10;
         try {
@@ -6193,27 +6193,27 @@ async function testRepairLifecycleNotificationIntegration() {
         logTest('14/15(b). Invalid actor role remains non-fatal for repair-in-progress, and creates no notification', invalidActorRes10.statusCode === 200 && invalidActorRes10.body.matchedCount === 1 && ripA10.length === 0);
 
         // --- Completion (16-27) ---
-        const techA11 = await createTestRider(`TEST-UNIT4-ACTOR-COMP-RIDER-${runId}`);
-        const pA11 = await createTestParcel(`TEST-UNIT4-ACTOR-COMP-RIDER-${runId}`, { rider: techA11, deliveryStatus: 'parcel_picked_up' });
+        const techA11 = await createTestTechnician(`TEST-UNIT4-ACTOR-COMP-RIDER-${runId}`);
+        const pA11 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-COMP-RIDER-${runId}`, { rider: techA11, deliveryStatus: 'parcel_picked_up' });
         await callUpdateStatus(pA11.id, 'parcel_delivered', techA11.email);
         const rcA11 = await notificationsFor(pA11.id, 'repair_completed');
         logTest('16. Rider-triggered completion persists actorRole rider', rcA11.length === 1 && rcA11[0].actorRole === 'rider');
 
-        const techA12 = await createTestRider(`TEST-UNIT4-ACTOR-COMP-ADMIN-${runId}`);
-        const pA12 = await createTestParcel(`TEST-UNIT4-ACTOR-COMP-ADMIN-${runId}`, { rider: techA12, deliveryStatus: 'parcel_picked_up' });
+        const techA12 = await createTestTechnician(`TEST-UNIT4-ACTOR-COMP-ADMIN-${runId}`);
+        const pA12 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-COMP-ADMIN-${runId}`, { rider: techA12, deliveryStatus: 'parcel_picked_up' });
         await callUpdateStatus(pA12.id, 'parcel_delivered', ADMIN_EMAIL);
         const rcA12 = await notificationsFor(pA12.id, 'repair_completed');
         logTest('17. Admin-triggered completion persists actorRole admin', rcA12.length === 1 && rcA12[0].actorRole === 'admin');
 
-        const techA13 = await createTestRider(`TEST-UNIT4-ACTOR-COMP-SPOOF-${runId}`);
-        const pA13 = await createTestParcel(`TEST-UNIT4-ACTOR-COMP-SPOOF-${runId}`, { rider: techA13, deliveryStatus: 'parcel_picked_up' });
+        const techA13 = await createTestTechnician(`TEST-UNIT4-ACTOR-COMP-SPOOF-${runId}`);
+        const pA13 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-COMP-SPOOF-${runId}`, { rider: techA13, deliveryStatus: 'parcel_picked_up' });
         await callUpdateStatus(pA13.id, 'parcel_delivered', techA13.email, { actorRole: 'admin' });
         const rcA13 = await notificationsFor(pA13.id, 'repair_completed');
         logTest('19. Spoofed body actorRole has no effect on completion', rcA13.length === 1 && rcA13[0].actorRole === 'rider');
 
         // Missing actor user record aborts completion before any write.
-        const techA14 = await createTestRider(`TEST-UNIT4-ACTOR-COMP-MISSING-${runId}`);
-        const pA14 = await createTestParcel(`TEST-UNIT4-ACTOR-COMP-MISSING-${runId}`, { rider: techA14, deliveryStatus: 'parcel_picked_up' });
+        const techA14 = await createTestTechnician(`TEST-UNIT4-ACTOR-COMP-MISSING-${runId}`);
+        const pA14 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-COMP-MISSING-${runId}`, { rider: techA14, deliveryStatus: 'parcel_picked_up' });
         interceptActorRoleLookup(techA14.email, null);
         let missingActorCompleteRes;
         try {
@@ -6222,7 +6222,7 @@ async function testRepairLifecycleNotificationIntegration() {
             restoreUsersFindOne();
         }
         logTest('18/20. Actor lookup participates in the completion transaction, and a missing actor record aborts completion (409 REPAIR_ACTOR_ROLE_UNRESOLVED)', missingActorCompleteRes.statusCode === 409 && missingActorCompleteRes.body.code === 'REPAIR_ACTOR_ROLE_UNRESOLVED');
-        const pA14After = await models.Parcel.findById(pA14.id);
+        const pA14After = await models.RepairRequest.findById(pA14.id);
         const techA14After = await collections.technicians.findOne({ _id: new ObjectId(techA14.id) });
         const pA14Logs = await trackingLogsFor(pA14.trackingId);
         const rcA14 = await notificationsFor(pA14.id, 'repair_completed');
@@ -6234,8 +6234,8 @@ async function testRepairLifecycleNotificationIntegration() {
         logTest('27. Controlled error response contains no raw DB details', Object.keys(missingActorCompleteRes.body).sort().join(',') === 'code,message' && !/mongo|ECONNREFUSED|stack/i.test(JSON.stringify(missingActorCompleteRes.body)));
 
         // Invalid actor role aborts completion.
-        const techA15 = await createTestRider(`TEST-UNIT4-ACTOR-COMP-INVALID-${runId}`);
-        const pA15 = await createTestParcel(`TEST-UNIT4-ACTOR-COMP-INVALID-${runId}`, { rider: techA15, deliveryStatus: 'parcel_picked_up' });
+        const techA15 = await createTestTechnician(`TEST-UNIT4-ACTOR-COMP-INVALID-${runId}`);
+        const pA15 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-COMP-INVALID-${runId}`, { rider: techA15, deliveryStatus: 'parcel_picked_up' });
         interceptActorRoleLookup(techA15.email, { role: 'legacy_role' });
         let invalidActorCompleteRes;
         try {
@@ -6247,8 +6247,8 @@ async function testRepairLifecycleNotificationIntegration() {
 
         // A user-role actor (e.g. the customer themselves, somehow assigned)
         // is rejected exactly like any other non-rider/non-admin role.
-        const techA16 = await createTestRider(`TEST-UNIT4-ACTOR-COMP-USERROLE-${runId}`);
-        const pA16 = await createTestParcel(`TEST-UNIT4-ACTOR-COMP-USERROLE-${runId}`, { rider: techA16, deliveryStatus: 'parcel_picked_up' });
+        const techA16 = await createTestTechnician(`TEST-UNIT4-ACTOR-COMP-USERROLE-${runId}`);
+        const pA16 = await createTestRepairRequest(`TEST-UNIT4-ACTOR-COMP-USERROLE-${runId}`, { rider: techA16, deliveryStatus: 'parcel_picked_up' });
         interceptActorRoleLookup(techA16.email, { role: 'user' });
         let userRoleActorRes;
         try {
@@ -6369,7 +6369,7 @@ async function testPaymentNotificationIntegration() {
             await collections.users.insertOne({ email, role, createdAt: new Date() });
         }
 
-        async function createTestParcel(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL } = {}) {
+        async function createTestRepairRequest(marker, { cost = 30, senderEmail = CUSTOMER_EMAIL } = {}) {
             const doc = {
                 parcelName: marker, cost, senderEmail,
                 trackingId: `TEST-${runId}-${Math.random().toString(36).slice(2, 7)}`,
@@ -6437,7 +6437,7 @@ async function testPaymentNotificationIntegration() {
         logTest('14. No payment identifiers are permitted in metadata', (def.allowedMetadataKeys || []).every(k => k === 'trackingId'));
 
         // ================= SUCCESS: browser-verification, customer-owned (15-35) =================
-        const p1 = await createTestParcel(`TEST-UNIT5-BROWSER-CUST-${runId}`, { cost: 30 });
+        const p1 = await createTestRepairRequest(`TEST-UNIT5-BROWSER-CUST-${runId}`, { cost: 30 });
         const sid1 = newSessionId('browser_cust');
         stripeSessionFixtures.set(sid1, makeSessionObject(sid1, p1));
         // Spoofed body fields (role/recipientRole) are never read by
@@ -6460,13 +6460,13 @@ async function testPaymentNotificationIntegration() {
         logTest('27(contract). Metadata contains trackingId only', pc1.length === 1 && Object.keys(pc1[0].metadata).length === 1 && pc1[0].metadata.trackingId === p1.trackingId);
         logTest('28. Title/message/action URL exact', pc1.length === 1 && pc1[0].title === 'Payment confirmed' && pc1[0].message === `Your payment for repair request ${p1.trackingId} has been confirmed.` && pc1[0].actionUrl === `/dashboard/my-requests/${p1.id}`);
         logTest('29. Dedup key exact', pc1.length === 1 && pc1[0].deduplicationKey === `repair:${p1.id}:payment_confirmed`);
-        const p1After = await models.Parcel.findById(p1.id);
+        const p1After = await models.RepairRequest.findById(p1.id);
         logTest('30. Payment document commits', (await collections.payments.countDocuments({ sessionId: sid1 })) === 1);
         logTest('31. Parcel payment status commits', p1After.paymentStatus === 'paid');
         logTest('32. Notification commits in the same transaction (present alongside the paid parcel/payment doc)', pc1.length === 1 && p1After.paymentStatus === 'paid');
 
         // ================= SUCCESS: webhook, rider-owned (19-20) =================
-        const p2 = await createTestParcel(`TEST-UNIT5-WEBHOOK-RIDER-${runId}`, { cost: 30, senderEmail: riderOwnerEmail });
+        const p2 = await createTestRepairRequest(`TEST-UNIT5-WEBHOOK-RIDER-${runId}`, { cost: 30, senderEmail: riderOwnerEmail });
         const sid2 = newSessionId('webhook_rider');
         const res2 = await callWebhook(makeEvent(makeSessionObject(sid2, p2)));
         logTest('34. Existing webhook response unchanged', res2.statusCode === 200 && res2.body.received === true && res2.body.result === 'OK');
@@ -6475,14 +6475,14 @@ async function testPaymentNotificationIntegration() {
         logTest('19. Rider-owned parcel stores recipientRole rider', pc2.length === 1 && pc2[0].recipientRole === 'rider');
 
         // ================= SUCCESS: webhook, admin-owned (20) =================
-        const p3 = await createTestParcel(`TEST-UNIT5-ADMIN-${runId}`, { cost: 30, senderEmail: ADMIN_EMAIL });
+        const p3 = await createTestRepairRequest(`TEST-UNIT5-ADMIN-${runId}`, { cost: 30, senderEmail: ADMIN_EMAIL });
         const sid3 = newSessionId('admin');
         await callWebhook(makeEvent(makeSessionObject(sid3, p3)));
         const pc3 = await notificationsFor(p3.id);
         logTest('20. Admin-owned parcel stores recipientRole admin', pc3.length === 1 && pc3[0].recipientRole === 'admin');
 
         // ================= ROLLBACK (36-47) =================
-        const p4 = await createTestParcel(`TEST-UNIT5-NOTIFFAIL-${runId}`, { cost: 30 });
+        const p4 = await createTestRepairRequest(`TEST-UNIT5-NOTIFFAIL-${runId}`, { cost: 30 });
         const sid4 = newSessionId('notiffail');
         collections.notifications.insertOne = async (doc, options) => {
             if (doc.type === 'payment_confirmed' && doc.entityId === p4.id) throw new Error('simulated notification outage - do not leak this text');
@@ -6495,44 +6495,44 @@ async function testPaymentNotificationIntegration() {
             collections.notifications.insertOne = originalNotifInsertOne;
         }
         logTest('36/46. Forced notification failure aborts payment transaction with a controlled error (no raw DB message)', res4.statusCode === 500 && !JSON.stringify(res4.body).includes('simulated notification outage'));
-        const p4After = await models.Parcel.findById(p4.id);
+        const p4After = await models.RepairRequest.findById(p4.id);
         logTest('37. Failed notification leaves parcel unpaid', p4After.paymentStatus !== 'paid');
         logTest('38. Failed notification leaves no payment document', (await collections.payments.countDocuments({ sessionId: sid4 })) === 0);
         logTest('39. Failed notification leaves no notification', (await notificationsFor(p4.id)).length === 0);
 
         const retryRes4 = await callWebhook(makeEvent(makeSessionObject(sid4, p4)));
-        const p4Retry = await models.Parcel.findById(p4.id);
+        const p4Retry = await models.RepairRequest.findById(p4.id);
         logTest('40. Retry after failure can succeed', retryRes4.statusCode === 200 && retryRes4.body.result === 'OK' && p4Retry.paymentStatus === 'paid' && (await notificationsFor(p4.id)).length === 1);
 
         // --- Missing/invalid owner (41-45) ---
-        const p5 = await createTestParcel(`TEST-UNIT5-MISSINGOWNER-${runId}`, { cost: 30, senderEmail: orphanOwnerEmail });
+        const p5 = await createTestRepairRequest(`TEST-UNIT5-MISSINGOWNER-${runId}`, { cost: 30, senderEmail: orphanOwnerEmail });
         const sid5 = newSessionId('missingowner');
         const res5 = await callWebhook(makeEvent(makeSessionObject(sid5, p5)));
         logTest('41. Missing owner user aborts payment (webhook 200 ack, no retry storm)', res5.statusCode === 200 && res5.body.result === 'REPAIR_OWNER_ROLE_UNRESOLVED');
-        const p5After = await models.Parcel.findById(p5.id);
+        const p5After = await models.RepairRequest.findById(p5.id);
         logTest('43(a). Missing owner leaves parcel unpaid', p5After.paymentStatus !== 'paid');
         logTest('44(a). Missing owner leaves no payment', (await collections.payments.countDocuments({ sessionId: sid5 })) === 0);
         logTest('45(a). Missing owner leaves no notification', (await notificationsFor(p5.id)).length === 0);
 
-        const p6 = await createTestParcel(`TEST-UNIT5-INVALIDOWNER-${runId}`, { cost: 30, senderEmail: badRoleOwnerEmail });
+        const p6 = await createTestRepairRequest(`TEST-UNIT5-INVALIDOWNER-${runId}`, { cost: 30, senderEmail: badRoleOwnerEmail });
         const sid6 = newSessionId('invalidowner');
         stripeSessionFixtures.set(sid6, makeSessionObject(sid6, p6));
         const res6 = await verifyBrowser(sid6, badRoleOwnerEmail);
         logTest('42. Invalid owner role aborts payment (browser 409, controlled code)', res6.statusCode === 409 && res6.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
-        const p6After = await models.Parcel.findById(p6.id);
+        const p6After = await models.RepairRequest.findById(p6.id);
         logTest('43(b). Invalid owner leaves parcel unpaid', p6After.paymentStatus !== 'paid');
         logTest('44(b). Invalid owner leaves no payment', (await collections.payments.countDocuments({ sessionId: sid6 })) === 0);
         logTest('45(b). Invalid owner leaves no notification', (await notificationsFor(p6.id)).length === 0);
         logTest('46(b). Controlled error exposes no raw DB message', !/mongo|ECONNREFUSED|stack/i.test(JSON.stringify(res6.body)));
 
         // --- 47. Existing validation error behavior remains unchanged ---
-        const p7 = await createTestParcel(`TEST-UNIT5-AMOUNTCHECK-${runId}`, { cost: 30 });
+        const p7 = await createTestRepairRequest(`TEST-UNIT5-AMOUNTCHECK-${runId}`, { cost: 30 });
         const sid7 = newSessionId('amountcheck');
         const res7 = await callWebhook(makeEvent(makeSessionObject(sid7, p7, { amount_total: 100 })));
         logTest('47. Existing validation error behavior (amount mismatch) remains unchanged', res7.statusCode === 200 && res7.body.result === 'AMOUNT_MISMATCH');
 
         // ================= IDEMPOTENCY (48-61) =================
-        const p8 = await createTestParcel(`TEST-UNIT5-WEBHOOKFIRST-${runId}`, { cost: 30 });
+        const p8 = await createTestRepairRequest(`TEST-UNIT5-WEBHOOKFIRST-${runId}`, { cost: 30 });
         const sid8 = newSessionId('webhookfirst');
         const sessionObj8 = makeSessionObject(sid8, p8);
         stripeSessionFixtures.set(sid8, sessionObj8);
@@ -6541,7 +6541,7 @@ async function testPaymentNotificationIntegration() {
         logTest('48. Webhook-first creates exactly one notification', (await notificationsFor(p8.id)).length === 1);
         logTest('49/57. Browser replay after webhook creates none (alreadyProcessed path never invokes createNotification)', browserReplay8.body.alreadyProcessed === true && (await notificationsFor(p8.id)).length === 1);
 
-        const p9 = await createTestParcel(`TEST-UNIT5-BROWSERFIRST-${runId}`, { cost: 30 });
+        const p9 = await createTestRepairRequest(`TEST-UNIT5-BROWSERFIRST-${runId}`, { cost: 30 });
         const sid9 = newSessionId('browserfirst');
         const sessionObj9 = makeSessionObject(sid9, p9);
         stripeSessionFixtures.set(sid9, sessionObj9);
@@ -6550,7 +6550,7 @@ async function testPaymentNotificationIntegration() {
         logTest('50. Browser-first creates exactly one notification', browserFirst9.statusCode === 200 && browserFirst9.body.alreadyProcessed === false && (await notificationsFor(p9.id)).length === 1);
         logTest('51. Webhook replay after browser creates none', webhookReplay9.statusCode === 200 && webhookReplay9.body.result === 'OK' && (await notificationsFor(p9.id)).length === 1);
 
-        const p10 = await createTestParcel(`TEST-UNIT5-SAMESESSION-${runId}`, { cost: 30 });
+        const p10 = await createTestRepairRequest(`TEST-UNIT5-SAMESESSION-${runId}`, { cost: 30 });
         const sid10 = newSessionId('samesession');
         const event10 = makeEvent(makeSessionObject(sid10, p10));
         await callWebhook(event10);
@@ -6558,7 +6558,7 @@ async function testPaymentNotificationIntegration() {
         await callWebhook(event10);
         logTest('52. Replaying the same session repeatedly creates no duplicate', (await notificationsFor(p10.id)).length === 1);
 
-        const p11 = await createTestParcel(`TEST-UNIT5-CONCURRENT-${runId}`, { cost: 30 });
+        const p11 = await createTestRepairRequest(`TEST-UNIT5-CONCURRENT-${runId}`, { cost: 30 });
         const sid11 = newSessionId('concurrent');
         const sessionObj11 = makeSessionObject(sid11, p11);
         const concurrentResults = await Promise.all([
@@ -6566,7 +6566,7 @@ async function testPaymentNotificationIntegration() {
             callWebhook(makeEvent(sessionObj11, { eventId: newEventId('c2') })),
             callWebhook(makeEvent(sessionObj11, { eventId: newEventId('c3') }))
         ]);
-        const p11After = await models.Parcel.findById(p11.id);
+        const p11After = await models.RepairRequest.findById(p11.id);
         logTest(
             '53. Concurrent/race simulation results in one logical notification, no unsafe response',
             concurrentResults.every(r => r.statusCode === 200 || r.statusCode === 500) &&
@@ -6585,7 +6585,7 @@ async function testPaymentNotificationIntegration() {
         }).then(() => ({ inserted: true })).catch(err => ({ inserted: false, code: err.code }));
         logTest('56. Dedup unique index protects against double notification', dupProbe.inserted === false && dupProbe.code === 11000);
 
-        const p12 = await createTestParcel(`TEST-UNIT5-CONFLICT-${runId}`, { cost: 30 });
+        const p12 = await createTestRepairRequest(`TEST-UNIT5-CONFLICT-${runId}`, { cost: 30 });
         await collections.repairRequests.updateOne({ _id: new ObjectId(p12.id) }, { $set: { paymentStatus: 'paid' } });
         const sid12 = newSessionId('conflict');
         const res12 = await callWebhook(makeEvent(makeSessionObject(sid12, p12)));
@@ -6616,7 +6616,7 @@ async function testPaymentNotificationIntegration() {
         logTest('76. No new public notification creation route', true, 'routes/notifications.js and routes/payments.js not modified this unit - verified by diff review');
         logTest('77. No payment-failed notification created', !Object.keys(NOTIFICATION_EVENTS).includes('payment_failed'));
         logTest('78. No payment-cancelled notification created', !Object.keys(NOTIFICATION_EVENTS).includes('payment_cancelled'));
-        logTest('79. Lifecycle and technician integrations remain unchanged', true, 'controllers/parcelController.js not modified this unit - verified by diff review');
+        logTest('79. Lifecycle and technician integrations remain unchanged', true, 'controllers/repairRequestController.js not modified this unit - verified by diff review');
 
     } finally {
         await new Promise(resolve => setTimeout(resolve, 300));
@@ -7373,7 +7373,7 @@ async function testUserRolePrivacyHardening() {
     );
 
     // 13. Existing role authorization tests still pass - covered by the
-    // full suite (verifyAdmin/verifyRider sections elsewhere) continuing to
+    // full suite (verifyAdmin/verifyTechnician sections elsewhere) continuing to
     // pass unchanged; this section does not touch those middlewares.
 
     // 14. No database write occurs - getMyRole only ever calls the
@@ -7422,7 +7422,7 @@ async function testUserRoleUpdateSafety() {
         return result.insertedId;
     }
 
-    async function createTestRider(marker, { status = 'pending', email } = {}) {
+    async function createTestTechnician(marker, { status = 'pending', email } = {}) {
         const doc = {
             name: marker,
             email: email || `${marker.toLowerCase()}@test.local`,
@@ -7504,19 +7504,19 @@ async function testUserRoleUpdateSafety() {
         logTest('12. Role rider rejected when no rider document exists', res.statusCode === 409 && res.body?.code === 'RIDER_RECORD_NOT_FOUND');
 
         const pendingRiderEmail = `test-role-pending-${Date.now()}@test.local`;
-        await createTestRider(`TEST-ROLE-PENDING-${Date.now()}`, { status: 'pending', email: pendingRiderEmail });
+        await createTestTechnician(`TEST-ROLE-PENDING-${Date.now()}`, { status: 'pending', email: pendingRiderEmail });
         const pendingUserId = (await createTestUser(pendingRiderEmail, 'user')).toString();
         res = await callUpdateUserRole(pendingUserId, 'rider', ADMIN_EMAIL);
         logTest('13. Role rider rejected when rider status is pending', res.statusCode === 409 && res.body?.code === 'RIDER_NOT_APPROVED');
 
         const rejectedRiderEmail = `test-role-rejected-${Date.now()}@test.local`;
-        await createTestRider(`TEST-ROLE-REJECTED-${Date.now()}`, { status: 'rejected', email: rejectedRiderEmail });
+        await createTestTechnician(`TEST-ROLE-REJECTED-${Date.now()}`, { status: 'rejected', email: rejectedRiderEmail });
         const rejectedUserId = (await createTestUser(rejectedRiderEmail, 'user')).toString();
         res = await callUpdateUserRole(rejectedUserId, 'rider', ADMIN_EMAIL);
         logTest('14. Role rider rejected when rider status is rejected', res.statusCode === 409 && res.body?.code === 'RIDER_NOT_APPROVED');
 
         const approvedRiderEmail = `test-role-approved-${Date.now()}@test.local`;
-        await createTestRider(`TEST-ROLE-APPROVED-${Date.now()}`, { status: 'approved', email: approvedRiderEmail });
+        await createTestTechnician(`TEST-ROLE-APPROVED-${Date.now()}`, { status: 'approved', email: approvedRiderEmail });
         const approvedUserId = (await createTestUser(approvedRiderEmail, 'user')).toString();
         res = await callUpdateUserRole(approvedUserId, 'rider', ADMIN_EMAIL);
         logTest('15. Role rider accepted when approved rider exists', res.statusCode === 200 && res.body?.role === 'rider');
@@ -8161,7 +8161,7 @@ async function testServiceDefinitions() {
 // RIDER_EMAIL/CUSTOMER_EMAIL/ADMIN_EMAIL fixtures are never used as an
 // expertise-update target or requester, every created document is tracked
 // and deleted in `finally`, and no notification is ever created (this
-// section never calls createRider through the real notification fan-out
+// section never calls createTechnicianApplication through the real notification fan-out
 // path with a live admin - it inserts rider fixtures directly and calls
 // updateTechnicianExpertise directly, neither of which sends notifications).
 async function testTechnicianExpertise() {
@@ -8196,9 +8196,9 @@ async function testTechnicianExpertise() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const riderController = controllers.rider;
+        const riderController = controllers.technician;
 
-        async function createTestRider(marker, { status = 'approved', workStatus = 'available', email, expertise } = {}) {
+        async function createTestTechnician(marker, { status = 'approved', workStatus = 'available', email, expertise } = {}) {
             const doc = {
                 name: marker,
                 email: email || `${marker.toLowerCase()}-${runId}@test.local`,
@@ -8231,7 +8231,7 @@ async function testTechnicianExpertise() {
         function callCreateRider(body) {
             const req = { body };
             const res = fakeRes();
-            return riderController.createRider(req, res).then(() => res);
+            return riderController.createTechnicianApplication(req, res).then(() => res);
         }
 
         function callUpdateExpertise(riderId, expertise, decoded_email) {
@@ -8291,8 +8291,8 @@ async function testTechnicianExpertise() {
         logTest('17. Stored/read expertise mutation does not alter canonical state', readCopyAgain.level === 'intermediate' && readCopyAgain.repairCategorySlugs.length === 1);
 
         // ================= Legacy compatibility (18) =================
-        const legacyRider = await createTestRider(`TEST-EXPERTISE-LEGACY-${runId}`);
-        const legacyReadBack = await models.Rider.findById(legacyRider.id);
+        const legacyRider = await createTestTechnician(`TEST-EXPERTISE-LEGACY-${runId}`);
+        const legacyReadBack = await models.Technician.findById(legacyRider.id);
         logTest(
             '18. Legacy rider without expertise remains readable',
             legacyReadBack !== null && legacyReadBack.name === legacyRider.name && legacyReadBack.expertise === undefined
@@ -8347,7 +8347,7 @@ async function testTechnicianExpertise() {
 
         // ================= Update authorization (22-27) =================
         const selfEmail = `test-expertise-self-${runId}@test.local`;
-        const selfRider = await createTestRider(`TEST-EXPERTISE-SELF-${runId}`, { email: selfEmail });
+        const selfRider = await createTestTechnician(`TEST-EXPERTISE-SELF-${runId}`, { email: selfEmail });
         const selfUpdateRes = await callUpdateExpertise(selfRider.id, [validEntry()], selfEmail);
         const selfRiderAfter = await collections.technicians.findOne({ _id: new ObjectId(selfRider.id) });
         logTest(
@@ -8356,14 +8356,14 @@ async function testTechnicianExpertise() {
         );
 
         const otherTechEmail = `test-expertise-other-tech-${runId}@test.local`;
-        await createTestRider(`TEST-EXPERTISE-OTHERTECH-${runId}`, { email: otherTechEmail });
-        const targetForOtherTech = await createTestRider(`TEST-EXPERTISE-TARGET-A-${runId}`);
+        await createTestTechnician(`TEST-EXPERTISE-OTHERTECH-${runId}`, { email: otherTechEmail });
+        const targetForOtherTech = await createTestTechnician(`TEST-EXPERTISE-TARGET-A-${runId}`);
         const otherTechRes = await callUpdateExpertise(targetForOtherTech.id, [validEntry()], otherTechEmail);
         logTest('23. Technician cannot update another technician', otherTechRes.statusCode === 403 && otherTechRes.body.code === 'FORBIDDEN');
 
         const adminEmail = `test-expertise-admin-${runId}@test.local`;
         await createTestUser(adminEmail, 'admin');
-        const targetForAdmin = await createTestRider(`TEST-EXPERTISE-TARGET-B-${runId}`);
+        const targetForAdmin = await createTestTechnician(`TEST-EXPERTISE-TARGET-B-${runId}`);
         const adminUpdateRes = await callUpdateExpertise(targetForAdmin.id, [validEntry()], adminEmail);
         const targetForAdminAfter = await collections.technicians.findOne({ _id: new ObjectId(targetForAdmin.id) });
         logTest(
@@ -8373,7 +8373,7 @@ async function testTechnicianExpertise() {
 
         const normalUserEmail = `test-expertise-normaluser-${runId}@test.local`;
         await createTestUser(normalUserEmail, 'user');
-        const targetForNormalUser = await createTestRider(`TEST-EXPERTISE-TARGET-C-${runId}`);
+        const targetForNormalUser = await createTestTechnician(`TEST-EXPERTISE-TARGET-C-${runId}`);
         const normalUserRes = await callUpdateExpertise(targetForNormalUser.id, [validEntry()], normalUserEmail);
         logTest('25. Normal user cannot update expertise', normalUserRes.statusCode === 403 && normalUserRes.body.code === 'FORBIDDEN');
 
@@ -8386,7 +8386,7 @@ async function testTechnicianExpertise() {
 
         // ================= Active-assignment protection (28-31) =================
         const activeEmail = `test-expertise-active-${runId}@test.local`;
-        const activeRider = await createTestRider(`TEST-EXPERTISE-ACTIVE-${runId}`, { email: activeEmail, workStatus: 'in_delivery', expertise: [validEntry()] });
+        const activeRider = await createTestTechnician(`TEST-EXPERTISE-ACTIVE-${runId}`, { email: activeEmail, workStatus: 'in_delivery', expertise: [validEntry()] });
         await createActiveParcelFor(activeRider.id, `TEST-EXPERTISE-ACTIVE-PARCEL-${runId}`);
         const blockedRes = await callUpdateExpertise(activeRider.id, [validEntry({ level: 'expert', experienceYears: 10 })], activeEmail);
         logTest('28. Active technician expertise update blocked', blockedRes.statusCode === 409 && blockedRes.body.code === 'TECHNICIAN_HAS_ACTIVE_ASSIGNMENT');
@@ -8401,16 +8401,16 @@ async function testTechnicianExpertise() {
         // Real transactional assignment path, fully committed, THEN an
         // expertise-update attempt - the deterministic resolution of the
         // "assignment commits first" ordering Phase K describes, exercised
-        // through the actual assignRiderToParcel controller (not a raw
+        // through the actual assignTechnicianToRepairRequest controller (not a raw
         // pre-existing fixture like tests 28-30 above).
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
         function callAssign(parcelId, riderId) {
             const req = { params: { id: parcelId }, body: { riderId }, decoded_email: adminEmail };
             const res = fakeRes();
-            return parcelController.assignRiderToParcel(req, res).then(() => res);
+            return parcelController.assignTechnicianToRepairRequest(req, res).then(() => res);
         }
         const raceRiderEmail = `test-expertise-race-${runId}@test.local`;
-        const raceRider = await createTestRider(`TEST-EXPERTISE-RACE-${runId}`, { email: raceRiderEmail });
+        const raceRider = await createTestTechnician(`TEST-EXPERTISE-RACE-${runId}`, { email: raceRiderEmail });
         const raceParcelDoc = {
             // senderEmail must be a real users-collection account - the
             // assignment transaction resolves the owner's notification role
@@ -8438,10 +8438,10 @@ async function testTechnicianExpertise() {
         // also verified directly and deterministically here, independent of
         // network/timing luck.
         const staleGuardEmail = `test-expertise-staleguard-${runId}@test.local`;
-        const staleGuardRider = await createTestRider(`TEST-EXPERTISE-STALEGUARD-${runId}`, { email: staleGuardEmail });
+        const staleGuardRider = await createTestTechnician(`TEST-EXPERTISE-STALEGUARD-${runId}`, { email: staleGuardEmail });
         const winFirstRes = await callUpdateExpertise(staleGuardRider.id, [validEntry({ level: 'beginner', experienceYears: 0 })], staleGuardEmail);
         logTest('32a. First update on a fresh rider succeeds', winFirstRes.statusCode === 200);
-        const staleWriteResult = await models.Rider.replaceExpertise({
+        const staleWriteResult = await models.Technician.replaceExpertise({
             id: staleGuardRider.id,
             hasExpertiseField: false, // simulates a second request that read the ORIGINAL pre-update (no-expertise-field) state
             expectedExpertise: undefined,
@@ -8459,7 +8459,7 @@ async function testTechnicianExpertise() {
         let anyInvalidOutcome = false;
         for (let trial = 0; trial < 5; trial += 1) {
             const trialEmail = `test-expertise-race2-${runId}-${trial}@test.local`;
-            const trialRider = await createTestRider(`TEST-EXPERTISE-RACE2-${runId}-${trial}`, { email: trialEmail });
+            const trialRider = await createTestTechnician(`TEST-EXPERTISE-RACE2-${runId}-${trial}`, { email: trialEmail });
             const [rA, rB] = await Promise.all([
                 callUpdateExpertise(trialRider.id, [validEntry({ level: 'beginner', experienceYears: 0 })], trialEmail),
                 callUpdateExpertise(trialRider.id, [validEntry({ level: 'expert', experienceYears: 10 })], trialEmail)
@@ -8567,7 +8567,7 @@ async function testRepairRequestV2() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
         const paymentController = controllers.payment;
 
         async function createTestServiceDefinition(pair, overrides = {}) {
@@ -8590,7 +8590,7 @@ async function testRepairRequestV2() {
         function callCreateParcel(body, decoded_email) {
             const req = { body, decoded_email };
             const res = fakeRes();
-            return parcelController.createParcel(req, res).then(() => res);
+            return parcelController.createRepairRequest(req, res).then(() => res);
         }
 
         function callCreateCheckoutSession(parcelId, decoded_email) {
@@ -8619,7 +8619,7 @@ async function testRepairRequestV2() {
         }
 
         customerEmail = `test-request-v2-customer-${runId}@test.local`;
-        // assignRiderToParcel resolves the repair request's owner role from
+        // assignTechnicianToRepairRequest resolves the repair request's owner role from
         // the real users collection inside its own transaction (never
         // trusting the parcel document) and aborts if it can't - a synthetic
         // owner account is required here for test 57 (assignment
@@ -8792,21 +8792,21 @@ async function testRepairRequestV2() {
             legacyNoVersionRes.body.acknowledged === true && !!legacyNoVersionRes.body.insertedId &&
             Object.keys(legacyNoVersionRes.body).sort().join(',') === 'acknowledged,insertedId'
         );
-        const legacyReadBack = await models.Parcel.findById(legacyNoVersionRes.body.insertedId.toString());
+        const legacyReadBack = await models.RepairRequest.findById(legacyNoVersionRes.body.insertedId.toString());
         logTest('55. Legacy record without v2 fields remains readable', legacyReadBack !== null && legacyReadBack.parcelName === `TEST-REQUEST-V2-LEGACY-${runId}`);
 
-        const mixedListRes = await models.Parcel.findAll({ senderEmail: customerEmail });
+        const mixedListRes = await models.RepairRequest.findAll({ senderEmail: customerEmail });
         logTest('56. Existing legacy list path remains functional over mixed legacy/v2 data', Array.isArray(mixedListRes) && mixedListRes.length >= 2);
 
         const getByIdRes = fakeRes();
-        await parcelController.getParcelById({ params: { id: v2Res.body.insertedId.toString() }, decoded_email: customerEmail }, getByIdRes);
+        await parcelController.getRepairRequestById({ params: { id: v2Res.body.insertedId.toString() }, decoded_email: customerEmail }, getByIdRes);
         logTest(
             '56b. Existing GET /parcels/:id detail path does not throw on a v2 document and returns it to its owner',
             getByIdRes.statusCode === 200 && getByIdRes.body.schemaVersion === 2 && getByIdRes.body.product.categorySlug === 'smartphone'
         );
 
         const raceTechEmail = `test-request-v2-tech-${runId}@test.local`;
-        // Since Phase 6.3 Unit 6, assignRiderToParcel revalidates v2
+        // Since Phase 6.3 Unit 6, assignTechnicianToRepairRequest revalidates v2
         // eligibility - this fixture needs a complete profile, a linked
         // 'rider' account, and expertise matching activeDef (smartphone/
         // charging-port, requiredExpertiseLevel 'intermediate') to still be
@@ -8823,7 +8823,7 @@ async function testRepairRequestV2() {
         createdUserEmails.push(raceTechEmail);
         const assignV2Req = { params: { id: v2Res.body.insertedId.toString() }, body: { riderId: raceTechInsert.insertedId.toString() }, decoded_email: `test-request-v2-admin-${runId}@test.local` };
         const assignV2Res = fakeRes();
-        await parcelController.assignRiderToParcel(assignV2Req, assignV2Res);
+        await parcelController.assignTechnicianToRepairRequest(assignV2Req, assignV2Res);
         logTest('57. V2 request remains assignable through the (now expertise-aware, Phase 6.3 Unit 6) assignment path', assignV2Res.statusCode === 200);
 
         // ================= Payment guard (59-60) =================
@@ -8885,7 +8885,7 @@ async function testRepairRequestV2() {
         }
         // The synthetic customerEmail account (created for test 57's real
         // assignment path) also receives a real technician_assigned
-        // notification via assignRiderToParcel - scoped and removed here by
+        // notification via assignTechnicianToRepairRequest - scoped and removed here by
         // entityId (this section's own parcel ids), matching the
         // established convention.
         if (createdParcelIds.length) {
@@ -9046,7 +9046,7 @@ async function testEligibleTechnicianAPI() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
 
         async function createTestServiceDefinition(pair, overrides = {}) {
             const now = new Date();
@@ -9070,7 +9070,7 @@ async function testEligibleTechnicianAPI() {
             await collections.users.insertOne({ email, role, createdAt: new Date() });
         }
 
-        async function createTestRider(marker, overrides = {}) {
+        async function createTestTechnician(marker, overrides = {}) {
             const doc = {
                 name: marker, email: `${marker.toLowerCase()}-${runId}@test.local`,
                 region: 'Dhaka', district: 'Mirpur', status: 'approved', workStatus: 'available',
@@ -9086,7 +9086,7 @@ async function testEligibleTechnicianAPI() {
         function callCreateParcel(body, decoded_email) {
             const req = { body, decoded_email };
             const res = fakeRes();
-            return parcelController.createParcel(req, res).then(() => res);
+            return parcelController.createRepairRequest(req, res).then(() => res);
         }
 
         function callGetEligible(requestId, query, decoded_email) {
@@ -9131,8 +9131,8 @@ async function testEligibleTechnicianAPI() {
 
         // ---- Route and authorization (1-4) ----
         // The controller method itself has no internal role check - like
-        // every other admin-only route in this codebase (deleteParcel,
-        // getDeliveryStatusStats, updateRiderStatus), it relies entirely on
+        // every other admin-only route in this codebase (deleteRepairRequest,
+        // getDeliveryStatusStats, updateTechnicianStatus), it relies entirely on
         // the route's own verifyFBToken + verifyAdmin middleware chain.
         // Calling the controller directly (as callGetEligible does)
         // therefore cannot exercise authorization at all - the real
@@ -9220,13 +9220,13 @@ async function testEligibleTechnicianAPI() {
         logTest('11. Request/service mismatch rejected', mismatchEligRes.statusCode === 409 && mismatchEligRes.body.code === 'REQUEST_SERVICE_MISMATCH');
 
         // ---- Real end-to-end candidates ----
-        const eligibleRider1 = await createTestRider(`TEST-ELIGIBILITY-ELIGIBLE1-${runId}`, {
+        const eligibleRider1 = await createTestTechnician(`TEST-ELIGIBILITY-ELIGIBLE1-${runId}`, {
             region: 'Dhaka', district: 'Mirpur',
             expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'advanced', experienceYears: 5 }]
         });
         await createTestUser(eligibleRider1.email, 'rider');
 
-        const eligibleRider2 = await createTestRider(`TEST-ELIGIBILITY-ELIGIBLE2-${runId}`, {
+        const eligibleRider2 = await createTestTechnician(`TEST-ELIGIBILITY-ELIGIBLE2-${runId}`, {
             region: 'Dhaka', district: 'Gulshan',
             expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'expert', experienceYears: 8 }]
         });
@@ -9248,10 +9248,10 @@ async function testEligibleTechnicianAPI() {
         const cancelledInsert = await collections.repairRequests.insertOne(cancelledDoc);
         createdParcelIds.push(cancelledInsert.insertedId.toString());
 
-        const pendingRider = await createTestRider(`TEST-ELIGIBILITY-PENDING-${runId}`, { status: 'pending' });
+        const pendingRider = await createTestTechnician(`TEST-ELIGIBILITY-PENDING-${runId}`, { status: 'pending' });
         await createTestUser(pendingRider.email, 'user');
 
-        const busyRiderFixture = await createTestRider(`TEST-ELIGIBILITY-BUSY-${runId}`);
+        const busyRiderFixture = await createTestTechnician(`TEST-ELIGIBILITY-BUSY-${runId}`);
         await createTestUser(busyRiderFixture.email, 'rider');
         const activeParcelDoc = {
             parcelName: `TEST-ELIGIBILITY-ACTIVE-${runId}`, cost: 40, senderEmail: customerEmail,
@@ -9291,9 +9291,9 @@ async function testEligibleTechnicianAPI() {
         const diagnosticRes = await callGetEligible(v2RequestId, { diagnostic: 'true' }, adminEmail);
         logTest('47. diagnostic=true returns controlled reasons', Array.isArray(diagnosticRes.body.ineligibleTechnicians));
 
-        const diagTaxonomy = es.deriveRequestTaxonomy(await models.Parcel.findById(v2RequestId));
+        const diagTaxonomy = es.deriveRequestTaxonomy(await models.RepairRequest.findById(v2RequestId));
         const diagServiceDef = await models.ServiceDefinition.findById(serviceDef.id);
-        const diagActiveIds = await models.Parcel.findRiderIdsWithDeliveryStatuses([busyRiderFixture.id, pendingRider.id], ['driver_assigned', 'rider_arriving', 'parcel_picked_up']);
+        const diagActiveIds = await models.RepairRequest.findRiderIdsWithDeliveryStatuses([busyRiderFixture.id, pendingRider.id], ['driver_assigned', 'rider_arriving', 'parcel_picked_up']);
         const busyRiderDoc = await collections.technicians.findOne({ _id: new ObjectId(busyRiderFixture.id) });
         const pendingRiderDoc = await collections.technicians.findOne({ _id: new ObjectId(pendingRider.id) });
         const busyEval = es.evaluateTechnician(busyRiderDoc, { requestTaxonomy: diagTaxonomy, serviceDefinition: diagServiceDef, activeRiderIds: diagActiveIds, riderRole: 'rider' });
@@ -9372,10 +9372,10 @@ async function testEligibleTechnicianAPI() {
         });
         logTest('67. No invalid compound multikey index', !hasInvalidCompoundMultikey);
 
-        const legacyStatusBeforeRes = await models.Parcel.findById(legacyRequestId);
+        const legacyStatusBeforeRes = await models.RepairRequest.findById(legacyRequestId);
         logTest('68. Legacy assignment behavior unchanged (legacy request still readable/unassigned as before)', legacyStatusBeforeRes.riderId === undefined);
 
-        const v2StatusRes = await models.Parcel.findById(v2RequestId);
+        const v2StatusRes = await models.RepairRequest.findById(v2RequestId);
         logTest('69. Existing v2 assignment behavior unchanged (still assignable, unmodified by eligibility reads)', v2StatusRes.deliveryStatus === 'pending-pickup');
 
         // 70 is the full 996+ suite passing end-to-end across three
@@ -9404,7 +9404,7 @@ async function testEligibleTechnicianAPI() {
         }
 
         // senderEmail (not trackingId) is the reliable leftover marker here -
-        // parcels created through the real createParcel controller receive a
+        // parcels created through the real createRepairRequest controller receive a
         // randomly-generated trackingId that would never match a runId-based
         // pattern, but every parcel this section created (via the real
         // controller or a direct insert) consistently used this run's
@@ -9420,7 +9420,7 @@ async function testEligibleTechnicianAPI() {
 }
 
 // Phase 6.3 Unit 6 - Assignment-Time Expertise Revalidation. Exercises the
-// modified assignRiderToParcel transaction directly (the real controller
+// modified assignTechnicianToRepairRequest transaction directly (the real controller
 // method, not a re-implementation) against a real local dev database,
 // mirroring testEligibleTechnicianAPI's self-contained synthetic-fixture
 // pattern so this section never depends on real seeded accounts or on
@@ -9454,8 +9454,8 @@ async function testAssignmentExpertiseRevalidation() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const parcelController = controllers.parcel;
-        const riderController = controllers.rider;
+        const parcelController = controllers.repairRequest;
+        const riderController = controllers.technician;
 
         async function createTestServiceDefinition(pair, overrides = {}) {
             const now = new Date();
@@ -9485,7 +9485,7 @@ async function testAssignmentExpertiseRevalidation() {
         // every fixture meant to be genuinely eligible needs one. Pass null
         // to deliberately omit the linked account, or an explicit different
         // role to construct a role-mismatch fixture.
-        async function createTestRider(marker, overrides = {}, linkedRole = 'rider') {
+        async function createTestTechnician(marker, overrides = {}, linkedRole = 'rider') {
             const doc = {
                 name: `TEST-ASSIGNEXPERT-${marker}`, email: `assignexpert-${marker.toLowerCase()}-${runId}@test.local`,
                 region: 'Dhaka', district: 'Mirpur', status: 'approved', workStatus: 'available',
@@ -9504,13 +9504,13 @@ async function testAssignmentExpertiseRevalidation() {
         function callCreateParcel(body, decoded_email) {
             const req = { body, decoded_email };
             const res = fakeRes();
-            return parcelController.createParcel(req, res).then(() => res);
+            return parcelController.createRepairRequest(req, res).then(() => res);
         }
 
         function callAssign(parcelId, riderId, decoded_email) {
             const req = { params: { id: parcelId }, body: { riderId }, decoded_email };
             const res = fakeRes();
-            return parcelController.assignRiderToParcel(req, res).then(() => res);
+            return parcelController.assignTechnicianToRepairRequest(req, res).then(() => res);
         }
 
         function callUpdateExpertise(riderId, expertise, decoded_email) {
@@ -9535,7 +9535,7 @@ async function testAssignmentExpertiseRevalidation() {
         // afterward (Phase E-I: "state must be read again fresh" means a
         // definition that was active at request-creation time but has since
         // been turned off must still block assignment) - creating it
-        // pre-deactivated would be rejected by createParcel's own
+        // pre-deactivated would be rejected by createRepairRequest's own
         // creation-time validation, so the deactivation has to happen after.
         const inactivableServiceDef = await createTestServiceDefinition(
             { productCategorySlug: 'smartphone', repairCategorySlug: 'software-os' },
@@ -9569,7 +9569,7 @@ async function testAssignmentExpertiseRevalidation() {
 
         // ---- Legacy dispatch is completely untouched (1-3) ----
         const legacyParcelId = await createLegacyParcel('DISPATCH');
-        const legacyIneligibleRider = await createTestRider('LEGACY-INELIGIBLE', { expertise: [] });
+        const legacyIneligibleRider = await createTestTechnician('LEGACY-INELIGIBLE', { expertise: [] });
         const legacyAssignRes = await callAssign(legacyParcelId, legacyIneligibleRider.id, adminEmail);
         logTest(
             '1. Legacy request assignable to a rider with no usable expertise (v2 block never reached)',
@@ -9577,7 +9577,7 @@ async function testAssignmentExpertiseRevalidation() {
         );
         const legacyRiderAfter = await collections.technicians.findOne({ _id: new ObjectId(legacyIneligibleRider.id) });
         logTest('2. Legacy assignment claims the rider exactly as before (workStatus in_delivery)', legacyRiderAfter.workStatus === 'in_delivery');
-        const legacyParcelAfter = await models.Parcel.findById(legacyParcelId);
+        const legacyParcelAfter = await models.RepairRequest.findById(legacyParcelId);
         logTest(
             '3. Legacy success response/side effects unchanged (riderId/riderName/riderEmail set, deliveryStatus driver_assigned)',
             legacyParcelAfter.riderId === legacyIneligibleRider.id && legacyParcelAfter.deliveryStatus === 'driver_assigned' &&
@@ -9586,7 +9586,7 @@ async function testAssignmentExpertiseRevalidation() {
 
         // ---- v2 happy path: eligible technician, response/side-effect parity with legacy (4-9) ----
         const eligibleParcelId = await createV2Parcel();
-        const eligibleRider = await createTestRider('ELIGIBLE');
+        const eligibleRider = await createTestTechnician('ELIGIBLE');
         const trackingCountBefore = await collections.trackingEvents.countDocuments({});
         const notifCountBefore = await collections.notifications.countDocuments({});
         const eligibleAssignRes = await callAssign(eligibleParcelId, eligibleRider.id, adminEmail);
@@ -9618,7 +9618,7 @@ async function testAssignmentExpertiseRevalidation() {
         // ---- Hard-eligibility rejections, one per reason code (10-16) ----
         async function expectRejected(marker, riderOverrides, expectedReasonCode, linkedRole = 'rider') {
             const parcelId = await createV2Parcel();
-            const rider = await createTestRider(marker, riderOverrides, linkedRole);
+            const rider = await createTestTechnician(marker, riderOverrides, linkedRole);
             const res = await callAssign(parcelId, rider.id, adminEmail);
             const parcelAfter = await collections.repairRequests.findOne({ _id: new ObjectId(parcelId) });
             const riderAfter = await collections.technicians.findOne({ _id: new ObjectId(rider.id) });
@@ -9650,7 +9650,7 @@ async function testAssignmentExpertiseRevalidation() {
         const rNoLinkedUser = await expectRejected('NO-LINKED-USER', {}, 'TECHNICIAN_ROLE_INCONSISTENT', null);
         logTest('15. Rider with no linked users-collection account rejected with TECHNICIAN_ROLE_INCONSISTENT', rNoLinkedUser.rejected);
 
-        const roleMismatchRider = await createTestRider('ROLE-MISMATCH', {}, 'user');
+        const roleMismatchRider = await createTestTechnician('ROLE-MISMATCH', {}, 'user');
         const roleMismatchParcelId = await createV2Parcel();
         const roleMismatchRes = await callAssign(roleMismatchParcelId, roleMismatchRider.id, adminEmail);
         logTest(
@@ -9660,7 +9660,7 @@ async function testAssignmentExpertiseRevalidation() {
 
         // ---- Higher expertise than required still succeeds (17) ----
         const higherLevelParcelId = await createV2Parcel();
-        const higherLevelRider = await createTestRider('HIGHER-LEVEL', {
+        const higherLevelRider = await createTestTechnician('HIGHER-LEVEL', {
             expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'expert', experienceYears: 8 }]
         });
         const higherLevelRes = await callAssign(higherLevelParcelId, higherLevelRider.id, adminEmail);
@@ -9668,12 +9668,12 @@ async function testAssignmentExpertiseRevalidation() {
 
         // ---- Service area is ranking-only, never a hard gate (18-19) ----
         const differentRegionParcelId = await createV2Parcel();
-        const differentRegionRider = await createTestRider('DIFF-REGION', { region: 'Chittagong', district: 'Pahartali' });
+        const differentRegionRider = await createTestTechnician('DIFF-REGION', { region: 'Chittagong', district: 'Pahartali' });
         const differentRegionRes = await callAssign(differentRegionParcelId, differentRegionRider.id, adminEmail);
         logTest('18. Technician in a completely different region/district is still assignable', differentRegionRes.statusCode === 200);
 
         const differentDistrictParcelId = await createV2Parcel();
-        const differentDistrictRider = await createTestRider('DIFF-DISTRICT', { district: 'Gulshan' });
+        const differentDistrictRider = await createTestTechnician('DIFF-DISTRICT', { district: 'Gulshan' });
         const differentDistrictRes = await callAssign(differentDistrictParcelId, differentDistrictRider.id, adminEmail);
         logTest('19. Technician in the same region but a different district is still assignable', differentDistrictRes.statusCode === 200);
 
@@ -9687,7 +9687,7 @@ async function testAssignmentExpertiseRevalidation() {
         // proves the definition's current isActive state (not its state at
         // request-creation time) is what gates assignment.
         await collections.serviceDefinitions.updateOne({ _id: new ObjectId(inactivableServiceDef.id) }, { $set: { isActive: false } });
-        const inactiveDefRider = await createTestRider('INACTIVE-DEF', {
+        const inactiveDefRider = await createTestTechnician('INACTIVE-DEF', {
             expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['software-os'], level: 'advanced', experienceYears: 5 }]
         });
         const inactiveDefRes = await callAssign(inactiveDefParcelId, inactiveDefRider.id, adminEmail);
@@ -9702,7 +9702,7 @@ async function testAssignmentExpertiseRevalidation() {
         // request's own historical snapshot (still 'smartphone') no longer
         // matches the definition's current productCategorySlug.
         await collections.serviceDefinitions.updateOne({ _id: new ObjectId(serviceDef.id) }, { $set: { productCategorySlug: 'laptop-computer' } });
-        const mismatchDefRider = await createTestRider('MISMATCH-DEF');
+        const mismatchDefRider = await createTestTechnician('MISMATCH-DEF');
         const mismatchDefRes = await callAssign(mismatchDefParcelId, mismatchDefRider.id, adminEmail);
         logTest(
             '21. Service definition repointed to a different product blocks assignment (REQUEST_SERVICE_MISMATCH)',
@@ -9721,7 +9721,7 @@ async function testAssignmentExpertiseRevalidation() {
             product: { categorySlug: 'smartphone', brand: 'TestBrand', model: 'TestModel' },
             service: { definitionId: serviceDef.id, repairCategorySlug: 'motherboard' },
             // region present, district deliberately omitted - directly
-            // inserted since the real createParcel v2 path would reject an
+            // inserted since the real createRepairRequest v2 path would reject an
             // incomplete taxonomy at creation time and this defensive branch
             // can only otherwise be reached by pre-existing/corrupt data.
             serviceLocation: { region: 'Dhaka' },
@@ -9729,7 +9729,7 @@ async function testAssignmentExpertiseRevalidation() {
         };
         const incompleteInsert = await collections.repairRequests.insertOne(incompleteTaxonomyParcel);
         createdParcelIds.push(incompleteInsert.insertedId.toString());
-        const incompleteTaxonomyRider = await createTestRider('INCOMPLETE-TAXONOMY');
+        const incompleteTaxonomyRider = await createTestTechnician('INCOMPLETE-TAXONOMY');
         const incompleteTaxonomyRes = await callAssign(incompleteInsert.insertedId.toString(), incompleteTaxonomyRider.id, adminEmail);
         logTest(
             '22. Request with incomplete persisted v2 taxonomy is rejected, not crashed, on assignment',
@@ -9738,7 +9738,7 @@ async function testAssignmentExpertiseRevalidation() {
 
         // ---- Redundant reassignment to the same technician keeps its existing, more specific outcome (23) ----
         const redundantParcelId = await createV2Parcel();
-        const redundantRider = await createTestRider('REDUNDANT');
+        const redundantRider = await createTestTechnician('REDUNDANT');
         const firstAssignRes = await callAssign(redundantParcelId, redundantRider.id, adminEmail);
         logTest('23a. Setup: first assignment for redundant-reassignment case succeeds', firstAssignRes.statusCode === 200);
         // Downgrades the rider's expertise via a raw write (bypassing
@@ -9760,26 +9760,26 @@ async function testAssignmentExpertiseRevalidation() {
         // record at all, reusing Unit 4/5's REPAIR_OWNER_ROLE_UNRESOLVED
         // fixture pattern - proves this pre-existing guard still runs first.
         // Deliberately distinct from the 'NO-OWNER' rider marker below -
-        // createTestRider now auto-links a 'rider'-role account at
+        // createTestTechnician now auto-links a 'rider'-role account at
         // assignexpert-no-owner-*, so reusing that exact address here would
         // accidentally give this "nonexistent" owner a real account.
         await collections.repairRequests.updateOne({ _id: new ObjectId(noOwnerParcelId) }, { $set: { senderEmail: `assignexpert-nonexistent-owner-${runId}@test.local` } });
-        const noOwnerRider = await createTestRider('NO-OWNER');
+        const noOwnerRider = await createTestTechnician('NO-OWNER');
         const noOwnerRes = await callAssign(noOwnerParcelId, noOwnerRider.id, adminEmail);
         logTest('24. Unresolved owner role still blocks assignment before the new v2 eligibility block runs', noOwnerRes.statusCode === 409 && noOwnerRes.body.code === 'REPAIR_OWNER_ROLE_UNRESOLVED');
 
         const notApprovedParcelId = await createV2Parcel();
-        const notApprovedRider = await createTestRider('NOT-APPROVED', { status: 'pending' });
+        const notApprovedRider = await createTestTechnician('NOT-APPROVED', { status: 'pending' });
         const notApprovedRes = await callAssign(notApprovedParcelId, notApprovedRider.id, adminEmail);
         logTest('25. Not-approved technician still rejected with the existing TECHNICIAN_NOT_APPROVED (pre-existing check, unchanged)', notApprovedRes.statusCode === 409 && notApprovedRes.body.code === 'TECHNICIAN_NOT_APPROVED');
 
         const unavailableParcelId = await createV2Parcel();
-        const unavailableRider = await createTestRider('UNAVAILABLE', { workStatus: 'in_delivery' });
+        const unavailableRider = await createTestTechnician('UNAVAILABLE', { workStatus: 'in_delivery' });
         const unavailableRes = await callAssign(unavailableParcelId, unavailableRider.id, adminEmail);
         logTest('26. Unavailable technician still rejected with the existing RIDER_UNAVAILABLE (pre-existing check, unchanged)', unavailableRes.statusCode === 409 && unavailableRes.body.code === 'RIDER_UNAVAILABLE');
 
         // ---- Concurrency guard: deterministic proof of the stale-expertise guard condition (27-28) ----
-        const guardRider = await createTestRider('GUARD-DETERMINISTIC');
+        const guardRider = await createTestTechnician('GUARD-DETERMINISTIC');
         const capturedExpertise = guardRider.expertise;
         await collections.technicians.updateOne({ _id: new ObjectId(guardRider.id) }, { $set: { expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'beginner', experienceYears: 0 }] } });
         const staleGuardResult = await collections.technicians.updateOne(
@@ -9800,7 +9800,7 @@ async function testAssignmentExpertiseRevalidation() {
         let raceConflictObserved = false;
         for (let trial = 0; trial < 5; trial++) {
             const raceParcelId = await createV2Parcel();
-            const raceRider = await createTestRider(`RACE-${trial}`);
+            const raceRider = await createTestTechnician(`RACE-${trial}`);
             const raceOriginalExpertise = raceRider.expertise;
             const raceDowngradedExpertise = [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'beginner', experienceYears: 0 }];
 
@@ -9832,9 +9832,9 @@ async function testAssignmentExpertiseRevalidation() {
         logTest('29b. At least one real write conflict was observed across the 5 concurrent trials (genuine contention, not two calls that never actually overlapped)', raceConflictObserved);
 
         // ---- Reuse, not duplication, of Unit 5's eligibility service (30) ----
-        const eligibilityServiceSource = require('fs').readFileSync(require('path').join(__dirname, 'controllers', 'parcelController.js'), 'utf8');
+        const eligibilityServiceSource = require('fs').readFileSync(require('path').join(__dirname, 'controllers', 'repairRequestController.js'), 'utf8');
         logTest(
-            '30. assignRiderToParcel reuses evaluateTechnician/deriveRequestTaxonomy/validateCurrentServiceDefinition rather than re-deriving the rules',
+            '30. assignTechnicianToRepairRequest reuses evaluateTechnician/deriveRequestTaxonomy/validateCurrentServiceDefinition rather than re-deriving the rules',
             eligibilityServiceSource.includes("require('../services/technicianEligibilityService')") &&
             /evaluateTechnician\(/.test(eligibilityServiceSource) && /deriveRequestTaxonomy\(/.test(eligibilityServiceSource)
         );
@@ -9886,7 +9886,7 @@ async function testAssignmentExpertiseRevalidation() {
 // services/damageStorageService.js singleton - matching this unit's own
 // preferred test strategy (Phase W): pure/injected-adapter tests only, no
 // external Firebase Storage contact anywhere in the ordinary suite. Parcel
-// creation goes through the real, shared controllers.parcel from
+// creation goes through the real, shared controllers.repairRequest from
 // initializeControllers() exactly like every other section; only the
 // damage-upload controller instance in this section uses the fake adapter.
 async function testDamageUploadFoundation() {
@@ -9960,7 +9960,7 @@ async function testDamageUploadFoundation() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
 
         const fakeBucket = createFakeDamageBucket();
         const fakeStorage = new DamageStorageService({ bucket: fakeBucket });
@@ -10003,7 +10003,7 @@ async function testDamageUploadFoundation() {
         function callCreateParcel(body, decoded_email) {
             const req = { body, decoded_email };
             const res = fakeRes();
-            return parcelController.createParcel(req, res).then(() => res);
+            return parcelController.createRepairRequest(req, res).then(() => res);
         }
 
         async function createV2Parcel(ownerEmail = customerEmail, overrides = {}) {
@@ -10438,12 +10438,12 @@ async function testDamageUploadFoundation() {
 
         // ---- Route wiring (structural, since these tests use direct controller invocation) (62-63) ----
         const routesSource = require('fs').readFileSync(require('path').join(__dirname, 'routes', 'damageUploads.js'), 'utf8');
-        // Comments explaining the deliberate absence of verifyAdmin/verifyRider
+        // Comments explaining the deliberate absence of verifyAdmin/verifyTechnician
         // legitimately mention those identifiers in prose - strip //-style
         // comments first so test 63 checks actual usage, not word mentions.
         const routesSourceCode = routesSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
         logTest('62. Damage-upload routes are wired with verifyFBToken and ensureDatabaseReady', /verifyFBToken/.test(routesSourceCode) && /ensureDatabaseReady/.test(routesSourceCode));
-        logTest('63. No admin-only bypass exists on damage-upload routes (ownership is the sole authorization boundary, by design)', !/verifyAdmin/.test(routesSourceCode) && !/verifyRider/.test(routesSourceCode));
+        logTest('63. No admin-only bypass exists on damage-upload routes (ownership is the sole authorization boundary, by design)', !/verifyAdmin/.test(routesSourceCode) && !/verifyTechnician/.test(routesSourceCode));
 
     } finally {
         if (createdSessionIds.length) {
@@ -10554,7 +10554,7 @@ async function testAuthorizedDamageImageAccess() {
         await connectDatabase();
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
 
         const fakeBucket = createFakeDamageBucket();
         const fakeStorage = new DamageStorageService({ bucket: fakeBucket });
@@ -10565,7 +10565,7 @@ async function testAuthorizedDamageImageAccess() {
             await collections.users.insertOne({ email, role, createdAt: new Date() });
         }
 
-        async function createTestRider(marker, linkedRole = 'rider') {
+        async function createTestTechnician(marker, linkedRole = 'rider') {
             const doc = {
                 name: `TEST-DAMAGE-ACCESS-${marker}`, email: `damage-access-${marker.toLowerCase()}-${runId}@test.local`,
                 region: 'Dhaka', district: 'Mirpur', status: 'approved', workStatus: 'available',
@@ -10597,10 +10597,10 @@ async function testAuthorizedDamageImageAccess() {
         await createTestUser(otherCustomerEmail, 'user');
         await createTestUser(adminEmail, 'admin');
 
-        const assignedRider = await createTestRider('ASSIGNED');
-        const reassignedToRider = await createTestRider('REASSIGNED-TO');
-        const unassignedRider = await createTestRider('UNASSIGNED');
-        const roleMismatchRider = await createTestRider('ROLE-MISMATCH', 'user');
+        const assignedRider = await createTestTechnician('ASSIGNED');
+        const reassignedToRider = await createTestTechnician('REASSIGNED-TO');
+        const unassignedRider = await createTestTechnician('UNASSIGNED');
+        const roleMismatchRider = await createTestTechnician('ROLE-MISMATCH', 'user');
 
         function validV2Body(overrides = {}) {
             return {
@@ -10616,7 +10616,7 @@ async function testAuthorizedDamageImageAccess() {
         function callCreateParcel(body, decoded_email) {
             const req = { body, decoded_email };
             const res = fakeRes();
-            return parcelController.createParcel(req, res).then(() => res);
+            return parcelController.createRepairRequest(req, res).then(() => res);
         }
 
         async function createV2Parcel(owner = ownerEmail, overrides = {}) {
@@ -10910,7 +10910,7 @@ async function testAuthorizedDamageImageAccess() {
         const routesSourceCode = routesSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
         logTest(
             '68. GET damage-images list route is wired with verifyFBToken/ensureDatabaseReady only (live role resolution, not route-level admin/rider gating)',
-            /app\.get\(\s*\n?\s*'\/parcels\/:id\/damage-images'/.test(routesSourceCode) && !/verifyAdmin/.test(routesSourceCode) && !/verifyRider/.test(routesSourceCode)
+            /app\.get\(\s*\n?\s*'\/parcels\/:id\/damage-images'/.test(routesSourceCode) && !/verifyAdmin/.test(routesSourceCode) && !/verifyTechnician/.test(routesSourceCode)
         );
 
         // ---- Regression (69) ----
@@ -11015,7 +11015,7 @@ async function testBdtPricingMigration() {
         const sd = collections.serviceDefinitions;
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
         const paymentController = controllers.payment;
 
         // ================= Canonical seed integrity (1-14) =================
@@ -11105,7 +11105,7 @@ async function testBdtPricingMigration() {
             };
         }
         const ownerEmail = `test-bdt-customer-${runId}@test.local`;
-        const createRes = await (async () => { const res = fakeRes(); await parcelController.createParcel({ body: bdtV2Body(), decoded_email: ownerEmail }, res); return res; })();
+        const createRes = await (async () => { const res = fakeRes(); await parcelController.createRepairRequest({ body: bdtV2Body(), decoded_email: ownerEmail }, res); return res; })();
         logTest('25. New V2 request created against a BDT definition', createRes.statusCode === 200 && !!createRes.body.insertedId);
         const bdtParcelId = createRes.body.insertedId.toString();
         createdParcelIds.push(bdtParcelId);
@@ -11114,8 +11114,8 @@ async function testBdtPricingMigration() {
         logTest('27. Snapshot minimum matches the selected definition', bdtParcel.pricing.estimateMin === 1200);
         logTest('28. Snapshot maximum matches the selected definition', bdtParcel.pricing.estimateMax === 4500);
         logTest('29. Snapshot pricingVersion matches the definition (calculationVersion 2)', bdtParcel.pricing.calculationVersion === 2);
-        const clientPriceRes = await (async () => { const res = fakeRes(); await parcelController.createParcel({ body: bdtV2Body({ pricing: { estimateMin: 1, estimateMax: 2 } }), decoded_email: ownerEmail }, res); return res; })();
-        const clientCurrencyRes = await (async () => { const res = fakeRes(); await parcelController.createParcel({ body: bdtV2Body({ currency: 'usd' }), decoded_email: ownerEmail }, res); return res; })();
+        const clientPriceRes = await (async () => { const res = fakeRes(); await parcelController.createRepairRequest({ body: bdtV2Body({ pricing: { estimateMin: 1, estimateMax: 2 } }), decoded_email: ownerEmail }, res); return res; })();
+        const clientCurrencyRes = await (async () => { const res = fakeRes(); await parcelController.createRepairRequest({ body: bdtV2Body({ currency: 'usd' }), decoded_email: ownerEmail }, res); return res; })();
         logTest('30. Client-supplied price/currency rejected (server pricing authority)', clientPriceRes.statusCode === 400 && clientPriceRes.body.code === 'CLIENT_PRICING_NOT_ALLOWED' && clientCurrencyRes.statusCode === 400 && clientCurrencyRes.body.code === 'CLIENT_PRICING_NOT_ALLOWED');
 
         // ================= Snapshot immutability (31-32, Phase H) =================
@@ -11137,11 +11137,11 @@ async function testBdtPricingMigration() {
         };
         const usdInsert = await sd.insertOne(usdDef);
         createdDefIds.push(usdInsert.insertedId);
-        const usdV2Res = await (async () => { const res = fakeRes(); await parcelController.createParcel({ body: { schemaVersion: 2, product: { categorySlug: 'laptop-computer', brand: 'B', model: 'M' }, service: { definitionId: usdInsert.insertedId.toString() }, damage: { description: 'Laptop will not power on after a liquid spill on the keyboard.' }, serviceLocation: validLocation() }, decoded_email: ownerEmail }, res); return res; })();
+        const usdV2Res = await (async () => { const res = fakeRes(); await parcelController.createRepairRequest({ body: { schemaVersion: 2, product: { categorySlug: 'laptop-computer', brand: 'B', model: 'M' }, service: { definitionId: usdInsert.insertedId.toString() }, damage: { description: 'Laptop will not power on after a liquid spill on the keyboard.' }, serviceLocation: validLocation() }, decoded_email: ownerEmail }, res); return res; })();
         const usdParcelId = usdV2Res.body.insertedId.toString();
         createdParcelIds.push(usdParcelId);
         const usdParcelBefore = await collections.repairRequests.findOne({ _id: new ObjectId(usdParcelId) });
-        const legacyRes = await (async () => { const res = fakeRes(); await parcelController.createParcel({ body: { parcelName: `TEST-BDT-LEGACY-${runId}`, cost: 55 }, decoded_email: ownerEmail }, res); return res; })();
+        const legacyRes = await (async () => { const res = fakeRes(); await parcelController.createRepairRequest({ body: { parcelName: `TEST-BDT-LEGACY-${runId}`, cost: 55 }, decoded_email: ownerEmail }, res); return res; })();
         const legacyParcelId = legacyRes.body.insertedId.toString();
         createdParcelIds.push(legacyParcelId);
         const paymentDoc = { sessionId: `cs_test_bdt_${runId}`, parcelId: usdParcelId, ownerEmail, amount: 55, currency: 'usd', status: 'paid', createdAt: new Date() };
@@ -11231,7 +11231,7 @@ async function testInspectionWorkflow() {
         const models = initializeModels(collections);
         const controllers = initializeControllers(models, collections);
         const inspectionController = controllers.inspection;
-        const parcelController = controllers.parcel;
+        const parcelController = controllers.repairRequest;
 
         // ---- synthetic identities ----
         const ownerEmail = `inspection-owner-${runId}@test.local`;
@@ -11265,7 +11265,7 @@ async function testInspectionWorkflow() {
 
         // Inserts a fresh, isolated v2 request. Defaults: picked up, assigned
         // to techRider, no inspection yet, with a real BDT pricing snapshot.
-        async function createParcel(overrides = {}) {
+        async function createRepairRequest(overrides = {}) {
             const now = new Date();
             const doc = {
                 schemaVersion: 2,
@@ -11315,7 +11315,7 @@ async function testInspectionWorkflow() {
 
         // ================= Authorization (1-9) =================
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const noRole = await callSubmit(p.id, `inspection-nobody-${runId}@test.local`, validPayload());
             logTest('1. Non-owner/non-tech (unknown) submit is not-found (existence-oracle safe)', noRole.statusCode === 404 && noRole.body.code === 'REQUEST_NOT_FOUND');
 
@@ -11333,7 +11333,7 @@ async function testInspectionWorkflow() {
         }
         {
             // 6. role removed between assignment and submission.
-            const p = await createParcel();
+            const p = await createRepairRequest();
             await collections.users.updateOne({ email: techEmail }, { $set: { role: 'user' } });
             const roleRemoved = await callSubmit(p.id, techEmail, validPayload());
             await collections.users.updateOne({ email: techEmail }, { $set: { role: 'rider' } });
@@ -11342,7 +11342,7 @@ async function testInspectionWorkflow() {
         let happyInspection = null;
         {
             // 7. assigned rider can submit (the canonical happy path).
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const ok = await callSubmit(p.id, techEmail, validPayload());
             happyInspection = ok;
             logTest('7. Assigned rider can submit', ok.statusCode === 201 && ok.body.code === undefined && ok.body.deliveryStatus === INSPECTION_COMPLETED);
@@ -11350,12 +11350,12 @@ async function testInspectionWorkflow() {
 
         // ================= Lifecycle (10-16) =================
         for (const [label, status, num] of [['pending-pickup', 'pending-pickup', 10], ['driver_assigned', 'driver_assigned', 11], ['rider_arriving', 'rider_arriving', 12], ['parcel_delivered', 'parcel_delivered', 14], ['cancelled', 'cancelled', 15]]) {
-            const p = await createParcel({ deliveryStatus: status });
+            const p = await createRepairRequest({ deliveryStatus: status });
             const r = await callSubmit(p.id, techEmail, validPayload());
             logTest(`${num}. Status '${label}' rejected for inspection`, r.statusCode === 409 && r.body.code === 'INSPECTION_NOT_ALLOWED');
         }
         {
-            const p = await createParcel(); // parcel_picked_up
+            const p = await createRepairRequest(); // parcel_picked_up
             const r = await callSubmit(p.id, techEmail, validPayload());
             logTest('13. parcel_picked_up accepted', r.statusCode === 201);
             const again = await callSubmit(p.id, techEmail, validPayload());
@@ -11363,14 +11363,14 @@ async function testInspectionWorkflow() {
         }
         {
             // 9. legacy request rejected.
-            const legacy = await createParcel({ schemaVersion: undefined, product: undefined, service: undefined, pricing: undefined, parcelName: `TEST-INSPECTION-LEGACY-${runId}`, cost: 50 });
+            const legacy = await createRepairRequest({ schemaVersion: undefined, product: undefined, service: undefined, pricing: undefined, parcelName: `TEST-INSPECTION-LEGACY-${runId}`, cost: 50 });
             const r = await callSubmit(legacy.id, techEmail, validPayload());
             logTest('9. Legacy request rejected', r.statusCode === 400 && r.body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
         }
 
         // ================= Validation (17-32) =================
         async function expectInvalid(num, name, payload, expectedCode) {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const r = await callSubmit(p.id, techEmail, payload);
             logTest(`${num}. ${name}`, r.statusCode === 400 && r.body.code === expectedCode);
         }
@@ -11392,7 +11392,7 @@ async function testInspectionWorkflow() {
         await expectInvalid('31b', 'Mongo-style operator in label rejected', validPayload({ diagnosis: { summary: validPayload().diagnosis.summary, detectedIssues: [{ label: { $ne: '' }, severity: 'minor' }] } }), 'INVALID_DETECTED_ISSUES');
         {
             // 32. unknown authority fields ignored safely (accepted, never persisted).
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const r = await callSubmit(p.id, techEmail, validPayload({ status: 'not_started', submittedByEmail: 'attacker@evil.com', version: 999, approvedAmount: 10, payableAmount: 20, quoteStatus: 'approved' }));
             const doc = await collections.repairRequests.findOne({ _id: p._id });
             const insp = doc.inspection;
@@ -11402,7 +11402,7 @@ async function testInspectionWorkflow() {
 
         // ================= Persistence (33-40) =================
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const beforePricing = JSON.parse(JSON.stringify(p.pricing));
             const stripeBefore = capturedStripeSessionParams.length;
             const r = await callSubmit(p.id, techEmail, validPayload());
@@ -11427,7 +11427,7 @@ async function testInspectionWorkflow() {
         }
         {
             // 42. no partial persistence on a failed submit.
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const r = await callSubmit(p.id, techEmail, validPayload({ repairability: { decision: 'bad', reason: 'long enough reason text here' } }));
             const doc = await collections.repairRequests.findOne({ _id: p._id });
             logTest('42. Failed submit persists neither inspection nor status change', r.statusCode === 400 && doc.inspection === undefined && doc.deliveryStatus === 'parcel_picked_up');
@@ -11436,7 +11436,7 @@ async function testInspectionWorkflow() {
         // ================= Concurrency (43-46) =================
         {
             // 43. genuine double-submit race - exactly one winner.
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const [a, b] = await Promise.all([callSubmit(p.id, techEmail, validPayload()), callSubmit(p.id, techEmail, validPayload())]);
             const statuses = [a.statusCode, b.statusCode].sort();
             const inspCount = await collections.repairRequests.countDocuments({ _id: p._id, 'inspection.status': 'submitted' });
@@ -11446,21 +11446,21 @@ async function testInspectionWorkflow() {
         }
         {
             // 44. reassignment blocks the stale technician.
-            const p = await createParcel();
+            const p = await createRepairRequest();
             await collections.repairRequests.updateOne({ _id: p._id }, { $set: { riderId: otherRiderId, riderEmail: otherTechEmail } });
             const r = await callSubmit(p.id, techEmail, validPayload());
             logTest('44. Reassignment blocks stale technician', r.statusCode === 404 && r.body.code === 'REQUEST_NOT_FOUND');
         }
         {
             // 45. status change blocks stale submission.
-            const p = await createParcel();
+            const p = await createRepairRequest();
             await collections.repairRequests.updateOne({ _id: p._id }, { $set: { deliveryStatus: 'parcel_delivered' } });
             const r = await callSubmit(p.id, techEmail, validPayload());
             logTest('45. Status-change blocks stale submission', r.statusCode === 409 && r.body.code === 'INSPECTION_NOT_ALLOWED');
         }
         {
             // 46. role removal blocks (covered by test 6; re-assert distinctly).
-            const p = await createParcel();
+            const p = await createRepairRequest();
             await collections.users.updateOne({ email: techEmail }, { $set: { role: 'user' } });
             const r = await callSubmit(p.id, techEmail, validPayload());
             await collections.users.updateOne({ email: techEmail }, { $set: { role: 'rider' } });
@@ -11469,7 +11469,7 @@ async function testInspectionWorkflow() {
 
         // ================= Tracking / Notification (49-54) =================
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             await callSubmit(p.id, techEmail, validPayload());
             const events = await collections.trackingEvents.find({ trackingId: p.trackingId, status: INSPECTION_COMPLETED }).toArray();
             logTest('49. Exactly one tracking event written', events.length === 1);
@@ -11488,7 +11488,7 @@ async function testInspectionWorkflow() {
         }
         {
             // 50/53. failed submit creates no tracking event and no notification.
-            const p = await createParcel();
+            const p = await createRepairRequest();
             await callSubmit(p.id, techEmail, validPayload({ diagnosis: undefined }));
             const trk = await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: INSPECTION_COMPLETED });
             const ntf = await collections.notifications.countDocuments({ deduplicationKey: `repair:${p.id}:inspection_completed` });
@@ -11497,7 +11497,7 @@ async function testInspectionWorkflow() {
 
         // ================= Read endpoint (55-63) =================
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             await callSubmit(p.id, techEmail, validPayload());
             const asOwner = await callGet(p.id, ownerEmail);
             logTest('55. Owner may read inspection', asOwner.statusCode === 200 && asOwner.body.inspection.status === 'submitted' && asOwner.body.inspection.diagnosis.summary.length > 0);
@@ -11513,10 +11513,10 @@ async function testInspectionWorkflow() {
         }
         {
             // 63. legacy read controlled.
-            const legacy = await createParcel({ schemaVersion: undefined, product: undefined, pricing: undefined, parcelName: `TEST-INSPECTION-LEGACY-READ-${runId}`, cost: 40 });
+            const legacy = await createRepairRequest({ schemaVersion: undefined, product: undefined, pricing: undefined, parcelName: `TEST-INSPECTION-LEGACY-READ-${runId}`, cost: 40 });
             const r = await callGet(legacy.id, ownerEmail);
             logTest('63. Legacy read controlled', r.statusCode === 400 && r.body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
-            const notStarted = await callGet((await createParcel()).id, ownerEmail);
+            const notStarted = await callGet((await createRepairRequest()).id, ownerEmail);
             logTest('63b. Not-yet-inspected v2 request reads status not_started', notStarted.statusCode === 200 && notStarted.body.inspection.status === 'not_started');
         }
 
@@ -11526,7 +11526,7 @@ async function testInspectionWorkflow() {
             logTest('69. Canonical BDT service-definition count remains 16', canonicalCount === 16);
             const created = await (async () => {
                 const res = fakeRes();
-                await parcelController.createParcel({ body: { schemaVersion: 2, product: { categorySlug: 'smartphone', brand: 'B', model: 'M' }, service: { definitionId: new ObjectId().toString() }, damage: { description: 'A brand new v2 request created during the inspection regression check.' }, serviceLocation: { region: 'Dhaka', district: 'Dhaka', address: '5 Rd' } }, decoded_email: ownerEmail }, res);
+                await parcelController.createRepairRequest({ body: { schemaVersion: 2, product: { categorySlug: 'smartphone', brand: 'B', model: 'M' }, service: { definitionId: new ObjectId().toString() }, damage: { description: 'A brand new v2 request created during the inspection regression check.' }, serviceLocation: { region: 'Dhaka', district: 'Dhaka', address: '5 Rd' } }, decoded_email: ownerEmail }, res);
                 return res;
             })();
             // Non-existent definitionId -> controlled validation error, but the
@@ -11605,7 +11605,7 @@ async function testQuoteWorkflow() {
         let seq = 0;
         function makeTrackingId() { const t = `TEST-QUOTE-${runId}-${seq++}`; usedTrackingIds.push(t); return t; }
 
-        async function createParcel(overrides = {}) {
+        async function createRepairRequest(overrides = {}) {
             const now = new Date();
             const doc = {
                 schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail,
@@ -11626,40 +11626,40 @@ async function testQuoteWorkflow() {
         const submit = (pid, email, body) => { const res = fakeRes(); return quoteController.submitQuote({ params: { id: pid }, body, decoded_email: email }, res).then(() => res); };
         const decide = (pid, email, body) => { const res = fakeRes(); return quoteController.decideQuote({ params: { id: pid }, body, decoded_email: email }, res).then(() => res); };
         const getQ = (pid, email) => { const res = fakeRes(); return quoteController.getQuote({ params: { id: pid }, decoded_email: email }, res).then(() => res); };
-        async function submittedParcel() { const p = await createParcel(); await submit(p.id, techEmail, validQuote()); return p; }
+        async function submittedParcel() { const p = await createRepairRequest(); await submit(p.id, techEmail, validQuote()); return p; }
 
         // ================= Submit authorization (1-10) =================
         await makeRequest({ hostname: 'localhost', port: 3000, path: '/parcels/507f1f77bcf86cd799439011/quote', method: 'POST' }, 401, '1. Unauthenticated quote submit rejected (401)');
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             logTest('2. Customer cannot submit quote', (await submit(p.id, ownerEmail, validQuote())).body.code === 'TECHNICIAN_ROLE_REQUIRED');
             logTest('3. Admin cannot submit quote', (await submit(p.id, adminEmail, validQuote())).body.code === 'TECHNICIAN_ROLE_REQUIRED');
             logTest('4. Unrelated technician gets existence-oracle-safe 404', (await submit(p.id, otherTechEmail, validQuote())).statusCode === 404);
         }
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             await collections.repairRequests.updateOne({ _id: p._id }, { $set: { riderId: otherRiderId, riderEmail: otherTechEmail } });
             logTest('5. Reassigned rider (stale) blocked', (await submit(p.id, techEmail, validQuote())).statusCode === 404);
         }
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             await collections.users.updateOne({ email: techEmail }, { $set: { role: 'user' } });
             const r = await submit(p.id, techEmail, validQuote());
             await collections.users.updateOne({ email: techEmail }, { $set: { role: 'rider' } });
             logTest('6. Removed rider role blocked', r.statusCode === 403 && r.body.code === 'TECHNICIAN_ROLE_REQUIRED');
         }
-        logTest('7. Pre-inspection request rejected', (await submit((await createParcel({ deliveryStatus: 'parcel_picked_up' })).id, techEmail, validQuote())).body.code === 'QUOTE_NOT_ALLOWED');
+        logTest('7. Pre-inspection request rejected', (await submit((await createRepairRequest({ deliveryStatus: 'parcel_picked_up' })).id, techEmail, validQuote())).body.code === 'QUOTE_NOT_ALLOWED');
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const ok = await submit(p.id, techEmail, validQuote());
             logTest('8. inspection_completed quote accepted', ok.statusCode === 201 && ok.body.deliveryStatus === QUOTE_SUBMITTED);
             logTest('10. Duplicate quote rejected', (await submit(p.id, techEmail, validQuote())).body.code === 'QUOTE_ALREADY_SUBMITTED');
         }
-        logTest('9. Legacy request rejected', (await submit((await createParcel({ schemaVersion: undefined, product: undefined, inspection: undefined, pricing: undefined, parcelName: `TEST-QUOTE-LEGACY-${runId}`, cost: 40 })).id, techEmail, validQuote())).body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
+        logTest('9. Legacy request rejected', (await submit((await createRepairRequest({ schemaVersion: undefined, product: undefined, inspection: undefined, pricing: undefined, parcelName: `TEST-QUOTE-LEGACY-${runId}`, cost: 40 })).id, techEmail, validQuote())).body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
 
         // ================= Validation (11-18) =================
         async function invalid(num, name, body, code) {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const r = await submit(p.id, techEmail, body);
             logTest(`${num}. ${name}`, r.statusCode === 400 && r.body.code === code);
         }
@@ -11674,7 +11674,7 @@ async function testQuoteWorkflow() {
 
         // ================= Persistence (19-25) =================
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const beforePricing = JSON.stringify(p.pricing);
             const beforeInsp = JSON.stringify(p.inspection);
             const stripeBefore = capturedStripeSessionParams.length;
@@ -11725,7 +11725,7 @@ async function testQuoteWorkflow() {
 
         // ================= Tracking / Notification (36-41) =================
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             await submit(p.id, techEmail, validQuote());
             await decide(p.id, ownerEmail, { decision: 'approve' });
             logTest('36. quote_submitted tracking event once', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED })) === 1);
@@ -11747,14 +11747,14 @@ async function testQuoteWorkflow() {
             logTest('37b. Technician quote_approved notification once', apprNotif.length === 1 && apprNotif[0].recipientEmail === techEmail && apprNotif[0].recipientRole === 'rider');
         }
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             await submit(p.id, techEmail, validQuote());
             await decide(p.id, ownerEmail, { decision: 'reject', reason: 'Prefer to replace the device.' });
             logTest('38. quote_rejected tracking event once', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_REJECTED })) === 1);
         }
         {
             // 39. failed submit -> no tracking event, no notification.
-            const p = await createParcel();
+            const p = await createRepairRequest();
             await submit(p.id, techEmail, validQuote({ laborAmount: -5 }));
             logTest('39. Failed submit creates no tracking/notification', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED })) === 0 && (await collections.notifications.countDocuments({ deduplicationKey: `repair:${p.id}:quote_submitted` })) === 0);
         }
@@ -11851,7 +11851,7 @@ async function testV2PaymentWorkflow() {
             submittedByRiderId: techInsert.insertedId, decidedAt: new Date(), decisionReason: null, version: 1, ...o,
         });
 
-        async function createParcel(overrides = {}) {
+        async function createRepairRequest(overrides = {}) {
             const now = new Date();
             const doc = {
                 schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail, parcelName: `TEST-PAY-DEVICE-${runId}`,
@@ -11885,50 +11885,50 @@ async function testV2PaymentWorkflow() {
 
         // ================= Eligibility (1-10) =================
         {
-            const p = await createParcel({ quote: undefined, deliveryStatus: QUOTE_SUBMITTED });
+            const p = await createRepairRequest({ quote: undefined, deliveryStatus: QUOTE_SUBMITTED });
             logTest('1. No quote -> ineligible (NO_QUOTE)', getV2PaymentEligibility(p).code === 'NO_QUOTE');
         }
         {
-            const p = await createParcel({ quote: approvedQuote({ status: 'submitted' }), deliveryStatus: QUOTE_SUBMITTED });
+            const p = await createRepairRequest({ quote: approvedQuote({ status: 'submitted' }), deliveryStatus: QUOTE_SUBMITTED });
             logTest('2. Submitted (undecided) quote -> ineligible (QUOTE_NOT_APPROVED)', getV2PaymentEligibility(p).code === 'QUOTE_NOT_APPROVED');
         }
         {
-            const p = await createParcel({ quote: approvedQuote({ status: 'rejected' }), deliveryStatus: 'quote_rejected' });
+            const p = await createRepairRequest({ quote: approvedQuote({ status: 'rejected' }), deliveryStatus: 'quote_rejected' });
             logTest('3. Rejected quote -> ineligible (QUOTE_REJECTED)', getV2PaymentEligibility(p).code === 'QUOTE_REJECTED');
         }
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const e = getV2PaymentEligibility(p);
             logTest('4. Approved quote -> eligible with amount+BDT', e.eligible === true && e.amount === 4500 && e.currency === 'BDT' && e.quoteVersion === 1);
         }
         {
-            const p = await createParcel({ deliveryStatus: 'parcel_picked_up' });
+            const p = await createRepairRequest({ deliveryStatus: 'parcel_picked_up' });
             logTest('5. Approved quote but wrong deliveryStatus -> ineligible (INVALID_PAYMENT_STATE)', getV2PaymentEligibility(p).code === 'INVALID_PAYMENT_STATE');
         }
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             logTest('6. Non-owner eligibility check rejected (403)', (await elig(p.id, otherEmail)).statusCode === 403);
         }
         {
-            const legacy = await createParcel({ schemaVersion: undefined, quote: undefined, product: undefined, inspection: undefined, pricing: undefined, cost: 40, deliveryStatus: 'parcel_picked_up' });
+            const legacy = await createRepairRequest({ schemaVersion: undefined, quote: undefined, product: undefined, inspection: undefined, pricing: undefined, cost: 40, deliveryStatus: 'parcel_picked_up' });
             logTest('7. Legacy isolation: v2 eligibility rejects legacy (NOT_V2_REQUEST)', getV2PaymentEligibility(legacy).code === 'NOT_V2_REQUEST');
         }
         {
-            const p = await createParcel({ quote: approvedQuote({ totalAmount: 0 }) });
+            const p = await createRepairRequest({ quote: approvedQuote({ totalAmount: 0 }) });
             logTest('8. Zero amount -> ineligible (INVALID_QUOTE_AMOUNT)', getV2PaymentEligibility(p).code === 'INVALID_QUOTE_AMOUNT');
         }
         {
-            const p = await createParcel({ quote: approvedQuote({ currency: 'usd' }) });
+            const p = await createRepairRequest({ quote: approvedQuote({ currency: 'usd' }) });
             logTest('9. Non-BDT quote currency -> ineligible (INVALID_QUOTE_CURRENCY)', getV2PaymentEligibility(p).code === 'INVALID_QUOTE_CURRENCY');
         }
         {
-            const p = await createParcel({ deliveryStatus: PAYMENT_COMPLETED, payment: { status: 'completed', provider: 'stripe', amount: 4500, currency: 'BDT' } });
+            const p = await createRepairRequest({ deliveryStatus: PAYMENT_COMPLETED, payment: { status: 'completed', provider: 'stripe', amount: 4500, currency: 'BDT' } });
             logTest('10. Already paid -> ineligible (ALREADY_PAID)', getV2PaymentEligibility(p).code === 'ALREADY_PAID');
         }
 
         // ================= Authority: client cannot influence amount/currency (11-16) =================
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const before = capturedStripeSessionParams.length;
             const r = await createIntent(p.id, ownerEmail, { amount: 999999, currency: 'usd', totalAmount: 1, status: 'completed', paymentIntentId: 'pi_evil', customerEmail: otherEmail });
             const cap = capturedStripeSessionParams[capturedStripeSessionParams.length - 1];
@@ -11943,7 +11943,7 @@ async function testV2PaymentWorkflow() {
 
         // ================= Intent creation (17-22) =================
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const before = capturedStripeSessionParams.length;
             const r = await createIntent(p.id, ownerEmail);
             const cap = capturedStripeSessionParams[capturedStripeSessionParams.length - 1];
@@ -11960,7 +11960,7 @@ async function testV2PaymentWorkflow() {
         }
         {
             // 22. Parallel intent creation -> exactly one payable session created.
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const before = capturedStripeSessionParams.length;
             const [a, b] = await Promise.all([createIntent(p.id, ownerEmail), createIntent(p.id, ownerEmail)]);
             const created = capturedStripeSessionParams.length - before;
@@ -11974,28 +11974,28 @@ async function testV2PaymentWorkflow() {
         logTest('23. Client-only success (unknown session) cannot complete (404)', (await pay(makeSid(), ownerEmail)).statusCode === 404);
         {
             // 24. Mismatched requestId: session points at a different owner's parcel.
-            const other = await createParcel({ senderEmail: otherEmail });
+            const other = await createRepairRequest({ senderEmail: otherEmail });
             const sid = setPaidSession(makeSid(), { parcelId: other.id, trackingId: other.trackingId, customer_email: ownerEmail });
             logTest('24. Mismatched requestId/owner rejected (403)', (await pay(sid, ownerEmail)).statusCode === 403);
         }
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const sid = setPaidSession(makeSid(), { parcelId: p.id, trackingId: p.trackingId, amount_total: 100 });
             logTest('25. Mismatched amount rejected (409)', (await pay(sid, ownerEmail)).statusCode === 409);
         }
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const sid = setPaidSession(makeSid(), { parcelId: p.id, trackingId: p.trackingId, currency: 'usd' });
             logTest('26. Mismatched currency rejected (409)', (await pay(sid, ownerEmail)).statusCode === 409);
         }
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const sid = setPaidSession(makeSid(), { parcelId: p.id, trackingId: p.trackingId, payment_status: 'unpaid' });
             logTest('27. Untrusted/unpaid PaymentIntent rejected (409 NOT_PAID)', (await pay(sid, ownerEmail)).statusCode === 409);
         }
         {
             // 28-35. Happy-path verified completion.
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const beforePricing = JSON.stringify(p.pricing);
             const beforeInsp = JSON.stringify(p.inspection);
             const beforeQuote = JSON.stringify(p.quote);
@@ -12038,12 +12038,12 @@ async function testV2PaymentWorkflow() {
         }
         {
             // 40. Legacy eligibility still blocks a v2 request (isolation).
-            const p = await createParcel();
+            const p = await createRepairRequest();
             logTest('40. Legacy getPaymentEligibility still blocks v2 (PAYMENT_NOT_AVAILABLE)', getPaymentEligibility(p).code === 'PAYMENT_NOT_AVAILABLE');
         }
         {
             // 41. V2 eligibility is pure - never mutates the parcel.
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const snap = JSON.stringify(p);
             getV2PaymentEligibility(p); getV2PaymentEligibility(p);
             logTest('41. V2 eligibility does not mutate the parcel', JSON.stringify(p) === snap);
@@ -12141,7 +12141,7 @@ async function testRepairWorkflow() {
         let seq = 0;
         function makeTrackingId() { const t = `TEST-REP-${runId}-${seq++}`; usedTrackingIds.push(t); return t; }
 
-        async function createParcel(overrides = {}) {
+        async function createRepairRequest(overrides = {}) {
             const now = new Date();
             const doc = {
                 schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail, parcelName: `TEST-REP-DEVICE-${runId}`,
@@ -12170,37 +12170,37 @@ async function testRepairWorkflow() {
             if (sess) fakeBucket._objects.set(sess.storageKey, { mimeType: 'image/jpeg', size: 22222 });
             return sid;
         }
-        async function startedParcel(ov = {}) { const p = await createParcel(ov); await start(p.id, techEmail); return p; }
+        async function startedParcel(ov = {}) { const p = await createRepairRequest(ov); await start(p.id, techEmail); return p; }
         const validSummary = 'Replaced the cracked display panel and tested all touch input successfully.';
         async function completeWithEvidence(pid) { const eid = await uploadEvidence(pid); return complete(pid, techEmail, { summary: validSummary, evidenceImageIds: [eid] }); }
 
         // ================= Start (1-9) =================
         await makeRequest({ hostname: 'localhost', port: 3000, path: '/parcels/507f1f77bcf86cd799439011/repair/start', method: 'POST' }, 401, '1. Unauthenticated start rejected (401)');
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             logTest('2. Customer cannot start repair', (await start(p.id, ownerEmail)).body.code === 'TECHNICIAN_ROLE_REQUIRED');
             logTest('3. Admin cannot start repair', (await start(p.id, adminEmail)).body.code === 'TECHNICIAN_ROLE_REQUIRED');
             logTest('4. Unrelated technician gets existence-oracle 404', (await start(p.id, otherTechEmail)).statusCode === 404);
         }
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             await collections.users.updateOne({ email: techEmail }, { $set: { role: 'user' } });
             const r = await start(p.id, techEmail);
             await collections.users.updateOne({ email: techEmail }, { $set: { role: 'rider' } });
             logTest('5. Role-removed rider rejected', r.statusCode === 403 && r.body.code === 'TECHNICIAN_ROLE_REQUIRED');
         }
-        logTest('6. Pre-payment start rejected', (await start((await createParcel({ deliveryStatus: QUOTE_APPROVED, payment: undefined })).id, techEmail)).body.code === 'REPAIR_NOT_PAYABLE_COMPLETE');
+        logTest('6. Pre-payment start rejected', (await start((await createRepairRequest({ deliveryStatus: QUOTE_APPROVED, payment: undefined })).id, techEmail)).body.code === 'REPAIR_NOT_PAYABLE_COMPLETE');
         {
-            const p = await createParcel();
+            const p = await createRepairRequest();
             const r = await start(p.id, techEmail);
             const doc = await collections.repairRequests.findOne({ _id: p._id });
             logTest('7. payment_completed start accepted', r.statusCode === 201 && r.body.deliveryStatus === REPAIR_IN_PROGRESS && doc.repair.status === 'in_progress' && doc.repair.startedAt instanceof Date);
             logTest('8. Duplicate start rejected', (await start(p.id, techEmail)).body.code === 'REPAIR_ALREADY_STARTED');
         }
-        logTest('9. Legacy start rejected', (await start((await createParcel({ schemaVersion: undefined, quote: undefined, payment: undefined, cost: 40 })).id, techEmail)).body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
+        logTest('9. Legacy start rejected', (await start((await createRepairRequest({ schemaVersion: undefined, quote: undefined, payment: undefined, cost: 40 })).id, techEmail)).body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
 
         // ================= Progress (10-16) =================
-        logTest('10. Progress before start rejected', (await progress((await createParcel()).id, techEmail, { message: 'Working on it now.' })).body.code === 'REPAIR_NOT_IN_PROGRESS');
+        logTest('10. Progress before start rejected', (await progress((await createRepairRequest()).id, techEmail, { message: 'Working on it now.' })).body.code === 'REPAIR_NOT_IN_PROGRESS');
         {
             const p = await startedParcel();
             const r = await progress(p.id, techEmail, { message: 'Opened the device and inspected the board.' });
@@ -12232,7 +12232,7 @@ async function testRepairWorkflow() {
         }
 
         // ================= Completion (17-35) =================
-        logTest('17. Completion before start rejected', (await complete((await createParcel()).id, techEmail, { summary: validSummary, evidenceImageIds: ['00000000-0000-4000-8000-000000000000'] })).body.code === 'REPAIR_NOT_IN_PROGRESS');
+        logTest('17. Completion before start rejected', (await complete((await createRepairRequest()).id, techEmail, { summary: validSummary, evidenceImageIds: ['00000000-0000-4000-8000-000000000000'] })).body.code === 'REPAIR_NOT_IN_PROGRESS');
         {
             const p = await startedParcel();
             logTest('18. No evidence rejected', (await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: [] })).body.code === 'INVALID_COMPLETION_EVIDENCE');
@@ -12299,7 +12299,7 @@ async function testRepairWorkflow() {
             await collections.users.insertOne({ email, role: 'rider', createdAt: new Date() });
             const ins = await collections.technicians.insertOne({ name: `TEST-REP-REL-${runId}-${relSeq}`, email, status: 'approved', workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date() });
             createdRiderIds.push(ins.insertedId);
-            const p = await createParcel({ riderId: ins.insertedId.toString(), riderName: `TEST-REP-REL-${runId}`, riderEmail: email });
+            const p = await createRepairRequest({ riderId: ins.insertedId.toString(), riderName: `TEST-REP-REL-${runId}`, riderEmail: email });
             await start(p.id, email);
             return { p, riderEmail: email, riderId: ins.insertedId };
         }
@@ -12347,7 +12347,7 @@ async function testRepairWorkflow() {
         }
         {
             // 45. Failed start creates no tracking event.
-            const p = await createParcel({ deliveryStatus: QUOTE_APPROVED, payment: undefined });
+            const p = await createRepairRequest({ deliveryStatus: QUOTE_APPROVED, payment: undefined });
             await start(p.id, techEmail);
             logTest('45. No tracking event on failed start', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: 'repair_started' })) === 0);
         }
@@ -12384,7 +12384,7 @@ async function testRepairWorkflow() {
         }
         logTest('61. Canonical BDT count remains 16', (await collections.serviceDefinitions.countDocuments({ $or: SERVICE_DEFINITION_SEED.map((r) => ({ productCategorySlug: r.productCategorySlug, repairCategorySlug: r.repairCategorySlug })) })) === 16);
         {
-            const legacy = await createParcel({ schemaVersion: undefined, quote: undefined, payment: undefined, cost: 40 });
+            const legacy = await createRepairRequest({ schemaVersion: undefined, quote: undefined, payment: undefined, cost: 40 });
             logTest('62. Legacy behavior unchanged: repair read rejected', (await getRep(legacy.id, ownerEmail)).body.code === 'LEGACY_REQUEST_NOT_SUPPORTED');
         }
         logTest('64. No production storage contact (all objects in the fake bucket)', fakeBucket._objects.size > 0 && [...fakeBucket._objects.keys()].every((k) => k.startsWith('repair-requests/')));
@@ -12406,7 +12406,7 @@ async function testRepairWorkflow() {
     console.log('');
 }
 
-// Phase 6.5 Unit 8: Safe Repair Deletion. Exercises the rewritten deleteParcel
+// Phase 6.5 Unit 8: Safe Repair Deletion. Exercises the rewritten deleteRepairRequest
 // end-to-end: authorization (owner-or-admin, existence-oracle 404 for everyone
 // else), the v2 gate, the full lifecycle+financial eligibility predicate, the
 // guarded atomic delete and its dependency cleanup (damage/evidence sessions,
@@ -12432,7 +12432,7 @@ async function testSafeRepairDeletion() {
     const { ObjectId } = require('mongodb');
     const { initializeModels } = require('./models');
     const { DamageStorageService } = require('./services/damageStorageService');
-    const ParcelController = require('./controllers/parcelController');
+    const RepairRequestController = require('./controllers/repairRequestController');
     const { getDeletionEligibility } = require('./services/deletionPolicy');
     const { retryDeletionCleanups } = require('./scripts/retry-deletion-cleanup');
     const fs = require('fs');
@@ -12467,7 +12467,7 @@ async function testSafeRepairDeletion() {
         const models = initializeModels(collections);
         const fakeBucket = createFakeBucket();
         const fakeStorage = new DamageStorageService({ bucket: fakeBucket });
-        const parcelController = new ParcelController(models, collections, fakeStorage);
+        const parcelController = new RepairRequestController(models, collections, fakeStorage);
 
         const ownerEmail = `del-owner-${runId}@test.local`;
         const otherEmail = `del-other-${runId}@test.local`;
@@ -12484,7 +12484,7 @@ async function testSafeRepairDeletion() {
         let seq = 0;
         function makeTrackingId() { const t = `TEST-DEL-${runId}-${seq++}`; usedTrackingIds.push(t); return t; }
 
-        async function createParcel(overrides = {}) {
+        async function createRepairRequest(overrides = {}) {
             const now = new Date();
             const doc = {
                 schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail,
@@ -12499,9 +12499,9 @@ async function testSafeRepairDeletion() {
             return { id: r.insertedId.toString(), _id: r.insertedId, ...doc };
         }
 
-        const delReq = (id, email, emailVerified = true) => { const res = fakeRes(); return parcelController.deleteParcel({ params: { id }, decoded_email: email, decoded_email_verified: emailVerified }, res).then(() => res); };
-        const cancelReq = (id, email, emailVerified = true) => { const res = fakeRes(); return parcelController.cancelParcel({ params: { id }, decoded_email: email, decoded_email_verified: emailVerified }, res).then(() => res); };
-        const exists = async (id) => !!(await models.Parcel.findById(id));
+        const delReq = (id, email, emailVerified = true) => { const res = fakeRes(); return parcelController.deleteRepairRequest({ params: { id }, decoded_email: email, decoded_email_verified: emailVerified }, res).then(() => res); };
+        const cancelReq = (id, email, emailVerified = true) => { const res = fakeRes(); return parcelController.cancelRepairRequest({ params: { id }, decoded_email: email, decoded_email_verified: emailVerified }, res).then(() => res); };
+        const exists = async (id) => !!(await models.RepairRequest.findById(id));
 
         // --- 3, 4. Invalid ObjectId / unknown id. ---
         let res = await delReq('not-a-valid-id', ownerEmail);
@@ -12511,19 +12511,19 @@ async function testSafeRepairDeletion() {
         const unknownIdBody = JSON.stringify(res.body);
 
         // --- 5. Owner deletes a clean pending-pickup v2 request. ---
-        const clean1 = await createParcel();
+        const clean1 = await createRepairRequest();
         res = await delReq(clean1.id, ownerEmail);
         logTest('5. Owner deletes a clean pending-pickup request (200 success)', res.statusCode === 200 && res.body.success === true && res.body.deletedRequestId === clean1.id && !(await exists(clean1.id)));
         // --- 6. Response shape carries no extra/leaked fields. ---
         logTest('6. Success response is exactly { success, deletedRequestId }', Object.keys(res.body).sort().join(',') === 'deletedRequestId,success');
 
         // --- 7. Admin deletes another user's clean request. ---
-        const clean2 = await createParcel();
+        const clean2 = await createRepairRequest();
         res = await delReq(clean2.id, adminEmail);
         logTest('7. Admin deletes another user\'s clean request (200)', res.statusCode === 200 && res.body.success === true && !(await exists(clean2.id)));
 
         // --- 8, 9. Existence-oracle: unrelated user and assigned technician both get the same 404 as an unknown id. ---
-        const oracleParcel = await createParcel();
+        const oracleParcel = await createRepairRequest();
         res = await delReq(oracleParcel.id, otherEmail);
         logTest('8. Unrelated user gets 404 (existence-oracle) and the request survives', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND' && JSON.stringify(res.body) === unknownIdBody && (await exists(oracleParcel.id)));
         res = await delReq(oracleParcel.id, techEmail);
@@ -12532,7 +12532,7 @@ async function testSafeRepairDeletion() {
         // --- Phase 8.1A: customer-owner email-verification on shared delete. ---
         // Unverified owner is blocked (403 EMAIL_NOT_VERIFIED) and the request
         // survives; verifying then lets the SAME owner delete it.
-        const verParcel = await createParcel();
+        const verParcel = await createRepairRequest();
         res = await delReq(verParcel.id, ownerEmail, false);
         logTest('8.1A-a. Unverified owner cannot delete (403 EMAIL_NOT_VERIFIED) and request survives', res.statusCode === 403 && res.body.code === 'EMAIL_NOT_VERIFIED' && (await exists(verParcel.id)));
         res = await delReq(verParcel.id, ownerEmail, true);
@@ -12540,19 +12540,19 @@ async function testSafeRepairDeletion() {
 
         // Admin keeps delete authority even with an unverified email (policy
         // does not impose customer email-verification on admin authority).
-        const adminUnverParcel = await createParcel();
+        const adminUnverParcel = await createRepairRequest();
         res = await delReq(adminUnverParcel.id, adminEmail, false);
         logTest('8.1A-c. Admin with unverified email keeps delete authority (200, admin exempt)', res.statusCode === 200 && res.body.success === true && !(await exists(adminUnverParcel.id)));
 
         // Existence/verification oracle safety: an UNRELATED unverified caller
         // still gets the exact same 404 as an unknown id - never a 403 that
         // would reveal the request exists or that verification is the blocker.
-        const oracleUnverParcel = await createParcel();
+        const oracleUnverParcel = await createRepairRequest();
         res = await delReq(oracleUnverParcel.id, otherEmail, false);
         logTest('8.1A-d. Unrelated UNVERIFIED user still gets 404 (no verification/existence oracle) and request survives', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND' && JSON.stringify(res.body) === unknownIdBody && (await exists(oracleUnverParcel.id)));
 
         // --- 10. Legacy (no schemaVersion) request is never deletable through this path. ---
-        const legacy = await createParcel({ schemaVersion: undefined });
+        const legacy = await createRepairRequest({ schemaVersion: undefined });
         await collections.repairRequests.updateOne({ _id: legacy._id }, { $unset: { schemaVersion: '' } });
         res = await delReq(legacy.id, ownerEmail);
         logTest('10. Legacy request rejected (409 REQUEST_DELETE_NOT_ALLOWED) and survives', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(legacy.id)));
@@ -12562,50 +12562,50 @@ async function testSafeRepairDeletion() {
         // --- 12-16. Every progressed lifecycle status is undeletable. ---
         let n = 12;
         for (const status of ['driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered', 'cancelled']) {
-            const p = await createParcel({ deliveryStatus: status, riderEmail: status === 'driver_assigned' ? techEmail : undefined });
+            const p = await createRepairRequest({ deliveryStatus: status, riderEmail: status === 'driver_assigned' ? techEmail : undefined });
             const r = await delReq(p.id, ownerEmail);
             logTest(`${n}. '${status}' request undeletable (409) and survives`, r.statusCode === 409 && r.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(p.id)));
             n++;
         }
 
         // --- 17. Unknown/corrupt status is undeletable. ---
-        const bogus = await createParcel({ deliveryStatus: 'totally_bogus_status_xyz' });
+        const bogus = await createRepairRequest({ deliveryStatus: 'totally_bogus_status_xyz' });
         res = await delReq(bogus.id, ownerEmail);
         logTest('17. Unknown/corrupt status undeletable (409) and survives', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(bogus.id)));
 
         // --- 18, 19. A rider reference while still pending-pickup blocks deletion (defensive). ---
-        const withRiderEmail = await createParcel({ riderEmail: techEmail });
+        const withRiderEmail = await createRepairRequest({ riderEmail: techEmail });
         res = await delReq(withRiderEmail.id, ownerEmail);
         logTest('18. riderEmail present (pending-pickup) blocks deletion (409)', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(withRiderEmail.id)));
-        const withRiderId = await createParcel({ riderId: new ObjectId().toString() });
+        const withRiderId = await createRepairRequest({ riderId: new ObjectId().toString() });
         res = await delReq(withRiderId.id, ownerEmail);
         logTest('19. riderId present (pending-pickup) blocks deletion (409)', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(withRiderId.id)));
 
         // --- 20, 21, 22. An inspection / quote / repair subdocument each blocks deletion. ---
-        const withInspection = await createParcel({ inspection: { status: 'submitted', version: 1 } });
+        const withInspection = await createRepairRequest({ inspection: { status: 'submitted', version: 1 } });
         res = await delReq(withInspection.id, ownerEmail);
         logTest('20. Inspection on record blocks deletion (409)', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(withInspection.id)));
-        const withQuote = await createParcel({ quote: { status: 'submitted', totalAmount: 4500, version: 1 } });
+        const withQuote = await createRepairRequest({ quote: { status: 'submitted', totalAmount: 4500, version: 1 } });
         res = await delReq(withQuote.id, ownerEmail);
         logTest('21. Quote on record blocks deletion (409)', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(withQuote.id)));
-        const withRepair = await createParcel({ repair: { status: 'in_progress', version: 1 } });
+        const withRepair = await createRepairRequest({ repair: { status: 'in_progress', version: 1 } });
         res = await delReq(withRepair.id, ownerEmail);
         logTest('22. Repair activity on record blocks deletion (409)', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(withRepair.id)));
 
         // --- 23. paymentStatus 'paid' blocks deletion. ---
-        const paidParcel = await createParcel({ paymentStatus: 'paid' });
+        const paidParcel = await createRepairRequest({ paymentStatus: 'paid' });
         res = await delReq(paidParcel.id, ownerEmail);
         logTest('23. paymentStatus=paid blocks deletion (409) and survives', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(paidParcel.id)));
 
         // --- 24. A payment record (financial safety) blocks deletion even with no paymentStatus, and the record is untouched. ---
-        const financialParcel = await createParcel();
+        const financialParcel = await createRepairRequest();
         await collections.payments.insertOne({ sessionId: `cs_del_${runId}`, transactionId: `pi_del_${runId}`, parcelId: financialParcel.id, trackingId: financialParcel.trackingId, customerEmail: ownerEmail, amount: 4500, currency: 'bdt', paymentStatus: 'paid', source: 'test', paidAt: new Date() });
         res = await delReq(financialParcel.id, ownerEmail);
         const financialPaymentStill = await collections.payments.findOne({ parcelId: financialParcel.id });
         logTest('24. A payment record blocks deletion and is never destroyed (financial safety)', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(financialParcel.id)) && !!financialPaymentStill);
 
         // --- 25. An active checkout session blocks deletion. ---
-        const checkoutParcel = await createParcel();
+        const checkoutParcel = await createRepairRequest();
         await collections.checkoutSessions.insertOne({ parcelId: checkoutParcel.id, active: true, sessionId: `cs_active_${runId}`, ownerEmail, amount: 4500, currency: 'bdt', createdAt: new Date() });
         res = await delReq(checkoutParcel.id, ownerEmail);
         logTest('25. Active checkout session blocks deletion (409) and survives', res.statusCode === 409 && res.body.code === 'REQUEST_DELETE_NOT_ALLOWED' && (await exists(checkoutParcel.id)));
@@ -12614,14 +12614,14 @@ async function testSafeRepairDeletion() {
         // --- 26. Embedded damage image Storage objects are purged on successful delete. ---
         const k1 = `repair-requests/${runId}-a/damage/${runId}-1.jpg`;
         const k2 = `repair-requests/${runId}-a/damage/${runId}-2.jpg`;
-        const damageParcel = await createParcel({ damage: { images: [{ storageKey: k1, url: 'x' }, { storageKey: k2, url: 'y' }] } });
+        const damageParcel = await createRepairRequest({ damage: { images: [{ storageKey: k1, url: 'x' }, { storageKey: k2, url: 'y' }] } });
         fakeBucket._objects.set(k1, { mimeType: 'image/jpeg', size: 111 });
         fakeBucket._objects.set(k2, { mimeType: 'image/jpeg', size: 222 });
         res = await delReq(damageParcel.id, ownerEmail);
         logTest('26. Delete purges embedded damage-image Storage objects', res.statusCode === 200 && !(await exists(damageParcel.id)) && !fakeBucket._objects.has(k1) && !fakeBucket._objects.has(k2));
 
         // --- 27. Damage upload-session rows and their Storage objects are purged. ---
-        const dusParcel = await createParcel();
+        const dusParcel = await createRepairRequest();
         const k3 = `repair-requests/${dusParcel.id}/damage/${runId}-3.jpg`;
         await collections.damageUploadSessions.insertOne({ _id: `dus-${runId}`, requestId: dusParcel.id, ownerEmail, storageKey: k3, status: 'finalized', expiresAt: new Date(Date.now() + 3600000), createdAt: new Date() });
         fakeBucket._objects.set(k3, { mimeType: 'image/jpeg', size: 333 });
@@ -12630,7 +12630,7 @@ async function testSafeRepairDeletion() {
         logTest('27. Delete purges damage upload-session rows and their Storage objects', res.statusCode === 200 && !dusRowAfter && !fakeBucket._objects.has(k3));
 
         // --- 28. Repair evidence-session rows and their Storage objects are purged (defensive). ---
-        const resParcel = await createParcel();
+        const resParcel = await createRepairRequest();
         const k4 = `repair-requests/${resParcel.id}/completion/${runId}-4.jpg`;
         await collections.repairEvidenceSessions.insertOne({ _id: `res-${runId}`, requestId: resParcel.id, createdByRiderId: 'x', riderEmail: techEmail, storageKey: k4, status: 'pending', expiresAt: new Date(Date.now() + 3600000), createdAt: new Date() });
         fakeBucket._objects.set(k4, { mimeType: 'image/jpeg', size: 444 });
@@ -12639,7 +12639,7 @@ async function testSafeRepairDeletion() {
         logTest('28. Delete purges repair evidence-session rows and their Storage objects', res.statusCode === 200 && !resRowAfter && !fakeBucket._objects.has(k4));
 
         // --- 29. Stale inactive checkout rows and tracking logs are purged. ---
-        const cleanupParcel = await createParcel();
+        const cleanupParcel = await createRepairRequest();
         await collections.checkoutSessions.insertOne({ parcelId: cleanupParcel.id, active: false, sessionId: `cs_stale_${runId}`, createdAt: new Date() });
         await collections.trackingEvents.insertOne({ trackingId: cleanupParcel.trackingId, status: 'pending-pickup', timestamp: new Date() });
         res = await delReq(cleanupParcel.id, ownerEmail);
@@ -12649,10 +12649,10 @@ async function testSafeRepairDeletion() {
 
         // --- 30. Storage cleanup is best-effort: a failing deleteObject never fails the response or the DB delete. ---
         const throwingStorage = { deleteObject: async () => { throw Object.assign(new Error('boom'), { code: 'STORAGE_UNAVAILABLE' }); } };
-        const pcThrow = new ParcelController(models, collections, throwingStorage);
-        const bestEffortParcel = await createParcel({ damage: { images: [{ storageKey: `repair-requests/${runId}-be/damage/x.jpg`, url: 'z' }] } });
+        const pcThrow = new RepairRequestController(models, collections, throwingStorage);
+        const bestEffortParcel = await createRepairRequest({ damage: { images: [{ storageKey: `repair-requests/${runId}-be/damage/x.jpg`, url: 'z' }] } });
         const beRes = fakeRes();
-        await pcThrow.deleteParcel({ params: { id: bestEffortParcel.id }, decoded_email: ownerEmail, decoded_email_verified: true }, beRes);
+        await pcThrow.deleteRepairRequest({ params: { id: bestEffortParcel.id }, decoded_email: ownerEmail, decoded_email_verified: true }, beRes);
         logTest('30. A Storage failure is non-fatal: delete still succeeds and the request is gone', beRes.statusCode === 200 && beRes.body.success === true && !(await exists(bestEffortParcel.id)));
 
         // --- 31. Deleting an already-deleted request returns 404 (idempotent, no oracle). ---
@@ -12660,8 +12660,8 @@ async function testSafeRepairDeletion() {
         logTest('31. Re-deleting an already-deleted request returns 404', res.statusCode === 404 && res.body.code === 'REQUEST_NOT_FOUND');
 
         // --- 32, 33. Deleting one request never touches a sibling request or an unrelated payment. ---
-        const siblingA = await createParcel();
-        const siblingB = await createParcel();
+        const siblingA = await createRepairRequest();
+        const siblingB = await createRepairRequest();
         const unrelatedPaymentParcelId = new ObjectId().toString();
         usedPaymentParcelIds.push(unrelatedPaymentParcelId);
         await collections.payments.insertOne({ sessionId: `cs_unrel_${runId}`, transactionId: `pi_unrel_${runId}`, parcelId: unrelatedPaymentParcelId, amount: 100, currency: 'bdt', paymentStatus: 'paid', source: 'test', paidAt: new Date() });
@@ -12678,27 +12678,27 @@ async function testSafeRepairDeletion() {
         logTest('38. Eligibility: an active checkout makes it ineligible', getDeletionEligibility({ deliveryStatus: 'pending-pickup' }, { hasAnyPayment: false, hasActiveCheckout: true }).code === 'REQUEST_DELETE_NOT_ALLOWED');
 
         // --- 39-41. Guarded model delete is the race-resolver. ---
-        const guardClean = await createParcel();
-        const guardCleanDel = await models.Parcel.deleteGuarded({ id: guardClean.id });
+        const guardClean = await createRepairRequest();
+        const guardCleanDel = await models.RepairRequest.deleteGuarded({ id: guardClean.id });
         logTest('39. deleteGuarded removes a clean pending-pickup v2 request (deletedCount 1)', guardCleanDel.deletedCount === 1);
-        const guardAssigned = await createParcel({ deliveryStatus: 'driver_assigned', riderEmail: techEmail });
-        const guardAssignedDel = await models.Parcel.deleteGuarded({ id: guardAssigned.id });
+        const guardAssigned = await createRepairRequest({ deliveryStatus: 'driver_assigned', riderEmail: techEmail });
+        const guardAssignedDel = await models.RepairRequest.deleteGuarded({ id: guardAssigned.id });
         logTest('40. deleteGuarded refuses a request an assignment already claimed (deletedCount 0)', guardAssignedDel.deletedCount === 0 && (await exists(guardAssigned.id)));
-        const guardQuoted = await createParcel({ quote: { status: 'approved', version: 1 } });
-        const guardQuotedDel = await models.Parcel.deleteGuarded({ id: guardQuoted.id });
+        const guardQuoted = await createRepairRequest({ quote: { status: 'approved', version: 1 } });
+        const guardQuotedDel = await models.RepairRequest.deleteGuarded({ id: guardQuoted.id });
         logTest('41. deleteGuarded refuses a request that has a quote (deletedCount 0)', guardQuotedDel.deletedCount === 0 && (await exists(guardQuoted.id)));
 
         // --- 42, 43. Delete-vs-cancel race: exactly one destructive winner, consistent final state. ---
-        const raceP1 = await createParcel();
+        const raceP1 = await createRepairRequest();
         const [rc1a, rc1b] = await Promise.all([delReq(raceP1.id, ownerEmail), cancelReq(raceP1.id, ownerEmail)]);
-        const raceP1Doc = await models.Parcel.findById(raceP1.id);
+        const raceP1Doc = await models.RepairRequest.findById(raceP1.id);
         const raceP1Statuses = [rc1a.statusCode, rc1b.statusCode].sort().join(',');
         const raceP1Consistent = (!raceP1Doc) || (raceP1Doc && raceP1Doc.deliveryStatus === 'cancelled');
         logTest('42. Delete-vs-cancel race yields exactly one 200 winner', raceP1Statuses === '200,409');
         logTest('43. Delete-vs-cancel race leaves a consistent final state (gone XOR cancelled)', raceP1Consistent);
 
         // --- 44, 45. Delete-vs-delete race: exactly one 200, the other 404/409, request gone. ---
-        const raceP2 = await createParcel();
+        const raceP2 = await createRepairRequest();
         const [rd1, rd2] = await Promise.all([delReq(raceP2.id, ownerEmail), delReq(raceP2.id, ownerEmail)]);
         const raceP2Codes = [rd1.statusCode, rd2.statusCode].sort();
         const oneWinner = (rd1.statusCode === 200) !== (rd2.statusCode === 200);
@@ -12710,7 +12710,7 @@ async function testSafeRepairDeletion() {
         logTest('46. No production Storage contact (all fake-bucket keys are request-namespaced)', [...fakeBucket._objects.keys()].every((k) => k.startsWith('repair-requests/')));
 
         // --- 47. Route source: DELETE /parcels/:id keeps verifyFBToken but is no longer verifyAdmin-gated. ---
-        const routesSrc = fs.readFileSync(path.join(__dirname, 'routes', 'parcels.js'), 'utf8');
+        const routesSrc = fs.readFileSync(path.join(__dirname, 'routes', 'repairRequests.js'), 'utf8');
         const deleteLine = routesSrc.split('\n').find((l) => l.includes("app.delete('/parcels/:id'"));
         logTest('47. DELETE route keeps verifyFBToken and drops verifyAdmin (owner-or-admin decided in controller)', !!deleteLine && deleteLine.includes('verifyFBToken') && !deleteLine.includes('verifyAdmin'));
 
@@ -12721,7 +12721,7 @@ async function testSafeRepairDeletion() {
 
         // --- 50. A successful Storage cleanup pass removes the cleanup record. ---
         const kOk = `repair-requests/${runId}-ok/damage/${runId}-ok.jpg`;
-        const okParcel = await createParcel({ damage: { images: [{ storageKey: kOk, url: 'u' }] } });
+        const okParcel = await createRepairRequest({ damage: { images: [{ storageKey: kOk, url: 'u' }] } });
         fakeBucket._objects.set(kOk, { mimeType: 'image/jpeg', size: 500 });
         res = await delReq(okParcel.id, ownerEmail);
         const okRecord = await collections.deletionCleanups.findOne({ _id: okParcel.id });
@@ -12730,9 +12730,9 @@ async function testSafeRepairDeletion() {
         // --- 51, 52, 53. A Storage failure retains the cleanup record with exactly the trusted keys, and the response leaks no key. ---
         const kF1 = `repair-requests/${runId}-f/damage/${runId}-f1.jpg`;
         const kF2 = `repair-requests/${runId}-f/damage/${runId}-f2.jpg`;
-        const failParcel = await createParcel({ damage: { images: [{ storageKey: kF1, url: 'a' }, { storageKey: kF2, url: 'b' }] } });
+        const failParcel = await createRepairRequest({ damage: { images: [{ storageKey: kF1, url: 'a' }, { storageKey: kF2, url: 'b' }] } });
         const failRes = fakeRes();
-        await pcThrow.deleteParcel({ params: { id: failParcel.id }, decoded_email: ownerEmail, decoded_email_verified: true }, failRes);
+        await pcThrow.deleteRepairRequest({ params: { id: failParcel.id }, decoded_email: ownerEmail, decoded_email_verified: true }, failRes);
         const failRecord = await collections.deletionCleanups.findOne({ _id: failParcel.id });
         logTest('51. A Storage failure leaves a retained (pending) cleanup record while the delete still succeeds', failRes.statusCode === 200 && failRes.body.success === true && !!failRecord && failRecord.status === 'pending');
         logTest('52. Cleanup record holds exactly the trusted keys (collected server-side, no more/less)', !!failRecord && failRecord.storageKeys.slice().sort().join('|') === [kF1, kF2].sort().join('|'));
@@ -12759,10 +12759,10 @@ async function testSafeRepairDeletion() {
 
         // --- 58, 59. A concurrent duplicate delete produces exactly one cleanup record and one winner. ---
         const kDup = `repair-requests/${runId}-dup/damage/${runId}-dup.jpg`;
-        const dupParcel = await createParcel({ damage: { images: [{ storageKey: kDup, url: 'd' }] } });
+        const dupParcel = await createRepairRequest({ damage: { images: [{ storageKey: kDup, url: 'd' }] } });
         const [du1, du2] = await Promise.all([
-            (async () => { const r = fakeRes(); await pcThrow.deleteParcel({ params: { id: dupParcel.id }, decoded_email: ownerEmail, decoded_email_verified: true }, r); return r; })(),
-            (async () => { const r = fakeRes(); await pcThrow.deleteParcel({ params: { id: dupParcel.id }, decoded_email: ownerEmail, decoded_email_verified: true }, r); return r; })()
+            (async () => { const r = fakeRes(); await pcThrow.deleteRepairRequest({ params: { id: dupParcel.id }, decoded_email: ownerEmail, decoded_email_verified: true }, r); return r; })(),
+            (async () => { const r = fakeRes(); await pcThrow.deleteRepairRequest({ params: { id: dupParcel.id }, decoded_email: ownerEmail, decoded_email_verified: true }, r); return r; })()
         ]);
         const dupRecordCount = await collections.deletionCleanups.countDocuments({ _id: dupParcel.id });
         const dupWinners = [du1.statusCode, du2.statusCode].filter((s) => s === 200).length;
@@ -13102,7 +13102,7 @@ async function testDamageProjectionHardening() {
     const { initializeModels } = require('./models');
     const { initializeControllers } = require('./controllers');
     const { ObjectId } = require('mongodb');
-    const { stripDamageImages } = require('./utils/parcelProjection');
+    const { stripDamageImages } = require('./utils/repairRequestProjection');
 
     function fakeRes() {
         return { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; } };
@@ -13111,7 +13111,7 @@ async function testDamageProjectionHardening() {
     await connectDatabase();
     const models = initializeModels(collections);
     const controllers = initializeControllers(models, collections);
-    const parcelController = controllers.parcel;
+    const parcelController = controllers.repairRequest;
 
     const runId = Date.now();
     const customerEmail = `dp-customer-${runId}@test.local`;
@@ -13160,16 +13160,16 @@ async function testDamageProjectionHardening() {
         createdIds.push(ins.insertedId);
         const id = ins.insertedId.toString();
 
-        const getById = (email) => { const res = fakeRes(); return parcelController.getParcelById({ params: { id }, decoded_email: email }, res).then(() => res); };
-        const getAll = (email) => { const res = fakeRes(); return parcelController.getAllParcels({ query: {}, decoded_email: email }, res).then(() => res); };
-        const getRider = (email) => { const res = fakeRes(); return parcelController.getRiderParcels({ query: {}, decoded_email: email }, res).then(() => res); };
+        const getById = (email) => { const res = fakeRes(); return parcelController.getRepairRequestById({ params: { id }, decoded_email: email }, res).then(() => res); };
+        const getAll = (email) => { const res = fakeRes(); return parcelController.getAllRepairRequests({ query: {}, decoded_email: email }, res).then(() => res); };
+        const getRider = (email) => { const res = fakeRes(); return parcelController.getTechnicianRepairRequests({ query: {}, decoded_email: email }, res).then(() => res); };
 
         // --- pure helper ---
         const stripped = stripDamageImages(doc);
         logTest('1. stripDamageImages replaces images[] with a safe { description, imageCount }', damageIsSafe(stripped.damage) && stripped.damage.description === 'Cracked screen after a drop.' && stripped.damage.imageCount === 2);
         logTest('2. stripDamageImages does not mutate the input', Array.isArray(doc.damage.images) && doc.damage.images.length === 2);
 
-        // --- getParcelById (owner / technician / admin) ---
+        // --- getRepairRequestById (owner / technician / admin) ---
         let res = await getById(customerEmail);
         logTest('3. Customer GET /parcels/:id exposes no raw damage image metadata', res.statusCode === 200 && damageIsSafe(res.body.damage) && res.body.damage.imageCount === 2);
         res = await getById(techEmail);
@@ -13179,12 +13179,12 @@ async function testDamageProjectionHardening() {
         res = await getById(otherEmail);
         logTest('6. Unauthorized caller still gets 403 (behavior preserved)', res.statusCode === 403);
 
-        // --- getAllParcels (customer list) ---
+        // --- getAllRepairRequests (customer list) ---
         res = await getAll(customerEmail);
         const mine = (res.body || []).find((p) => p.trackingId === `TEST-DP-${runId}`);
         logTest('7. Customer GET /parcels list exposes no raw damage image metadata', res.statusCode === 200 && !!mine && damageIsSafe(mine.damage));
 
-        // --- getRiderParcels (technician list) ---
+        // --- getTechnicianRepairRequests (technician list) ---
         res = await getRider(techEmail);
         const job = (res.body || []).find((p) => p.trackingId === `TEST-DP-${runId}`);
         logTest('8. Technician GET /parcels/rider list exposes no raw damage image metadata', res.statusCode === 200 && !!job && damageIsSafe(job.damage));
@@ -13234,7 +13234,7 @@ async function testInspectionListProjectionTightening() {
     const { connectDatabase, collections } = require('./config/database');
     const { initializeModels } = require('./models');
     const { initializeControllers } = require('./controllers');
-    const { projectSafeListParcel } = require('./utils/parcelProjection');
+    const { projectSafeListParcel } = require('./utils/repairRequestProjection');
 
     function fakeRes() {
         return { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; } };
@@ -13243,7 +13243,7 @@ async function testInspectionListProjectionTightening() {
     await connectDatabase();
     const models = initializeModels(collections);
     const controllers = initializeControllers(models, collections);
-    const parcelController = controllers.parcel;
+    const parcelController = controllers.repairRequest;
 
     const runId = Date.now();
     const customerEmail = `ilp-customer-${runId}@test.local`;
@@ -13318,10 +13318,10 @@ async function testInspectionListProjectionTightening() {
         createdIds.push(ins.insertedId);
         const id = ins.insertedId.toString();
 
-        const getAll = (email) => { const res = fakeRes(); return parcelController.getAllParcels({ query: {}, decoded_email: email }, res).then(() => res); };
-        const getRider = (email) => { const res = fakeRes(); return parcelController.getRiderParcels({ query: {}, decoded_email: email }, res).then(() => res); };
-        const getById = (email) => { const res = fakeRes(); return parcelController.getParcelById({ params: { id }, decoded_email: email }, res).then(() => res); };
-        const getAdmin = (email, query = {}) => { const res = fakeRes(); return parcelController.getAdminParcels({ query, decoded_email: email }, res).then(() => res); };
+        const getAll = (email) => { const res = fakeRes(); return parcelController.getAllRepairRequests({ query: {}, decoded_email: email }, res).then(() => res); };
+        const getRider = (email) => { const res = fakeRes(); return parcelController.getTechnicianRepairRequests({ query: {}, decoded_email: email }, res).then(() => res); };
+        const getById = (email) => { const res = fakeRes(); return parcelController.getRepairRequestById({ params: { id }, decoded_email: email }, res).then(() => res); };
+        const getAdmin = (email, query = {}) => { const res = fakeRes(); return parcelController.getAdminRepairRequests({ query, decoded_email: email }, res).then(() => res); };
 
         function itemSafe(item) {
             return !!item
@@ -13365,7 +13365,7 @@ async function testInspectionListProjectionTightening() {
         res = await getById(customerEmail);
         logTest('6a. GET /parcels/:id (owner) strips inspection/quote/repair/payment sub-documents', res.statusCode === 200 && !('inspection' in res.body) && !('quote' in res.body) && !('repair' in res.body) && !('payment' in res.body) && !leaks(res.body));
         const otherRes = fakeRes();
-        await parcelController.getParcelById({ params: { id }, decoded_email: 'ilp-nobody@test.local' }, otherRes);
+        await parcelController.getRepairRequestById({ params: { id }, decoded_email: 'ilp-nobody@test.local' }, otherRes);
         logTest('6b. GET /parcels/:id authorization unchanged (unauthorized caller still 403)', otherRes.statusCode === 403);
         // The stored document itself is never mutated - dedicated endpoints still read the full data.
         const stored = await collections.repairRequests.findOne({ _id: ins.insertedId });
@@ -13396,9 +13396,9 @@ async function testInspectionListProjectionTightening() {
 // Technician Matching Profile Flow (Phase 8.7A)
 //
 // End-to-end coverage for the onboarding -> matching integration fix: the
-// application intake (createRider) now allow-lists the body and requires a
+// application intake (createTechnicianApplication) now allow-lists the body and requires a
 // valid, non-empty canonical expertise array + service-area profile; admin
-// approval (updateRiderStatus) gates on a matchable profile and initializes
+// approval (updateTechnicianStatus) gates on a matchable profile and initializes
 // workStatus server-side; and an approved applicant then actually appears in the
 // eligible-technician recommendations. Exercised directly against the DB-backed
 // controllers, with its own namespaced fixtures and cleanup.
@@ -13417,8 +13417,8 @@ async function testTechnicianMatchingProfileFlow() {
     await connectDatabase();
     const models = initializeModels(collections);
     const controllers = initializeControllers(models, collections);
-    const riderController = controllers.rider;
-    const parcelController = controllers.parcel;
+    const riderController = controllers.technician;
+    const parcelController = controllers.repairRequest;
 
     const runId = Date.now();
     const customerEmail = `tmp-customer-${runId}@test.local`;
@@ -13438,9 +13438,9 @@ async function testTechnicianMatchingProfileFlow() {
         ...overrides
     });
 
-    const callCreateRider = (body) => { const res = fakeRes(); return riderController.createRider({ body }, res).then(() => res); };
-    const callUpdate = (id, body, email = adminEmail) => { const res = fakeRes(); return riderController.updateRiderStatus({ params: { id }, body, decoded_email: email }, res).then(() => res); };
-    const callCreateParcel = (body, email) => { const res = fakeRes(); return parcelController.createParcel({ body, decoded_email: email }, res).then(() => res); };
+    const callCreateRider = (body) => { const res = fakeRes(); return riderController.createTechnicianApplication({ body }, res).then(() => res); };
+    const callUpdate = (id, body, email = adminEmail) => { const res = fakeRes(); return riderController.updateTechnicianStatus({ params: { id }, body, decoded_email: email }, res).then(() => res); };
+    const callCreateParcel = (body, email) => { const res = fakeRes(); return parcelController.createRepairRequest({ body, decoded_email: email }, res).then(() => res); };
     const callGetEligible = (id, email) => { const res = fakeRes(); return parcelController.getEligibleTechnicians({ params: { id }, query: {}, decoded_email: email }, res).then(() => res); };
 
     try {
@@ -13658,7 +13658,7 @@ async function testTechnicianAssignmentDecisions() {
     await connectDatabase();
     const models = initializeModels(collections);
     const controllers = initializeControllers(models, collections);
-    const parcelController = controllers.parcel;
+    const parcelController = controllers.repairRequest;
 
     const runId = Date.now();
     const customerEmail = `ad-customer-${runId}@test.local`;
@@ -13713,7 +13713,7 @@ async function testTechnicianAssignmentDecisions() {
         const accept = (id, email) => { const res = fakeRes(); return parcelController.acceptAssignment({ params: { id }, decoded_email: email }, res).then(() => res); };
         const reject = (id, email, reason) => { const res = fakeRes(); return parcelController.rejectAssignment({ params: { id }, decoded_email: email, body: { reason } }, res).then(() => res); };
         const getAssignment = (id, email) => { const res = fakeRes(); return parcelController.getAssignment({ params: { id }, decoded_email: email }, res).then(() => res); };
-        const getParcel = (id, email) => { const res = fakeRes(); return parcelController.getParcelById({ params: { id }, decoded_email: email }, res).then(() => res); };
+        const getParcel = (id, email) => { const res = fakeRes(); return parcelController.getRepairRequestById({ params: { id }, decoded_email: email }, res).then(() => res); };
 
         // --- Double-booking mechanism: assignment_pending is an ACTIVE status. ---
         logTest('1. assignment_pending is an ACTIVE status (reserves the technician)', ACTIVE_STATUSES.includes('assignment_pending'));
@@ -13722,7 +13722,7 @@ async function testTechnicianAssignmentDecisions() {
         const pAccept = await makePendingParcel();
         let res = await accept(pAccept.id, techEmail);
         logTest('2. Assigned technician accepts (200, driver_assigned)', res.statusCode === 200 && res.body.success === true && res.body.deliveryStatus === 'driver_assigned');
-        let after = await models.Parcel.findById(pAccept.id);
+        let after = await models.RepairRequest.findById(pAccept.id);
         logTest('3. Accept moves status to driver_assigned', after.deliveryStatus === 'driver_assigned');
         logTest('4. Accept marks the pending history entry accepted with a timestamp', after.assignmentHistory[0].decision === 'accepted' && !!after.assignmentHistory[0].decidedAt);
         const riderAfterAccept = await collections.technicians.findOne({ _id: techRiderId });
@@ -13746,7 +13746,7 @@ async function testTechnicianAssignmentDecisions() {
         const pReject = await makePendingParcel();
         res = await reject(pReject.id, techEmail, 'Outside my current service area for this repair.');
         logTest('10. Assigned technician rejects with a valid reason (200, pending-pickup)', res.statusCode === 200 && res.body.success === true && res.body.deliveryStatus === 'pending-pickup');
-        after = await models.Parcel.findById(pReject.id);
+        after = await models.RepairRequest.findById(pReject.id);
         logTest('11. Reject returns the request to pending-pickup', after.deliveryStatus === 'pending-pickup');
         logTest('12. Reject clears the active rider fields (reassignable)', after.riderId === undefined && after.riderEmail === undefined && after.riderName === undefined);
         logTest('13. Reject records the rejection in history with the reason retained', after.assignmentHistory[0].decision === 'rejected' && after.assignmentHistory[0].rejectionReason === 'Outside my current service area for this repair.' && !!after.assignmentHistory[0].decidedAt);
@@ -13760,7 +13760,7 @@ async function testTechnicianAssignmentDecisions() {
         logTest('15. Too-short rejection reason rejected (400 INVALID_REJECTION_REASON)', res.statusCode === 400 && res.body.code === 'INVALID_REJECTION_REASON');
         res = await reject(pReasonBad.id, techEmail, '');
         logTest('16. Empty rejection reason rejected (400 INVALID_REJECTION_REASON)', res.statusCode === 400 && res.body.code === 'INVALID_REJECTION_REASON');
-        const stillPending = await models.Parcel.findById(pReasonBad.id);
+        const stillPending = await models.RepairRequest.findById(pReasonBad.id);
         logTest('17. Invalid reason leaves the request untouched (still assignment_pending)', stillPending.deliveryStatus === 'assignment_pending');
         // reject authorization
         res = await reject(pReasonBad.id, otherTechEmail, 'A perfectly valid length reason here.');
@@ -13792,7 +13792,7 @@ async function testTechnicianAssignmentDecisions() {
             const successes = responses.filter((r) => r.statusCode === 200);
             const losers = responses.filter((r) => r.statusCode !== 200);
             if (successes.length !== 1 || losers.length !== 1 || !isControlledLoser(losers[0])) return false;
-            const p = await models.Parcel.findById(parcelId);
+            const p = await models.RepairRequest.findById(parcelId);
             const decided = (p.assignmentHistory || []).filter((h) => h.decision !== 'pending');
             const pending = (p.assignmentHistory || []).filter((h) => h.decision === 'pending');
             // exactly one decided entry, none left pending, no duplicate decisions
@@ -13832,11 +13832,11 @@ async function testTechnicianAssignmentDecisions() {
         await collections.technicians.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
         const pLock = await makePendingParcel();
         const reassignRes = fakeRes();
-        await parcelController.assignRiderToParcel({ params: { id: pLock.id }, body: { riderId: techRiderId.toString() }, decoded_email: adminEmail }, reassignRes);
+        await parcelController.assignTechnicianToRepairRequest({ params: { id: pLock.id }, body: { riderId: techRiderId.toString() }, decoded_email: adminEmail }, reassignRes);
         logTest('22. Admin cannot reassign a request that is still assignment_pending (409)', reassignRes.statusCode === 409);
         // after reject it becomes reassignable (status pending-pickup, no rider)
         await reject(pLock.id, techEmail, 'Rejecting so the request can be reassigned again.');
-        const lockAfter = await models.Parcel.findById(pLock.id);
+        const lockAfter = await models.RepairRequest.findById(pLock.id);
         logTest('23. After rejection the request is reassignable (pending-pickup, no active rider)', lockAfter.deliveryStatus === 'pending-pickup' && lockAfter.riderId === undefined);
 
         // --- PRIVACY ---
@@ -13864,12 +13864,12 @@ async function testTechnicianAssignmentDecisions() {
         await collections.technicians.updateOne({ _id: techRiderId }, { $set: { workStatus: 'in_delivery' } });
         const pGuard = await makePendingParcel();
         const enterRes = fakeRes();
-        await parcelController.updateParcelStatus({ params: { id: pGuard.id }, body: { deliveryStatus: 'assignment_pending' }, decoded_email: adminEmail }, enterRes);
+        await parcelController.updateRepairRequestStatus({ params: { id: pGuard.id }, body: { deliveryStatus: 'assignment_pending' }, decoded_email: adminEmail }, enterRes);
         logTest('28. Generic PATCH cannot ENTER assignment_pending (not a settable status)', enterRes.statusCode === 400 && enterRes.body.code === 'INVALID_REPAIR_STATUS');
         const leaveRes = fakeRes();
-        await parcelController.updateParcelStatus({ params: { id: pGuard.id }, body: { deliveryStatus: 'driver_assigned' }, decoded_email: techEmail }, leaveRes);
+        await parcelController.updateRepairRequestStatus({ params: { id: pGuard.id }, body: { deliveryStatus: 'driver_assigned' }, decoded_email: techEmail }, leaveRes);
         logTest('29. Generic PATCH cannot LEAVE assignment_pending (no allowed generic transition)', leaveRes.statusCode === 409 && leaveRes.body.code === 'STATUS_TRANSITION_NOT_ALLOWED');
-        const guardAfter = await models.Parcel.findById(pGuard.id);
+        const guardAfter = await models.RepairRequest.findById(pGuard.id);
         logTest('30. The request stays assignment_pending after both blocked generic updates', guardAfter.deliveryStatus === 'assignment_pending');
     } finally {
         if (createdParcelIds.length) await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds } });

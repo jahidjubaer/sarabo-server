@@ -30,7 +30,7 @@ const UPLOAD_SESSION_BODY_FIELDS = ['fileName', 'mimeType', 'size'];
 // the same transaction that marks the repair complete.
 class RepairController {
     constructor(models, collections, storageService = damageStorageService) {
-        this.Parcel = models.Parcel;
+        this.RepairRequest = models.RepairRequest;
         this.User = models.User;
         this.RepairEvidenceSession = models.RepairEvidenceSession;
         this.collections = collections;
@@ -97,7 +97,7 @@ class RepairController {
             return null;
         }
         const email = req.decoded_email;
-        const parcel = await this.Parcel.findById(id);
+        const parcel = await this.RepairRequest.findById(id);
         const access = await this.resolveAccess(parcel, email);
         const canSee = parcel && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
         if (!parcel || !canSee) {
@@ -458,7 +458,7 @@ class RepairController {
                     }
 
                     // Technician release - exactly once, in this same
-                    // transaction. Mirrors parcelController.completeParcel: only
+                    // transaction. Mirrors parcelController.completeRepairRequest: only
                     // set available if the technician holds no OTHER active
                     // assignment (defense in depth). Historical riderId/riderEmail
                     // are intentionally retained on the request for audit/history.
@@ -523,7 +523,7 @@ class RepairController {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
             const email = req.decoded_email;
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             const access = await this.resolveAccess(parcel, email);
             const canRead = parcel && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
             if (!parcel || !canRead) {

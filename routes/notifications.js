@@ -2,7 +2,7 @@ const { verifyFBToken } = require('../middleware/auth');
 const { ensureDatabaseReady } = require('../middleware/database');
 
 // Every route here requires only verifyFBToken (any authenticated role) -
-// never verifyAdmin/verifyRider. There is no public creation route, no
+// never verifyAdmin/verifyTechnician. There is no public creation route, no
 // DELETE, no PUT, and no GET /notifications/:id detail route in V1.
 //
 // Route-shape note: /notifications/read-all (2 path segments) and
@@ -10,7 +10,7 @@ const { ensureDatabaseReady } = require('../middleware/database');
 // different segment counts, so Express cannot structurally match one
 // pattern against the other's URL shape regardless of registration order -
 // unlike the historical /parcels/rider vs /parcels/:id collision (both 2
-// segments) that routes/parcels.js's own ordering comment guards against.
+// segments) that routes/repairRequests.js's own ordering comment guards against.
 // Specific-path routes are still registered before the generic :id-shaped
 // route below, matching that same defensive convention.
 function notificationRoutes(app, controllers) {

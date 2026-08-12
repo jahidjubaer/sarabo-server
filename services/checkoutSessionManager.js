@@ -114,7 +114,7 @@ function createCheckoutSessionManager(collections) {
     // Called when a customer cancels a repair request - releases the active
     // slot so an old checkout URL can never be reused to reach a valid paid
     // state, regardless of whether the real Stripe session itself can also
-    // be expired (see controllers/parcelController.js's cancelParcel, which
+    // be expired (see controllers/repairRequestController.js's cancelRepairRequest, which
     // uses the returned row's sessionId to best-effort expire it). Returns
     // the row that was active (with its sessionId), or null if none existed.
     async function cancelByParcelId(parcelId) {

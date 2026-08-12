@@ -3,7 +3,7 @@
 // (product-category metadata comes from Unit 1's frozen taxonomy, not a
 // database read). Service-definition lookup genuinely requires a database
 // read (it is a persisted, mutable catalog row), so that step is
-// orchestrated by the caller (controllers/parcelController.js) using
+// orchestrated by the caller (controllers/repairRequestController.js) using
 // models/ServiceDefinition.js directly - this module only validates the
 // already-fetched definition's shape/match, never fetches it itself.
 
@@ -25,7 +25,7 @@ const MAX_DAMAGE_IMAGES = 3;
 // in this unit, so a v2 request cannot yet realistically carry any real
 // image metadata. Creation deliberately permits 0 images for now by passing
 // { minImages: STAGED_MIN_DAMAGE_IMAGES } explicitly at the call site (see
-// controllers/parcelController.js) - the moment an upload unit exists, that
+// controllers/repairRequestController.js) - the moment an upload unit exists, that
 // call site changes to MIN_DAMAGE_IMAGES without touching this module's
 // validation logic itself. The canonical metadata shape/bounds below are
 // never weakened by this flag - only the minimum-count floor moves.

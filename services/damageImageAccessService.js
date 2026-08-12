@@ -38,7 +38,7 @@ async function resolveImageAccess({ parcel, callerEmail, models, session } = {})
     // is currently role "rider" and the request actually has a live,
     // in-flight assignment - avoids a wasted query for every other caller.
     if (callerRole === 'rider' && parcel.riderId && ACTIVE_STATUSES.includes(parcel.deliveryStatus)) {
-        const rider = await models.Rider.findByEmail(callerEmail, findOptions);
+        const rider = await models.Technician.findByEmail(callerEmail, findOptions);
         if (rider && rider._id.toString() === parcel.riderId) {
             return { allowed: true, accessRole: 'assigned-technician', code: null };
         }

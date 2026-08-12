@@ -5,7 +5,7 @@ const { generateSecureTrackingId } = require('../utils/trackingId');
 const { logTracking } = require('../middleware/logging');
 const { VALID_STATUSES, ACTIVE_STATUSES, ASSIGNMENT_PENDING, isValidTransition } = require('../utils/parcelStatus');
 const { validateRejectionReason, buildPendingAssignmentEntry, projectAssignmentForRole } = require('../utils/assignmentDecision');
-const { stripDamageImages, projectSafeListParcel } = require('../utils/parcelProjection');
+const { stripDamageImages, projectSafeListParcel } = require('../utils/repairRequestProjection');
 const { normalize } = require('../services/paymentProcessor');
 const { createNotificationService } = require('../services/notificationService');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
@@ -35,14 +35,14 @@ const ADMIN_LIST_MAX_SEARCH_LENGTH = 100;
 // the same set utils/parcelStatus.js's VALID_STATUSES plus the two values
 // that can never appear in that list (the implicit initial 'pending-pickup'
 // and the terminal 'cancelled', neither of which is a client-settable
-// transition target for updateParcelStatus, but both of which are real,
+// transition target for updateRepairRequestStatus, but both of which are real,
 // filterable request states).
 const ADMIN_LIST_VALID_STATUSES = ['pending-pickup', 'driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered', 'cancelled'];
 
-class ParcelController {
+class RepairRequestController {
     constructor(models, collections, storageService = damageStorageService) {
-        this.Parcel = models.Parcel;
-        this.Rider = models.Rider;
+        this.RepairRequest = models.RepairRequest;
+        this.Technician = models.Technician;
         this.User = models.User;
         this.ServiceDefinition = models.ServiceDefinition;
         this.DeletionCleanup = models.DeletionCleanup;
@@ -59,7 +59,7 @@ class ParcelController {
         this.storage = storageService;
     }
 
-    async getAllParcels(req, res) {
+    async getAllRepairRequests(req, res) {
         try {
             const query = {};
             const { email, deliveryStatus } = req.query;
@@ -80,14 +80,14 @@ class ParcelController {
             // BL-032: reduce damage.images to a safe { description, imageCount }
             // aggregate on the list too - a general list must never carry raw
             // storageKey/url metadata for any request it returns.
-            const result = await this.Parcel.findAll(query);
+            const result = await this.RepairRequest.findAll(query);
             res.send(result.map(projectSafeListParcel));
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair requests', error: error.message });
         }
     }
 
-    async getRiderParcels(req, res) {
+    async getTechnicianRepairRequests(req, res) {
         try {
             const { deliveryStatus } = req.query;
             const query = { riderEmail: req.decoded_email };
@@ -99,17 +99,17 @@ class ParcelController {
             }
 
             // BL-032: same damage-image strip for the technician assigned-jobs list.
-            const result = await this.Parcel.findAll(query);
+            const result = await this.RepairRequest.findAll(query);
             res.send(result.map(projectSafeListParcel));
         } catch (error) {
             res.status(500).send({ message: 'Error fetching technician repair requests', error: error.message });
         }
     }
 
-    async getParcelById(req, res) {
+    async getRepairRequestById(req, res) {
         try {
             const id = req.params.id;
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found' });
@@ -160,7 +160,7 @@ class ParcelController {
 
     async getDeliveryStatusStats(req, res) {
         try {
-            const result = await this.Parcel.getDeliveryStatusStats();
+            const result = await this.RepairRequest.getDeliveryStatusStats();
             res.send(result);
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair status stats', error: error.message });
@@ -174,7 +174,7 @@ class ParcelController {
     // against a fixed allow-list before being used to build the MongoDB
     // filter - nothing from the client is ever passed through as a raw
     // Mongo operator or field selector.
-    async getAdminParcels(req, res) {
+    async getAdminRepairRequests(req, res) {
         try {
             let { page, limit, search, status, paymentStatus, sort } = req.query;
 
@@ -216,7 +216,7 @@ class ParcelController {
 
             const sortDirection = sort === 'oldest' ? 1 : -1;
 
-            const { data, totalItems } = await this.Parcel.findPaginated(query, {
+            const { data, totalItems } = await this.RepairRequest.findPaginated(query, {
                 page,
                 limit,
                 sort: { createdAt: sortDirection }
@@ -251,7 +251,7 @@ class ParcelController {
     // dispatch check is the only thing added to this method - every line of
     // the legacy path itself is untouched, so legacy creation behavior stays
     // byte-for-byte identical to before this unit.
-    async createParcel(req, res) {
+    async createRepairRequest(req, res) {
         const schemaCheck = validateRepairRequestSchemaVersion(req.body && req.body.schemaVersion);
         if (!schemaCheck.valid) {
             return res.status(400).send({ message: schemaCheck.message, code: schemaCheck.code });
@@ -277,7 +277,7 @@ class ParcelController {
             for (let attempt = 1; attempt <= MAX_TRACKING_ID_ATTEMPTS; attempt++) {
                 parcel.trackingId = generateSecureTrackingId();
                 try {
-                    result = await this.Parcel.create(parcel);
+                    result = await this.RepairRequest.create(parcel);
                     break;
                 } catch (error) {
                     if (error.code === 11000 && attempt < MAX_TRACKING_ID_ATTEMPTS) continue;
@@ -392,7 +392,7 @@ class ParcelController {
             for (let attempt = 1; attempt <= MAX_TRACKING_ID_ATTEMPTS; attempt++) {
                 document.trackingId = generateSecureTrackingId();
                 try {
-                    result = await this.Parcel.create(document);
+                    result = await this.RepairRequest.create(document);
                     break;
                 } catch (error) {
                     if (error.code === 11000 && attempt < MAX_TRACKING_ID_ATTEMPTS) continue;
@@ -434,7 +434,7 @@ class ParcelController {
                 return res.status(400).send({ message: paginationCheck.message, code: paginationCheck.code });
             }
 
-            const parcel = await this.Parcel.findById(requestId);
+            const parcel = await this.RepairRequest.findById(requestId);
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
@@ -464,15 +464,15 @@ class ParcelController {
             // solely so it can report TECHNICIAN_NOT_APPROVED for them - the
             // default path never needs to see them, since they could never
             // be eligible regardless of anything else.
-            const candidates = await this.Rider.findEligibilityCandidates({ approvedOnly: !diagnostic });
+            const candidates = await this.Technician.findEligibilityCandidates({ approvedOnly: !diagnostic });
             const candidateIds = candidates.map((rider) => rider._id.toString());
             const candidateEmails = candidates.map((rider) => normalize(rider.email)).filter(Boolean);
 
             // Every per-candidate fact is fetched in exactly one set-based
             // query/aggregation each - never one query per candidate.
             const [activeRiderIds, completedCounts, linkedUserDocs] = await Promise.all([
-                this.Parcel.findRiderIdsWithDeliveryStatuses(candidateIds, ACTIVE_STATUSES),
-                this.Parcel.aggregateCompletedCountsByRider(candidateIds, 'parcel_delivered'),
+                this.RepairRequest.findRiderIdsWithDeliveryStatuses(candidateIds, ACTIVE_STATUSES),
+                this.RepairRequest.aggregateCompletedCountsByRider(candidateIds, 'parcel_delivered'),
                 candidateEmails.length
                     ? this.collections.users.find({ email: { $in: candidateEmails } }, { projection: { email: 1, role: 1, _id: 0 } }).toArray()
                     : []
@@ -537,8 +537,8 @@ class ParcelController {
     // is enough. The final parcel_delivered transition is different - it
     // must also atomically reset the assigned technician and write exactly
     // one completion tracking log, so it is handled separately by
-    // completeParcel below, which is the actual deliverable of this unit.
-    async updateParcelStatus(req, res) {
+    // completeRepairRequest below, which is the actual deliverable of this unit.
+    async updateRepairRequestStatus(req, res) {
         try {
             const id = req.params.id;
             const requestedStatus = req.body.deliveryStatus;
@@ -550,7 +550,7 @@ class ParcelController {
                 return res.status(400).send({ message: 'invalid repair status', code: 'INVALID_REPAIR_STATUS' });
             }
 
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
@@ -566,10 +566,10 @@ class ParcelController {
             }
 
             // The completion transition has its own transactional path - see
-            // completeParcel. Everything below only ever applies to the
+            // completeRepairRequest. Everything below only ever applies to the
             // earlier, technician-only steps of the lifecycle.
             if (requestedStatus === 'parcel_delivered') {
-                return this.completeParcel(res, parcel, req.decoded_email);
+                return this.completeRepairRequest(res, parcel, req.decoded_email);
             }
 
             if (requestedStatus === parcel.deliveryStatus) {
@@ -622,7 +622,7 @@ class ParcelController {
 
     // Best-effort, non-blocking repair-lifecycle notification for the two
     // non-transactional status transitions (rider_arriving, parcel_picked_up)
-    // - never for repair_completed, which joins completeParcel's own
+    // - never for repair_completed, which joins completeRepairRequest's own
     // transaction instead. Resolves both the repair owner's real current
     // role and the authenticated actor's real current role from the users
     // collection (never trusted from the parcel document, request body, or
@@ -672,7 +672,7 @@ class ParcelController {
     // for a retry to repair it. The assigned technician is always the one
     // recorded on the repair request itself (parcel.riderId) - a
     // client-supplied riderId is never trusted to select who gets reset.
-    async completeParcel(res, parcel, actorEmail) {
+    async completeRepairRequest(res, parcel, actorEmail) {
         try {
             if (!parcel.riderId || !ObjectId.isValid(parcel.riderId)) {
                 return res.status(409).send({ message: 'this request has no valid assigned technician', code: 'REQUEST_NOT_ASSIGNED' });
@@ -882,7 +882,7 @@ class ParcelController {
     // before the transaction opens, purely to produce fast 400/404s - the
     // actual concurrency guarantee comes from the guarded updates inside the
     // transaction, never from these preliminary reads alone.
-    async assignRiderToParcel(req, res) {
+    async assignTechnicianToRepairRequest(req, res) {
         try {
             const parcelId = req.params.id;
             const { riderId } = req.body;
@@ -894,12 +894,12 @@ class ParcelController {
                 return res.status(400).send({ message: 'invalid technician id', code: 'INVALID_TECHNICIAN_ID' });
             }
 
-            const parcel = await this.Parcel.findById(parcelId);
+            const parcel = await this.RepairRequest.findById(parcelId);
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
 
-            const technician = await this.Rider.findById(riderId);
+            const technician = await this.Technician.findById(riderId);
             if (!technician) {
                 return res.status(404).send({ message: 'technician not found', code: 'TECHNICIAN_NOT_FOUND' });
             }
@@ -1036,7 +1036,7 @@ class ParcelController {
 
                         // The exact expertise array just validated becomes
                         // part of the rider claim's own guard condition below
-                        // (mirrors models/Rider.js#replaceExpertise's "guard
+                        // (mirrors models/Technician.js#replaceExpertise's "guard
                         // on every field read, not just the field being
                         // changed" pattern) - closes the race where a
                         // concurrent expertise change lands between this
@@ -1179,7 +1179,7 @@ class ParcelController {
                 }
                 // Determine the transaction-bound current reason for an
                 // accurate, controlled response.
-                const latest = await this.Parcel.findById(parcelId);
+                const latest = await this.RepairRequest.findById(parcelId);
                 if (!latest) {
                     return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
                 }
@@ -1239,7 +1239,7 @@ class ParcelController {
             if (!ObjectId.isValid(id)) {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
@@ -1292,7 +1292,7 @@ class ParcelController {
             if (!reasonCheck.valid) {
                 return res.status(400).send({ message: reasonCheck.message, code: reasonCheck.code });
             }
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
@@ -1370,7 +1370,7 @@ class ParcelController {
             if (!ObjectId.isValid(id)) {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
@@ -1398,7 +1398,7 @@ class ParcelController {
     // quote, payment, active checkout, or repair. Everything is re-verified
     // atomically inside the delete transaction, so a request that progresses
     // between the eligibility read and the write is never destroyed.
-    async deleteParcel(req, res) {
+    async deleteRepairRequest(req, res) {
         const id = req.params.id;
         if (!ObjectId.isValid(id)) {
             return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
@@ -1407,7 +1407,7 @@ class ParcelController {
         let parcel;
         let isAdmin = false;
         try {
-            parcel = await this.Parcel.findById(id);
+            parcel = await this.RepairRequest.findById(id);
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
@@ -1506,7 +1506,7 @@ class ParcelController {
         const mongoSession = client.startSession();
         try {
             await mongoSession.withTransaction(async () => {
-                const del = await this.Parcel.deleteGuarded({ id, session: mongoSession });
+                const del = await this.RepairRequest.deleteGuarded({ id, session: mongoSession });
                 if (del.deletedCount === 0) {
                     throw Object.assign(new Error('this request has changed and can no longer be deleted'), { code: 'REQUEST_DELETE_NOT_ALLOWED' });
                 }
@@ -1570,14 +1570,14 @@ class ParcelController {
     // guard alone); eligibility is centralized in
     // services/cancellationPolicy.js. Never deletes the document, never
     // touches payment records, never issues a refund.
-    async cancelParcel(req, res) {
+    async cancelRepairRequest(req, res) {
         try {
             const id = req.params.id;
             if (!ObjectId.isValid(id)) {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
 
-            const parcel = await this.Parcel.findById(id);
+            const parcel = await this.RepairRequest.findById(id);
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
@@ -1641,7 +1641,7 @@ class ParcelController {
                 // Lost a race (assignment or payment committed between the
                 // eligibility check above and this atomic update) - re-fetch
                 // to report an accurate, current conflict.
-                const latest = await this.Parcel.findById(id);
+                const latest = await this.RepairRequest.findById(id);
                 if (latest && latest.deliveryStatus === 'cancelled') {
                     return res.send({ message: 'Repair request is already cancelled.', status: 'cancelled', alreadyCancelled: true });
                 }
@@ -1674,5 +1674,5 @@ class ParcelController {
     }
 }
 
-module.exports = ParcelController;
+module.exports = RepairRequestController;
 

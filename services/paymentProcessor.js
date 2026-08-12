@@ -31,7 +31,7 @@ function normalize(value) {
 // requires this file for `normalize`, so requiring it back here would create
 // a module-load cycle between the two service files.
 function createPaymentProcessor(models, collections, notifications) {
-    const { Parcel, User } = models;
+    const { RepairRequest, User } = models;
     const checkoutSessionManager = createCheckoutSessionManager(collections);
 
     // Completes a v2 approved-quote payment. Reached only from the shared
@@ -207,7 +207,7 @@ function createPaymentProcessor(models, collections, notifications) {
                 await checkoutSessionManager.completeByParcelId(winner.parcelId);
                 return { code: 'OK', alreadyProcessed: true, transactionId: winner.transactionId, trackingId: winner.trackingId };
             }
-            const latestParcel = await Parcel.findById(parcel._id.toString());
+            const latestParcel = await RepairRequest.findById(parcel._id.toString());
             if (latestParcel && latestParcel.deliveryStatus === 'cancelled') {
                 return { code: 'REQUEST_CANCELLED' };
             }
@@ -225,7 +225,7 @@ function createPaymentProcessor(models, collections, notifications) {
         // by either source, on a previous call.
         const existingPayment = await collections.payments.findOne({ sessionId });
         if (existingPayment) {
-            const parcel = await Parcel.findById(existingPayment.parcelId);
+            const parcel = await RepairRequest.findById(existingPayment.parcelId);
             if (!parcel) {
                 return { code: 'PARCEL_NOT_FOUND' };
             }
@@ -257,7 +257,7 @@ function createPaymentProcessor(models, collections, notifications) {
             return { code: 'MISSING_METADATA' };
         }
 
-        const parcel = await Parcel.findById(parcelId);
+        const parcel = await RepairRequest.findById(parcelId);
         if (!parcel) {
             return { code: 'PARCEL_NOT_FOUND' };
         }
@@ -384,7 +384,7 @@ function createPaymentProcessor(models, collections, notifications) {
                     { session: mongoSession }
                 );
                 if (updateResult.matchedCount === 0) {
-                    // Parcel became paid by a concurrent different-session
+                    // RepairRequest became paid by a concurrent different-session
                     // request between our earlier check and this write.
                     conflict = true;
                     await collections.payments.deleteOne({ _id: insertedId }, { session: mongoSession });
@@ -443,7 +443,7 @@ function createPaymentProcessor(models, collections, notifications) {
             // No payment ever recorded for this sessionId, yet the guarded
             // update still lost - a concurrent cancellation, not a
             // concurrent payment, must have won the race (Case 3).
-            const latestParcel = await Parcel.findById(parcel._id.toString());
+            const latestParcel = await RepairRequest.findById(parcel._id.toString());
             if (latestParcel && latestParcel.deliveryStatus === 'cancelled') {
                 return { code: 'REQUEST_CANCELLED' };
             }
