@@ -34,7 +34,7 @@ function getCancellationEligibility(parcel, { hasCompletedPayment }) {
         return { eligible: false, code: 'REQUEST_ALREADY_ASSIGNED', reason: 'a technician has already been assigned to this request' };
     }
 
-    if (parcel.riderEmail) {
+    if (parcel.technicianEmail) {
         // Defensive: a technician reference should never exist while status
         // is still pending-pickup, but never trust deliveryStatus alone.
         return { eligible: false, code: 'REQUEST_ALREADY_ASSIGNED', reason: 'a technician has already been assigned to this request' };

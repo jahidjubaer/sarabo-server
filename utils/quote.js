@@ -24,7 +24,7 @@ const DECISIONS = Object.freeze(['approve', 'reject']);
 // loud rejection (never a silent strip), so tampering is always an obvious error.
 const FORBIDDEN_SUBMIT_FIELDS = [
     'totalAmount', 'total', 'currency', 'status', 'version',
-    'riderId', 'submittedByRiderId', 'submittedByEmail', 'submittedAt',
+    'technicianId', 'submittedByRiderId', 'submittedByEmail', 'submittedAt',
     'customerEmail', 'senderEmail', 'decision', 'decidedAt', 'decisionReason',
     'paymentStatus', 'stripeAmount', 'amount', 'cents',
 ];

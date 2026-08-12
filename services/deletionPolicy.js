@@ -43,7 +43,7 @@ function getDeletionEligibility(parcel, { hasAnyPayment, hasActiveCheckout }) {
         return { eligible: false, code: REQUEST_DELETE_NOT_ALLOWED, reason: 'this request has progressed beyond the stage where it can be deleted' };
     }
 
-    if (parcel.riderEmail || parcel.riderId) {
+    if (parcel.technicianEmail || parcel.technicianId) {
         // Defensive: a technician reference should never exist while status is
         // still pending-pickup, but never trust deliveryStatus alone.
         return { eligible: false, code: REQUEST_DELETE_NOT_ALLOWED, reason: 'a technician has already been assigned to this request' };

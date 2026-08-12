@@ -23,7 +23,7 @@ const COMPLETION_SUMMARY_MAX = 2000;
 // Fields a client must never supply. Their presence is a loud rejection (never
 // a silent strip), so any attempt to forge an id/timestamp/identity/status is
 // an obvious error rather than quietly ignored.
-const FORBIDDEN_PROGRESS_FIELDS = ['id', 'createdAt', 'createdByRiderId', 'riderId', 'status', 'version'];
+const FORBIDDEN_PROGRESS_FIELDS = ['id', 'createdAt', 'createdByRiderId', 'technicianId', 'status', 'version'];
 const FORBIDDEN_COMPLETE_FIELDS = ['status', 'completedAt', 'completedByRiderId', 'evidenceImages', 'evidence', 'startedAt', 'progressUpdates', 'version'];
 
 function isPlainObject(value) {
@@ -62,7 +62,7 @@ function validateProgressInput(body) {
 
 // Builds a single progress update from an already-validated message. The id and
 // timestamp are always server-generated; the rider identity is passed in from
-// the trusted parcel.riderId, never from the client.
+// the trusted parcel.technicianId, never from the client.
 function buildProgressUpdate(normalized, { createdByRiderId, now }) {
     return {
         id: crypto.randomUUID(),

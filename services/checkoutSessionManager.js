@@ -2,7 +2,7 @@
 // parcel, so concurrent checkout requests (multiple tabs, rapid retries,
 // direct API calls, two browser sessions) can never spawn more than one live
 // Stripe session for the same repair request. The real guard is the unique
-// partial index on checkoutSessions.parcelId (see config/database.js, filtered
+// partial index on checkoutSessions.requestId (see config/database.js, filtered
 // to active:true) - every function here is written so a duplicate-key error
 // on that index is a normal, expected outcome of a race, not a bug.
 //
@@ -24,8 +24,8 @@ function createCheckoutSessionManager(collections) {
     // Both cases mark the row active:false and return null, letting the
     // caller create a fresh session immediately - there is no separate sweep
     // job, expiry is only ever noticed the next time it actually matters.
-    async function findActive(parcelId) {
-        const row = await checkoutSessions.findOne({ parcelId, active: true });
+    async function findActive(requestId) {
+        const row = await checkoutSessions.findOne({ requestId, active: true });
         if (!row) return null;
 
         if (row.status === 'creating') {
@@ -56,11 +56,11 @@ function createCheckoutSessionManager(collections) {
     // stripe.checkout.sessions.create for the same parcel. A duplicate-key
     // error here means another request (any tab/device/retry) won the race
     // between the caller's own findActive() check and this insert.
-    async function claim({ parcelId, ownerEmail, amount, currency }) {
+    async function claim({ requestId, ownerEmail, amount, currency }) {
         const now = new Date();
         try {
             const result = await checkoutSessions.insertOne({
-                parcelId,
+                requestId,
                 ownerEmail,
                 amount,
                 currency,
@@ -103,9 +103,9 @@ function createCheckoutSessionManager(collections) {
     // even when no active row exists, and safe to call repeatedly (idempotent
     // no-op once already inactive). Accepts an optional MongoDB session so it
     // can participate in the same transaction as the payment write.
-    async function completeByParcelId(parcelId, mongoSession = null) {
+    async function completeByParcelId(requestId, mongoSession = null) {
         await checkoutSessions.updateOne(
-            { parcelId, active: true },
+            { requestId, active: true },
             { $set: { status: 'completed', active: false, updatedAt: new Date() } },
             mongoSession ? { session: mongoSession } : {}
         );
@@ -117,8 +117,8 @@ function createCheckoutSessionManager(collections) {
     // be expired (see controllers/repairRequestController.js's cancelRepairRequest, which
     // uses the returned row's sessionId to best-effort expire it). Returns
     // the row that was active (with its sessionId), or null if none existed.
-    async function cancelByParcelId(parcelId) {
-        const row = await checkoutSessions.findOne({ parcelId, active: true });
+    async function cancelByParcelId(requestId) {
+        const row = await checkoutSessions.findOne({ requestId, active: true });
         if (!row) return null;
         await checkoutSessions.updateOne(
             { _id: row._id, active: true },

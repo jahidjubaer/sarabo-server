@@ -28,8 +28,8 @@ class RepairRequestModel {
         deliveryStatus: 1,
         paymentStatus: 1,
         cost: 1,
-        riderName: 1,
-        riderEmail: 1,
+        technicianName: 1,
+        technicianEmail: 1,
         createdAt: 1
     };
 
@@ -119,8 +119,8 @@ class RepairRequestModel {
                 { deliveryStatus: { $exists: false } },
                 { deliveryStatus: 'pending-pickup' }
             ],
-            riderEmail: { $exists: false },
-            riderId: { $exists: false },
+            technicianEmail: { $exists: false },
+            technicianId: { $exists: false },
             inspection: { $exists: false },
             quote: { $exists: false },
             repair: { $exists: false },
@@ -139,10 +139,10 @@ class RepairRequestModel {
     async findRiderIdsWithDeliveryStatuses(riderIds, statuses) {
         if (riderIds.length === 0) return new Set();
         const docs = await this.collection.find(
-            { riderId: { $in: riderIds }, deliveryStatus: { $in: statuses } },
-            { projection: { riderId: 1 } }
+            { technicianId: { $in: riderIds }, deliveryStatus: { $in: statuses } },
+            { projection: { technicianId: 1 } }
         ).toArray();
-        return new Set(docs.map((doc) => doc.riderId));
+        return new Set(docs.map((doc) => doc.technicianId));
     }
 
     // Set-based completed-repair count for eligible-technician ranking
@@ -153,8 +153,8 @@ class RepairRequestModel {
     async aggregateCompletedCountsByRider(riderIds, completedStatus) {
         if (riderIds.length === 0) return new Map();
         const pipeline = [
-            { $match: { riderId: { $in: riderIds }, deliveryStatus: completedStatus } },
-            { $group: { _id: '$riderId', count: { $sum: 1 } } }
+            { $match: { technicianId: { $in: riderIds }, deliveryStatus: completedStatus } },
+            { $group: { _id: '$technicianId', count: { $sum: 1 } } }
         ];
         const rows = await this.collection.aggregate(pipeline).toArray();
         return new Map(rows.map((row) => [row._id, row.count]));

@@ -1,6 +1,6 @@
 // Repair completion evidence session model (Phase 6.4 Unit 7). Mirrors
 // models/DamageUploadSession.js but is technician-owned (createdByRiderId /
-// riderEmail) rather than customer-owned, and lives in its own collection so
+// technicianEmail) rather than customer-owned, and lives in its own collection so
 // repair evidence and customer damage photos never share storage bookkeeping.
 // `_id` is the crypto-random UUID from utils/repairEvidence.js#generateUploadSessionId,
 // which is also the public uploadSessionId and the unguessable segment of the
@@ -11,12 +11,12 @@ class RepairEvidenceSessionModel {
         this.collection = collection;
     }
 
-    async create({ id, requestId, createdByRiderId, riderEmail, storageKey, mimeType, declaredSize, expiresAt }, options = {}) {
+    async create({ id, requestId, createdByRiderId, technicianEmail, storageKey, mimeType, declaredSize, expiresAt }, options = {}) {
         const doc = {
             _id: id,
             requestId,
             createdByRiderId,
-            riderEmail,
+            technicianEmail,
             storageKey,
             mimeType,
             declaredSize,

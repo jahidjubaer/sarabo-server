@@ -36,12 +36,12 @@ class DamageUploadController {
     // never a 403 that would confirm the request exists. Writes the
     // response and returns null when the caller should stop; returns the
     // parcel otherwise.
-    async _loadOwnedV2Parcel(req, res, parcelId) {
-        if (!ObjectId.isValid(parcelId)) {
+    async _loadOwnedV2Parcel(req, res, requestId) {
+        if (!ObjectId.isValid(requestId)) {
             res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             return null;
         }
-        const parcel = await this.RepairRequest.findById(parcelId);
+        const parcel = await this.RepairRequest.findById(requestId);
         if (!parcel) {
             res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             return null;
@@ -82,8 +82,8 @@ class DamageUploadController {
 
     async createUploadSession(req, res) {
         try {
-            const parcelId = req.params.id;
-            const parcel = await this._loadOwnedV2Parcel(req, res, parcelId);
+            const requestId = req.params.id;
+            const parcel = await this._loadOwnedV2Parcel(req, res, requestId);
             if (!parcel) return;
 
             if (!isDamageEvidenceEditable(parcel)) {
@@ -115,7 +115,7 @@ class DamageUploadController {
             }
 
             const uploadSessionId = generateUploadSessionId();
-            const storageKey = generateStorageKey(parcelId, mimeType, uploadSessionId);
+            const storageKey = generateStorageKey(requestId, mimeType, uploadSessionId);
             const expiresAt = new Date(Date.now() + UPLOAD_SESSION_TTL_MS);
 
             let uploadTarget;
@@ -131,7 +131,7 @@ class DamageUploadController {
             // harmless.
             await this.DamageUploadSession.create({
                 id: uploadSessionId,
-                requestId: parcelId,
+                requestId: requestId,
                 ownerEmail: normalize(req.decoded_email),
                 storageKey,
                 mimeType,
@@ -166,8 +166,8 @@ class DamageUploadController {
 
     async finalizeUpload(req, res) {
         try {
-            const parcelId = req.params.id;
-            const parcel = await this._loadOwnedV2Parcel(req, res, parcelId);
+            const requestId = req.params.id;
+            const parcel = await this._loadOwnedV2Parcel(req, res, requestId);
             if (!parcel) return;
 
             const uploadSessionId = req.body && req.body.uploadSessionId;
@@ -180,7 +180,7 @@ class DamageUploadController {
             // Wrong request, wrong owner, and genuinely missing all collapse
             // to the same controlled not-found response - a session created
             // for a different request/owner is never confirmed to exist.
-            if (!uploadSession || uploadSession.requestId !== parcelId || uploadSession.ownerEmail !== callerEmail) {
+            if (!uploadSession || uploadSession.requestId !== requestId || uploadSession.ownerEmail !== callerEmail) {
                 return res.status(404).send({ message: 'upload session not found', code: 'UPLOAD_SESSION_NOT_FOUND' });
             }
 
@@ -244,10 +244,10 @@ class DamageUploadController {
             try {
                 await mongoSession.withTransaction(async () => {
                     const attachResult = await this.RepairRequest.attachDamageImage({
-                        requestId: parcelId, storageKey: uploadSession.storageKey, image: imageEntry, session: mongoSession
+                        requestId: requestId, storageKey: uploadSession.storageKey, image: imageEntry, session: mongoSession
                     });
                     if (attachResult.matchedCount === 0) {
-                        const freshParcel = await this.collections.repairRequests.findOne({ _id: new ObjectId(parcelId) }, { session: mongoSession });
+                        const freshParcel = await this.collections.repairRequests.findOne({ _id: new ObjectId(requestId) }, { session: mongoSession });
                         if (!freshParcel) {
                             outcome = { code: 'REQUEST_NOT_FOUND', httpStatus: 404 };
                             return;
@@ -260,7 +260,7 @@ class DamageUploadController {
                     }
 
                     const finalizeResult = await this.DamageUploadSession.markFinalized({
-                        id: uploadSession._id, requestId: parcelId, ownerEmail: callerEmail,
+                        id: uploadSession._id, requestId: requestId, ownerEmail: callerEmail,
                         storageKey: uploadSession.storageKey, now, session: mongoSession
                     });
                     if (finalizeResult.matchedCount === 0) {
@@ -294,8 +294,8 @@ class DamageUploadController {
 
     async removeImage(req, res) {
         try {
-            const parcelId = req.params.id;
-            const parcel = await this._loadOwnedV2Parcel(req, res, parcelId);
+            const requestId = req.params.id;
+            const parcel = await this._loadOwnedV2Parcel(req, res, requestId);
             if (!parcel) return;
 
             const imageId = req.params.imageId;
@@ -305,7 +305,7 @@ class DamageUploadController {
 
             const uploadSession = await this.DamageUploadSession.findById(imageId);
             const callerEmail = normalize(req.decoded_email);
-            if (!uploadSession || uploadSession.requestId !== parcelId || uploadSession.ownerEmail !== callerEmail || uploadSession.status !== 'finalized') {
+            if (!uploadSession || uploadSession.requestId !== requestId || uploadSession.ownerEmail !== callerEmail || uploadSession.status !== 'finalized') {
                 return res.status(404).send({ message: 'damage image not found', code: 'DAMAGE_IMAGE_NOT_FOUND' });
             }
 
@@ -327,7 +327,7 @@ class DamageUploadController {
             // already gone - there is no dangling pointer and nothing
             // misleading in the response; the orphaned Firebase object
             // becomes cleanup debt for scripts/audit-damage-uploads.js.
-            const removeResult = await this.RepairRequest.removeDamageImage({ requestId: parcelId, storageKey: uploadSession.storageKey });
+            const removeResult = await this.RepairRequest.removeDamageImage({ requestId: requestId, storageKey: uploadSession.storageKey });
             if (removeResult.modifiedCount === 0) {
                 // Raced with another removal of the same image - idempotent
                 // success either way.
@@ -355,12 +355,12 @@ class DamageUploadController {
     // genuinely missing request (existence-oracle safe).
     async listImages(req, res) {
         try {
-            const parcelId = req.params.id;
-            if (!ObjectId.isValid(parcelId)) {
+            const requestId = req.params.id;
+            if (!ObjectId.isValid(requestId)) {
                 return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             }
 
-            const parcel = await this.RepairRequest.findById(parcelId);
+            const parcel = await this.RepairRequest.findById(requestId);
             if (!parcel) {
                 return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
             }
@@ -381,7 +381,7 @@ class DamageUploadController {
             const attachedImages = (parcel.damage && Array.isArray(parcel.damage.images)) ? parcel.damage.images : [];
             if (attachedImages.length === 0) {
                 return res.status(200).send({
-                    requestId: parcelId, accessRole: access.accessRole,
+                    requestId: requestId, accessRole: access.accessRole,
                     images: [], totalImages: 0, maxImages: MAX_DAMAGE_IMAGES
                 });
             }
@@ -389,7 +389,7 @@ class DamageUploadController {
             // Persisted image metadata carries no explicit imageId - the
             // finalized upload session whose storageKey matches is the
             // join (see models/DamageUploadSession.js).
-            const finalizedSessions = await this.DamageUploadSession.findFinalizedByRequestId(parcelId);
+            const finalizedSessions = await this.DamageUploadSession.findFinalizedByRequestId(requestId);
             const storageKeyToImageId = new Map(finalizedSessions.map((session) => [session.storageKey, session._id]));
 
             const sortableImages = attachedImages
@@ -443,7 +443,7 @@ class DamageUploadController {
             }
 
             const responseBody = {
-                requestId: parcelId,
+                requestId: requestId,
                 accessRole: access.accessRole,
                 images,
                 totalImages: sortableImages.length,

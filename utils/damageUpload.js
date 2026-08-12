@@ -78,8 +78,8 @@ function isDamageEvidenceEditable(parcel) {
     if (status !== 'pending-pickup') return false;
     // Defensive: a technician reference should never exist while status is
     // still pending-pickup, but never trust deliveryStatus alone (mirrors
-    // the same defensive riderEmail check in getCancellationEligibility).
-    if (parcel.riderId || parcel.riderEmail) return false;
+    // the same defensive technicianEmail check in getCancellationEligibility).
+    if (parcel.technicianId || parcel.technicianEmail) return false;
     return true;
 }
 

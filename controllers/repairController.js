@@ -45,7 +45,7 @@ class RepairController {
             role,
             isOwner: !!parcel && parcel.senderEmail === email,
             isAdmin: role === 'admin',
-            isAssignedByEmail: !!parcel && parcel.riderEmail === email,
+            isAssignedByEmail: !!parcel && parcel.technicianEmail === email,
         };
     }
 
@@ -154,8 +154,8 @@ class RepairController {
                             _id: parcel._id,
                             schemaVersion: 2,
                             deliveryStatus: PAYMENT_COMPLETED,
-                            riderEmail: email,
-                            riderId: parcel.riderId,
+                            technicianEmail: email,
+                            technicianId: parcel.technicianId,
                             'payment.status': 'completed',
                             'quote.status': 'approved',
                             $or: [{ repair: { $exists: false } }, { 'repair.status': 'not_started' }],
@@ -167,7 +167,7 @@ class RepairController {
                         const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
                         else if (fresh.repair && fresh.repair.status && fresh.repair.status !== 'not_started') conflictCode = 'REPAIR_ALREADY_STARTED';
-                        else if (fresh.riderEmail !== email || fresh.riderId !== parcel.riderId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
+                        else if (fresh.technicianEmail !== email || fresh.technicianId !== parcel.technicianId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
                         else conflictCode = 'REPAIR_NOT_PAYABLE_COMPLETE';
                         throw new Error('repair start guard failed');
                     }
@@ -231,7 +231,7 @@ class RepairController {
 
                     const now = new Date();
                     update = buildProgressUpdate(validation.normalized, {
-                        createdByRiderId: parcel.riderId ? new ObjectId(parcel.riderId) : null,
+                        createdByRiderId: parcel.technicianId ? new ObjectId(parcel.technicianId) : null,
                         now,
                     });
 
@@ -244,8 +244,8 @@ class RepairController {
                             _id: parcel._id,
                             schemaVersion: 2,
                             deliveryStatus: REPAIR_IN_PROGRESS,
-                            riderEmail: email,
-                            riderId: parcel.riderId,
+                            technicianEmail: email,
+                            technicianId: parcel.technicianId,
                             'repair.status': 'in_progress',
                             $expr: { $lt: [{ $size: { $ifNull: ['$repair.progressUpdates', []] } }, MAX_PROGRESS_UPDATES] },
                         },
@@ -255,7 +255,7 @@ class RepairController {
                     if (updateResult.matchedCount === 0) {
                         const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
-                        else if (fresh.riderEmail !== email || fresh.riderId !== parcel.riderId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
+                        else if (fresh.technicianEmail !== email || fresh.technicianId !== parcel.technicianId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
                         else if (!fresh.repair || fresh.repair.status !== 'in_progress') conflictCode = 'REPAIR_NOT_IN_PROGRESS';
                         else conflictCode = 'PROGRESS_LIMIT_REACHED';
                         throw new Error('progress update guard failed');
@@ -310,9 +310,9 @@ class RepairController {
                 return res.status(400).send({ message: `size must be a positive integer of at most ${MAX_IMAGE_SIZE_BYTES} bytes`, code: 'INVALID_EVIDENCE_SIZE' });
             }
 
-            const parcelId = parcel._id.toString();
+            const requestId = parcel._id.toString();
             const uploadSessionId = generateUploadSessionId();
-            const storageKey = generateEvidenceStorageKey(parcelId, mimeType, uploadSessionId);
+            const storageKey = generateEvidenceStorageKey(requestId, mimeType, uploadSessionId);
             const expiresAt = new Date(Date.now() + EVIDENCE_UPLOAD_SESSION_TTL_MS);
 
             let uploadTarget;
@@ -324,9 +324,9 @@ class RepairController {
 
             await this.RepairEvidenceSession.create({
                 id: uploadSessionId,
-                requestId: parcelId,
-                createdByRiderId: parcel.riderId,
-                riderEmail: email,
+                requestId: requestId,
+                createdByRiderId: parcel.technicianId,
+                technicianEmail: email,
                 storageKey,
                 mimeType,
                 declaredSize: size,
@@ -358,7 +358,7 @@ class RepairController {
                 const code = parcel.repair && parcel.repair.status === 'completed' ? 'REPAIR_ALREADY_COMPLETED' : 'REPAIR_NOT_IN_PROGRESS';
                 return res.status(409).send({ message: this.messageForCode(code), code });
             }
-            if (!parcel.riderId || !ObjectId.isValid(parcel.riderId)) {
+            if (!parcel.technicianId || !ObjectId.isValid(parcel.technicianId)) {
                 return res.status(409).send({ message: 'this request has no valid assigned technician', code: 'REQUEST_NOT_ASSIGNED' });
             }
 
@@ -377,7 +377,7 @@ class RepairController {
             const seenStorageKeys = new Set();
             for (const imageId of validation.normalized.evidenceImageIds) {
                 const session = await this.RepairEvidenceSession.findById(imageId);
-                if (!session || session.requestId !== parcel._id.toString() || session.createdByRiderId !== parcel.riderId || session.status !== 'pending') {
+                if (!session || session.requestId !== parcel._id.toString() || session.createdByRiderId !== parcel.technicianId || session.status !== 'pending') {
                     return res.status(this.statusForCode('EVIDENCE_NOT_FOUND')).send({ message: this.messageForCode('EVIDENCE_NOT_FOUND'), code: 'EVIDENCE_NOT_FOUND' });
                 }
                 if (seenStorageKeys.has(session.storageKey)) {
@@ -432,8 +432,8 @@ class RepairController {
                             _id: parcel._id,
                             schemaVersion: 2,
                             deliveryStatus: REPAIR_IN_PROGRESS,
-                            riderEmail: email,
-                            riderId: parcel.riderId,
+                            technicianEmail: email,
+                            technicianId: parcel.technicianId,
                             'repair.status': 'in_progress',
                         },
                         { $set: { deliveryStatus: REPAIR_COMPLETED, 'repair.status': 'completed', 'repair.completion': completionDoc, updatedAt: now } },
@@ -443,7 +443,7 @@ class RepairController {
                         const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
                         else if (fresh.repair && fresh.repair.status === 'completed') conflictCode = 'REPAIR_ALREADY_COMPLETED';
-                        else if (fresh.riderEmail !== email || fresh.riderId !== parcel.riderId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
+                        else if (fresh.technicianEmail !== email || fresh.technicianId !== parcel.technicianId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
                         else conflictCode = 'REPAIR_NOT_IN_PROGRESS';
                         throw new Error('repair completion guard failed');
                     }
@@ -453,22 +453,22 @@ class RepairController {
                     // never be flipped.
                     for (const ev of evidenceImages) {
                         await this.RepairEvidenceSession.markFinalized({
-                            id: ev.imageId, requestId: parcel._id.toString(), createdByRiderId: parcel.riderId, now, session: mongoSession,
+                            id: ev.imageId, requestId: parcel._id.toString(), createdByRiderId: parcel.technicianId, now, session: mongoSession,
                         });
                     }
 
                     // Technician release - exactly once, in this same
                     // transaction. Mirrors parcelController.completeRepairRequest: only
                     // set available if the technician holds no OTHER active
-                    // assignment (defense in depth). Historical riderId/riderEmail
+                    // assignment (defense in depth). Historical technicianId/technicianEmail
                     // are intentionally retained on the request for audit/history.
-                    const riderObjectId = new ObjectId(parcel.riderId);
+                    const riderObjectId = new ObjectId(parcel.technicianId);
                     const technician = await this.collections.technicians.findOne({ _id: riderObjectId }, { session: mongoSession });
                     if (!technician) {
                         throw Object.assign(new Error('assigned technician not found during completion'), { code: 'COMPLETION_FAILED' });
                     }
                     const otherActive = await this.collections.repairRequests.findOne(
-                        { riderId: parcel.riderId, deliveryStatus: { $in: ACTIVE_STATUSES }, _id: { $ne: parcel._id } },
+                        { technicianId: parcel.technicianId, deliveryStatus: { $in: ACTIVE_STATUSES }, _id: { $ne: parcel._id } },
                         { session: mongoSession }
                     );
                     const riderUpdate = await this.collections.technicians.updateOne(

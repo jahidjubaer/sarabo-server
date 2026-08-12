@@ -37,9 +37,9 @@ async function resolveImageAccess({ parcel, callerEmail, models, session } = {})
     // Only worth a rider lookup at all when the caller's own linked account
     // is currently role "rider" and the request actually has a live,
     // in-flight assignment - avoids a wasted query for every other caller.
-    if (callerRole === 'rider' && parcel.riderId && ACTIVE_STATUSES.includes(parcel.deliveryStatus)) {
+    if (callerRole === 'rider' && parcel.technicianId && ACTIVE_STATUSES.includes(parcel.deliveryStatus)) {
         const rider = await models.Technician.findByEmail(callerEmail, findOptions);
-        if (rider && rider._id.toString() === parcel.riderId) {
+        if (rider && rider._id.toString() === parcel.technicianId) {
             return { allowed: true, accessRole: 'assigned-technician', code: null };
         }
     }

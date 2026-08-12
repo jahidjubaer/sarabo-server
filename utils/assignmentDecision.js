@@ -22,12 +22,12 @@ function validateRejectionReason(raw) {
 // Builds the append-only pending history entry created when an admin offers an
 // assignment. Identity is captured for the audit trail (admin-only projection);
 // it is never surfaced to customers.
-function buildPendingAssignmentEntry({ assignmentId, riderId, riderEmail, riderName, assignedBy, assignedAt }) {
+function buildPendingAssignmentEntry({ assignmentId, technicianId, technicianEmail, technicianName, assignedBy, assignedAt }) {
     return {
         assignmentId,
-        riderId,
-        riderEmail,
-        riderName,
+        technicianId,
+        technicianEmail,
+        technicianName,
         assignedBy,
         assignedAt,
         decision: 'pending',
@@ -47,18 +47,18 @@ function projectAssignmentForRole(parcel, role) {
     const current = {
         deliveryStatus: status,
         awaitingDecision: status === 'assignment_pending',
-        technicianName: parcel?.riderName || null,
+        technicianName: parcel?.technicianName || null,
     };
 
     if (role === 'admin') {
         return {
             ...current,
-            technicianEmail: parcel?.riderEmail || null,
+            technicianEmail: parcel?.technicianEmail || null,
             assignmentHistory: history.map((h) => ({
                 assignmentId: h.assignmentId,
-                riderId: h.riderId,
-                riderEmail: h.riderEmail,
-                riderName: h.riderName,
+                technicianId: h.technicianId,
+                technicianEmail: h.technicianEmail,
+                technicianName: h.technicianName,
                 assignedBy: h.assignedBy,
                 assignedAt: h.assignedAt,
                 decision: h.decision,
@@ -74,7 +74,7 @@ function projectAssignmentForRole(parcel, role) {
         const currentEntry = history.find((h) => h.decision === 'pending') || null;
         return {
             ...current,
-            technicianEmail: parcel?.riderEmail || null,
+            technicianEmail: parcel?.technicianEmail || null,
             decision: currentEntry ? currentEntry.decision : (status === 'assignment_pending' ? 'pending' : null),
         };
     }

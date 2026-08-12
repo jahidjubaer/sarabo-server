@@ -79,7 +79,7 @@ function createPaymentProcessor(models, collections, notifications) {
         const paymentRecord = {
             sessionId,
             transactionId: paymentIntentId,
-            parcelId: parcel._id.toString(),
+            requestId: parcel._id.toString(),
             trackingId,
             customerEmail: ownerEmail,
             amount: quote.totalAmount,
@@ -179,10 +179,10 @@ function createPaymentProcessor(models, collections, notifications) {
                     actorEmail: null,
                     metadata: { trackingId },
                 });
-                if (parcel.riderEmail) {
+                if (parcel.technicianEmail) {
                     await notifications.createNotification({
                         session: mongoSession,
-                        recipientEmail: parcel.riderEmail,
+                        recipientEmail: parcel.technicianEmail,
                         recipientRole: 'rider',
                         type: 'payment_completed_technician',
                         entityType: 'parcel',
@@ -204,7 +204,7 @@ function createPaymentProcessor(models, collections, notifications) {
         if (conflict) {
             const winner = await collections.payments.findOne({ sessionId });
             if (winner) {
-                await checkoutSessionManager.completeByParcelId(winner.parcelId);
+                await checkoutSessionManager.completeByParcelId(winner.requestId);
                 return { code: 'OK', alreadyProcessed: true, transactionId: winner.transactionId, trackingId: winner.trackingId };
             }
             const latestParcel = await RepairRequest.findById(parcel._id.toString());
@@ -225,7 +225,7 @@ function createPaymentProcessor(models, collections, notifications) {
         // by either source, on a previous call.
         const existingPayment = await collections.payments.findOne({ sessionId });
         if (existingPayment) {
-            const parcel = await RepairRequest.findById(existingPayment.parcelId);
+            const parcel = await RepairRequest.findById(existingPayment.requestId);
             if (!parcel) {
                 return { code: 'PARCEL_NOT_FOUND' };
             }
@@ -236,7 +236,7 @@ function createPaymentProcessor(models, collections, notifications) {
             // this parcel should already be completed from the first call
             // that recorded this payment, but this keeps repeat/idempotent
             // calls safe even if that earlier reconciliation did not run.
-            await checkoutSessionManager.completeByParcelId(existingPayment.parcelId);
+            await checkoutSessionManager.completeByParcelId(existingPayment.requestId);
             return {
                 code: 'OK',
                 alreadyProcessed: true,
@@ -252,12 +252,12 @@ function createPaymentProcessor(models, collections, notifications) {
             return { code: 'NOT_PAID' };
         }
 
-        const parcelId = session.metadata && session.metadata.parcelId;
-        if (!parcelId || !ObjectId.isValid(parcelId)) {
+        const requestId = session.metadata && session.metadata.requestId;
+        if (!requestId || !ObjectId.isValid(requestId)) {
             return { code: 'MISSING_METADATA' };
         }
 
-        const parcel = await RepairRequest.findById(parcelId);
+        const parcel = await RepairRequest.findById(requestId);
         if (!parcel) {
             return { code: 'PARCEL_NOT_FOUND' };
         }
@@ -326,7 +326,7 @@ function createPaymentProcessor(models, collections, notifications) {
         const paymentRecord = {
             sessionId,
             transactionId,
-            parcelId: parcel._id.toString(),
+            requestId: parcel._id.toString(),
             trackingId,
             customerEmail: ownerEmail,
             amount: cost,
@@ -432,7 +432,7 @@ function createPaymentProcessor(models, collections, notifications) {
                 // reconciled the checkout row in its own transaction - this
                 // is a defensive no-op unless that reconciliation somehow
                 // did not happen.
-                await checkoutSessionManager.completeByParcelId(winner.parcelId);
+                await checkoutSessionManager.completeByParcelId(winner.requestId);
                 return {
                     code: 'OK',
                     alreadyProcessed: true,

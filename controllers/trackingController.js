@@ -38,7 +38,7 @@ class TrackingController {
 
             const currentUser = await this.User.findByEmail(req.decoded_email);
             const isOwner = parcel.senderEmail === req.decoded_email;
-            const isAssignedRider = parcel.riderEmail === req.decoded_email;
+            const isAssignedRider = parcel.technicianEmail === req.decoded_email;
             const isAdmin = currentUser && currentUser.role === 'admin';
 
             if (!isOwner && !isAssignedRider && !isAdmin) {

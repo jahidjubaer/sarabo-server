@@ -7,7 +7,7 @@
 function canAssignRequest(parcel) {
     const status = parcel.deliveryStatus || 'pending-pickup';
     if (status !== 'pending-pickup') return false;
-    if (parcel.riderEmail) return false;
+    if (parcel.technicianEmail) return false;
     return true;
 }
 

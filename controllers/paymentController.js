@@ -40,7 +40,7 @@ class PaymentController {
 
     async createCheckoutSession(req, res) {
         try {
-            const { parcelId: rawParcelId } = req.body;
+            const { requestId: rawParcelId } = req.body;
 
             if (!rawParcelId || !ObjectId.isValid(rawParcelId)) {
                 return res.status(400).send({ message: 'invalid or missing repair request id' });
@@ -80,7 +80,7 @@ class PaymentController {
             // cost - a client-supplied amount is never accepted or used.
             const cost = eligibility.cost;
             const unitAmount = toSmallestUnit(cost);
-            const parcelId = parcel._id.toString();
+            const requestId = parcel._id.toString();
 
             const conflictResponse = () => res.status(409).send({
                 message: 'a checkout session is already being created for this request, please try again shortly',
@@ -91,7 +91,7 @@ class PaymentController {
             // parcel if one exists - this is what prevents multiple tabs,
             // rapid retries, or concurrent requests from spawning multiple
             // live Stripe sessions for the same repair request.
-            const activeRow = await this.checkoutSessions.findActive(parcelId);
+            const activeRow = await this.checkoutSessions.findActive(requestId);
             if (activeRow) {
                 if (activeRow.status === 'creating') {
                     return conflictResponse();
@@ -115,7 +115,7 @@ class PaymentController {
             }
 
             const claimResult = await this.checkoutSessions.claim({
-                parcelId, ownerEmail, amount: cost, currency: PAYMENT_CURRENCY
+                requestId, ownerEmail, amount: cost, currency: PAYMENT_CURRENCY
             });
             if (!claimResult.claimed) {
                 // Lost the race to another concurrent request between the
@@ -142,7 +142,7 @@ class PaymentController {
                         ],
                         mode: 'payment',
                         metadata: {
-                            parcelId,
+                            requestId,
                             trackingId: parcel.trackingId
                         },
                         customer_email: req.decoded_email,
@@ -252,7 +252,7 @@ class PaymentController {
 
             const amountTaka = eligibility.amount;
             const unitAmount = toSmallestUnit(amountTaka);
-            const parcelId = parcel._id.toString();
+            const requestId = parcel._id.toString();
 
             const conflictResponse = () => res.status(409).send({
                 message: 'a checkout session is already being created for this request, please try again shortly',
@@ -261,7 +261,7 @@ class PaymentController {
 
             // Reuse an existing, still-open Stripe session for this parcel - the
             // real multi-tab / rapid-retry / parallel-request guard.
-            const activeRow = await this.checkoutSessions.findActive(parcelId);
+            const activeRow = await this.checkoutSessions.findActive(requestId);
             if (activeRow) {
                 if (activeRow.status === 'creating') {
                     return conflictResponse();
@@ -278,7 +278,7 @@ class PaymentController {
             }
 
             const claimResult = await this.checkoutSessions.claim({
-                parcelId, ownerEmail, amount: amountTaka, currency: V2_PAYMENT_CURRENCY
+                requestId, ownerEmail, amount: amountTaka, currency: V2_PAYMENT_CURRENCY
             });
             if (!claimResult.claimed) {
                 return conflictResponse();
@@ -305,7 +305,7 @@ class PaymentController {
                         // amount, currency, or any client-supplied field. The
                         // completion path re-derives everything from the parcel.
                         metadata: {
-                            parcelId,
+                            requestId,
                             trackingId: parcel.trackingId,
                             schemaVersion: '2',
                             quoteVersion: String(eligibility.quoteVersion),

@@ -60,7 +60,7 @@ function summarizeQuoteForList(quote) {
 // The three sub-documents are replaced with boolean existence markers
 // (hasInspection / hasQuote / hasRepair) so the client's deletion-eligibility
 // heuristic keeps the same information it always relied on without receiving any
-// sub-document body. Active-assignment fields (riderName/riderEmail) and every
+// sub-document body. Active-assignment fields (technicianName/technicianEmail) and every
 // top-level status/cost field are untouched. Pure: does not mutate its input.
 function projectSafeListParcel(parcel) {
     const safe = stripDamageImages(parcel);

@@ -14,7 +14,7 @@ const {
 //
 // Security-critical properties:
 //  - Only the currently-assigned technician (verified role 'rider' AND the
-//    request's own riderEmail/riderId) may submit; role, riderId and lifecycle
+//    request's own technicianEmail/technicianId) may submit; role, technicianId and lifecycle
 //    are all re-validated atomically inside the write transaction, so a
 //    reassignment, status change, role removal, or a competing submission
 //    between the initial read and the write always loses (matchedCount 0).
@@ -42,7 +42,7 @@ class InspectionController {
             role,
             isOwner: !!parcel && parcel.senderEmail === email,
             isAdmin: role === 'admin',
-            isAssignedByEmail: !!parcel && parcel.riderEmail === email
+            isAssignedByEmail: !!parcel && parcel.technicianEmail === email
         };
     }
 
@@ -111,14 +111,14 @@ class InspectionController {
 
                     const now = new Date();
                     inspectionDoc = buildInspectionDocument(validation.normalized, {
-                        submittedByRiderId: parcel.riderId ? new ObjectId(parcel.riderId) : null,
+                        submittedByRiderId: parcel.technicianId ? new ObjectId(parcel.technicianId) : null,
                         submittedByEmail: email,
                         now
                     });
 
                     // The filter itself is the concurrency guarantee: still v2,
                     // still picked-up, still assigned to THIS caller (email and
-                    // riderId), and no inspection yet. Any concurrent
+                    // technicianId), and no inspection yet. Any concurrent
                     // reassignment / status change / first-submission-winner
                     // makes this match zero documents.
                     const updateResult = await this.collections.repairRequests.updateOne(
@@ -126,8 +126,8 @@ class InspectionController {
                             _id: parcel._id,
                             schemaVersion: 2,
                             deliveryStatus: 'parcel_picked_up',
-                            riderEmail: email,
-                            riderId: parcel.riderId,
+                            technicianEmail: email,
+                            technicianId: parcel.technicianId,
                             $or: [
                                 { 'inspection.status': { $exists: false } },
                                 { 'inspection.status': { $ne: 'submitted' } }
@@ -143,7 +143,7 @@ class InspectionController {
                         const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
                         else if (fresh.inspection && fresh.inspection.status === 'submitted') conflictCode = 'INSPECTION_ALREADY_SUBMITTED';
-                        else if (fresh.riderEmail !== email || fresh.riderId !== parcel.riderId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
+                        else if (fresh.technicianEmail !== email || fresh.technicianId !== parcel.technicianId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
                         else conflictCode = 'INSPECTION_NOT_ALLOWED';
                         throw new Error('inspection submission guard failed');
                     }

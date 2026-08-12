@@ -30,7 +30,7 @@ class QuoteController {
             role,
             isOwner: !!parcel && parcel.senderEmail === email,
             isAdmin: role === 'admin',
-            isAssignedByEmail: !!parcel && parcel.riderEmail === email,
+            isAssignedByEmail: !!parcel && parcel.technicianEmail === email,
         };
     }
 
@@ -84,7 +84,7 @@ class QuoteController {
 
                     const now = new Date();
                     quoteDoc = buildQuoteDocument(validation.normalized, {
-                        submittedByRiderId: parcel.riderId ? new ObjectId(parcel.riderId) : null,
+                        submittedByRiderId: parcel.technicianId ? new ObjectId(parcel.technicianId) : null,
                         now,
                     });
 
@@ -93,8 +93,8 @@ class QuoteController {
                             _id: parcel._id,
                             schemaVersion: 2,
                             deliveryStatus: INSPECTION_COMPLETED,
-                            riderEmail: email,
-                            riderId: parcel.riderId,
+                            technicianEmail: email,
+                            technicianId: parcel.technicianId,
                             'quote.status': { $exists: false },
                         },
                         { $set: { quote: quoteDoc, deliveryStatus: QUOTE_SUBMITTED, updatedAt: now } },
@@ -105,7 +105,7 @@ class QuoteController {
                         const fresh = await this.collections.repairRequests.findOne({ _id: parcel._id }, { session: mongoSession });
                         if (!fresh) conflictCode = 'REQUEST_NOT_FOUND';
                         else if (fresh.quote && fresh.quote.status) conflictCode = 'QUOTE_ALREADY_SUBMITTED';
-                        else if (fresh.riderEmail !== email || fresh.riderId !== parcel.riderId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
+                        else if (fresh.technicianEmail !== email || fresh.technicianId !== parcel.technicianId) conflictCode = 'REQUEST_NOT_ASSIGNED_TO_TECHNICIAN';
                         else conflictCode = 'QUOTE_NOT_ALLOWED';
                         throw new Error('quote submission guard failed');
                     }
@@ -219,7 +219,7 @@ class QuoteController {
                     // Notify the assigned technician of the customer's decision.
                     await this.notifications.createNotification({
                         session: mongoSession,
-                        recipientEmail: parcel.riderEmail,
+                        recipientEmail: parcel.technicianEmail,
                         recipientRole: 'rider',
                         type: notifyType,
                         entityType: 'parcel',

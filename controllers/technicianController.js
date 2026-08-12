@@ -13,7 +13,7 @@ const { validateTechnicianExpertise, normalizeTechnicianExpertise } = require('.
 // 'pending' by the Rider model, `workStatus` is initialized server-side only on
 // approval, `role` lives on the users collection and changes only through the
 // admin approval transaction, and anything else a caller tries to inject
-// (approved, riderId, ratings, moderation flags, ...) is simply dropped here.
+// (approved, technicianId, ratings, moderation flags, ...) is simply dropped here.
 const APPLICATION_ALLOWED_FIELDS = ['name', 'email', 'phone', 'region', 'district', 'address', 'nid', 'expertise'];
 
 // Identity + matching-critical fields a new application must provide so the
@@ -78,7 +78,7 @@ class TechnicianController {
             const pipeline = [
                 {
                     $match: {
-                        riderEmail: email,
+                        technicianEmail: email,
                         deliveryStatus: "parcel_delivered"
                     }
                 },
@@ -126,7 +126,7 @@ class TechnicianController {
     // Technician application intake (Phase 8.7A). This route is unauthenticated
     // (routes/technicians.js), so the body is treated as fully untrusted: it is
     // reduced to an explicit allow-list (APPLICATION_ALLOWED_FIELDS) before
-    // anything is persisted - no client-supplied status/workStatus/role/riderId
+    // anything is persisted - no client-supplied status/workStatus/role/technicianId
     // or moderation field can ride along. The application must now provide the
     // information the eligible-technician matcher requires (name/region/district
     // + a valid, non-empty canonical expertise array), so an approved applicant
@@ -181,7 +181,7 @@ class TechnicianController {
         }
     }
 
-    async notifyAdminsOfNewApplication(rider, riderId) {
+    async notifyAdminsOfNewApplication(rider, technicianId) {
         let adminEmails = [];
         try {
             adminEmails = await this.User.findEmailsByRole('admin');
@@ -201,7 +201,7 @@ class TechnicianController {
                     recipientRole: 'admin',
                     type: 'technician_application_submitted',
                     entityType: 'rider',
-                    entityId: riderId.toString(),
+                    entityId: technicianId.toString(),
                     actorEmail: applicantEmail || null,
                     actorRole: null,
                     // Each admin's deduplicationKey uniqueness comes from the
@@ -221,9 +221,9 @@ class TechnicianController {
     // assigned rider. Read inside the caller's own transaction session so
     // the check is consistent with everything else read/written in that
     // same transaction attempt.
-    async hasActiveAssignment(riderId, session) {
+    async hasActiveAssignment(technicianId, session) {
         const activeParcel = await this.collections.repairRequests.findOne(
-            { riderId: riderId.toString(), deliveryStatus: { $in: ACTIVE_STATUSES } },
+            { technicianId: technicianId.toString(), deliveryStatus: { $in: ACTIVE_STATUSES } },
             { session, projection: { _id: 1 } }
         );
         return !!activeParcel;
@@ -241,9 +241,9 @@ class TechnicianController {
     async updateTechnicianStatus(req, res) {
         const requestedStatus = req.body.status;
         try {
-            const riderId = req.params.id;
+            const technicianId = req.params.id;
 
-            if (!ObjectId.isValid(riderId)) {
+            if (!ObjectId.isValid(technicianId)) {
                 return res.status(400).send({ message: 'invalid technician id', code: 'INVALID_TECHNICIAN_ID' });
             }
             if (!REQUESTABLE_STATUSES.includes(requestedStatus)) {
@@ -261,7 +261,7 @@ class TechnicianController {
             try {
                 await mongoSession.withTransaction(async () => {
                     const technician = await this.collections.technicians.findOne(
-                        { _id: new ObjectId(riderId) },
+                        { _id: new ObjectId(technicianId) },
                         { session: mongoSession }
                     );
                     if (!technician) {
@@ -489,8 +489,8 @@ class TechnicianController {
     // pattern already established by models/Notification.js.
     async updateTechnicianExpertise(req, res) {
         try {
-            const riderId = req.params.id;
-            if (!ObjectId.isValid(riderId)) {
+            const technicianId = req.params.id;
+            if (!ObjectId.isValid(technicianId)) {
                 return res.status(400).send({ message: 'invalid technician id', code: 'INVALID_TECHNICIAN_ID' });
             }
 
@@ -512,7 +512,7 @@ class TechnicianController {
             // the second one silently clobbering the first).
             const requester = requesterEmail ? await this.collections.users.findOne({ email: requesterEmail }) : null;
             const isAdmin = !!requester && requester.role === 'admin';
-            const technician = await this.collections.technicians.findOne({ _id: new ObjectId(riderId) });
+            const technician = await this.collections.technicians.findOne({ _id: new ObjectId(technicianId) });
 
             if (!technician) {
                 const notFound = isAdmin

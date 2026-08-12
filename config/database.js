@@ -65,7 +65,7 @@ async function connectDatabase() {
                 // filters support only simple equality, so `active` is a plain
                 // boolean rather than an enum of in-progress statuses.
                 await collections.checkoutSessions.createIndex(
-                    { parcelId: 1 },
+                    { requestId: 1 },
                     { unique: true, partialFilterExpression: { active: true } }
                 );
                 // Enforces uniqueness of trackingId at the database level -
@@ -111,7 +111,7 @@ async function connectDatabase() {
                 // Enforces uniqueness of the product/repair category pair at
                 // the database level - the same "guard the invariant in the
                 // database, not just in application code" pattern already
-                // used above for payments.sessionId, checkoutSessions.parcelId,
+                // used above for payments.sessionId, checkoutSessions.requestId,
                 // and parcels.trackingId.
                 await collections.serviceDefinitions.createIndex(
                     { productCategorySlug: 1, repairCategorySlug: 1 },
@@ -152,13 +152,13 @@ async function connectDatabase() {
                 );
                 // Serves both the active-assignment set lookup (filtered to
                 // ACTIVE_STATUSES) and the completed-repair-count aggregation
-                // (filtered to 'parcel_delivered') - both query riderId
+                // (filtered to 'parcel_delivered') - both query technicianId
                 // together with deliveryStatus, so one compound index serves
                 // either regardless of which deliveryStatus values are
                 // actually matched.
                 await collections.repairRequests.createIndex(
-                    { riderId: 1, deliveryStatus: 1 },
-                    { name: 'parcels_riderId_deliveryStatus' }
+                    { technicianId: 1, deliveryStatus: 1 },
+                    { name: 'parcels_technicianId_deliveryStatus' }
                 );
                 // Damage-upload session foundation (Phase 6.4 Unit 1).
                 // Enforces at the database level that a storage key can back

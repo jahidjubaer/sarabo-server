@@ -44,7 +44,7 @@ const QA_IDENTITIES = {
 };
 
 // Deterministic, obviously-fake ObjectIds for the two QA technicians so the
-// seeded parcels reference a stable riderId across re-runs.
+// seeded parcels reference a stable technicianId across re-runs.
 const QA_TECH_A_ID = new ObjectId('0000000000000000000000a1');
 const QA_TECH_B_ID = new ObjectId('0000000000000000000000b2');
 
@@ -128,9 +128,9 @@ function qaPayment() {
 function pendingAssignmentEntry(techEmail, techName) {
     return {
         assignmentId: 'qa-assign-1',
-        riderId: QA_TECH_A_ID,
-        riderEmail: techEmail,
-        riderName: techName,
+        technicianId: QA_TECH_A_ID,
+        technicianEmail: techEmail,
+        technicianName: techName,
         assignedByEmail: QA_IDENTITIES.admin.email,
         decision: 'pending',
         decidedAt: null,
@@ -140,9 +140,9 @@ function pendingAssignmentEntry(techEmail, techName) {
 function rejectedAssignmentEntry(techEmail, techName) {
     return {
         assignmentId: 'qa-assign-0',
-        riderId: QA_TECH_A_ID,
-        riderEmail: techEmail,
-        riderName: techName,
+        technicianId: QA_TECH_A_ID,
+        technicianEmail: techEmail,
+        technicianName: techName,
         assignedByEmail: QA_IDENTITIES.admin.email,
         decision: 'rejected',
         rejectionReason: 'QA: Technician A is unavailable for this repair window.',
@@ -171,7 +171,7 @@ function baseParcel(seq, overrides) {
     };
 }
 function assignedTo(identity) {
-    return { riderEmail: identity.email, riderName: identity.name, riderId: QA_TECH_B_ID };
+    return { technicianEmail: identity.email, technicianName: identity.name, technicianId: QA_TECH_B_ID };
 }
 
 // The full deterministic scenario matrix (12 requests).
