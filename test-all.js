@@ -10074,8 +10074,17 @@ async function testDamageUploadFoundation() {
         }
 
         // ---- Storage-service safety when unconfigured (1-2) ----
-        const savedBucketEnv = process.env.FIREBASE_STORAGE_BUCKET;
-        delete process.env.FIREBASE_STORAGE_BUCKET;
+        // Phase 9.1: the backing store is Supabase, so "unconfigured" now means
+        // the SUPABASE_* trio is incomplete. All three are cleared, because any
+        // one of them missing must fail the same safe way - a half-configured
+        // store that silently signed URLs against the wrong bucket would be far
+        // worse than one that refuses to start.
+        const savedStorageEnv = {
+            SUPABASE_URL: process.env.SUPABASE_URL,
+            SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
+            SUPABASE_STORAGE_BUCKET: process.env.SUPABASE_STORAGE_BUCKET,
+        };
+        Object.keys(savedStorageEnv).forEach((k) => delete process.env[k]);
         let unconfiguredError = null;
         try {
             const unconfiguredService = new DamageStorageService();
@@ -10083,8 +10092,10 @@ async function testDamageUploadFoundation() {
         } catch (error) {
             unconfiguredError = error;
         } finally {
-            if (savedBucketEnv === undefined) delete process.env.FIREBASE_STORAGE_BUCKET;
-            else process.env.FIREBASE_STORAGE_BUCKET = savedBucketEnv;
+            Object.entries(savedStorageEnv).forEach(([k, v]) => {
+                if (v === undefined) delete process.env[k];
+                else process.env[k] = v;
+            });
         }
         logTest('1. Storage service fails safely (STORAGE_UNAVAILABLE) when no bucket is configured', !!unconfiguredError && unconfiguredError.code === 'STORAGE_UNAVAILABLE');
         logTest(

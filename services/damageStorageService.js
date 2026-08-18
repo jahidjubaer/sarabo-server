@@ -9,7 +9,7 @@
 // contract with a fake adapter and never touch a real bucket. Production
 // code uses the default export's real-bucket resolution.
 
-const admin = require('../config/firebase');
+const { createSupabaseBucket } = require('./supabaseBucketAdapter');
 
 const STORAGE_PREFIX = 'repair-requests/';
 const DEFAULT_READ_URL_TTL_MS = 15 * 60 * 1000;
@@ -35,19 +35,21 @@ class DamageStorageService {
     }
 
     // Lazily resolved (and never cached across calls) so a missing/changed
-    // FIREBASE_STORAGE_BUCKET env var is detected on every call, not just
-    // once at process startup.
+    // SUPABASE_* env var is detected on every call, not just once at process
+    // startup.
+    //
+    // Phase 9.1: backed by Supabase Storage instead of Firebase Storage, which
+    // is gated behind the paid Blaze plan. Only the backend moved - this
+    // class's five public methods, their return shapes and their error codes
+    // are unchanged, which is why nothing above this line and no caller needed
+    // editing. Firebase is still the identity provider.
     _getBucket() {
         if (this._injectedBucket) return this._injectedBucket;
-        const bucketName = process.env.FIREBASE_STORAGE_BUCKET;
-        if (!bucketName) {
+        const bucket = createSupabaseBucket();
+        if (!bucket) {
             throw Object.assign(new Error('damage image storage is not configured'), { code: 'STORAGE_UNAVAILABLE' });
         }
-        try {
-            return admin.storage().bucket(bucketName);
-        } catch (error) {
-            throw Object.assign(new Error('damage image storage is unavailable'), { code: 'STORAGE_UNAVAILABLE' });
-        }
+        return bucket;
     }
 
     // Returns { uploadUrl, method } - a V4 signed URL the client can PUT the
@@ -78,6 +80,11 @@ class DamageStorageService {
     // whatever future endpoint serves authorized image display.
     buildCanonicalUrl({ storageKey }) {
         const bucket = this._getBucket();
+        // Delegated when the backing adapter knows its own canonical form
+        // (Supabase does). The literal GCS fallback remains for injected test
+        // buckets, which model a plain object store and have no opinion about
+        // their own public URL shape.
+        if (typeof bucket.canonicalUrl === 'function') return bucket.canonicalUrl(storageKey);
         return `https://storage.googleapis.com/${bucket.name}/${storageKey}`;
     }
 

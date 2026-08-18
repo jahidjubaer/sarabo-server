@@ -41,12 +41,18 @@ MONGO_URI=your_mongodb_connection_string
 # This should be a base64 encoded JSON service account key
 FB_SERVICE_KEY=your_base64_encoded_firebase_service_account_key
 
-# Firebase Storage bucket (optional - only required for the damage-evidence
-# upload feature, Phase 6.4). Just the bucket name, e.g.
-# your-project-id.appspot.com - not a URL. Without this set, damage-upload
-# endpoints fail safely with a controlled 503 STORAGE_UNAVAILABLE response;
-# every other endpoint is unaffected.
-FIREBASE_STORAGE_BUCKET=your_project_id.appspot.com
+# Supabase Storage (optional - only required for the damage-evidence upload
+# feature, Phase 6.4; migrated from Firebase Storage in Phase 9.1 because that
+# product requires the paid Blaze plan). Firebase remains the identity provider.
+# All three must be set together - if any is missing, damage-upload endpoints
+# fail safely with a controlled 503 STORAGE_UNAVAILABLE response and every other
+# endpoint is unaffected.
+# SUPABASE_SERVICE_ROLE_KEY is the SECRET key (sb_secret_... or the legacy
+# service_role JWT). It bypasses Row Level Security and must never reach a
+# browser. The bucket must be PRIVATE.
+SUPABASE_URL=https://your_project_ref.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_secret_key
+SUPABASE_STORAGE_BUCKET=damage-evidence
 
 # Stripe Payment
 STRIPE_SECRET=your_stripe_secret_key
@@ -82,7 +88,9 @@ SITE_DOMAIN=http://localhost:5173
 | Name | Purpose |
 |---|---|
 | `FB_SERVICE_KEY` | Base64-encoded Firebase Admin service account key, used to verify Firebase ID tokens. |
-| `FIREBASE_STORAGE_BUCKET` | Optional. Firebase Storage bucket name (not a URL) backing the damage-evidence upload endpoints (`/repair-requests/:id/damage-images/*`). Every other endpoint works without it; damage-upload endpoints return a controlled `STORAGE_UNAVAILABLE` (503) if unset. |
+| `SUPABASE_URL` | Optional. Supabase project API URL (e.g. `https://<ref>.supabase.co` - the API URL, **not** the dashboard URL) backing the damage-evidence upload endpoints (`/repair-requests/:id/damage-images/*`). |
+| `SUPABASE_SERVICE_ROLE_KEY` | Optional. Supabase **secret** key (`sb_secret_...`, or the legacy `service_role` JWT). Bypasses Row Level Security - server-only, never sent to a browser. |
+| `SUPABASE_STORAGE_BUCKET` | Optional. Name of the **private** Supabase Storage bucket. Every other endpoint works without these three; damage-upload endpoints return a controlled `STORAGE_UNAVAILABLE` (503) if any is unset. |
 | `MONGO_URI` | MongoDB connection string. |
 | `STRIPE_SECRET` | Stripe secret key, used to create checkout sessions. |
 | `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret, used to verify `POST /stripe-webhook` requests. The local Stripe CLI and a deployed Stripe Dashboard webhook endpoint each have their own distinct secret - use whichever one matches the endpoint actually receiving events in this environment, and never mix test-mode and live-mode secrets. |
@@ -152,12 +160,12 @@ through the API impractical). The flow is:
 
 1. `POST /repair-requests/:id/damage-images/upload-session` - the owner requests a
    session; the server validates ownership/state/MIME/size and returns a
-   short-lived Firebase Storage v4 signed upload URL. No image bytes touch
+   short-lived Supabase Storage signed upload URL. No image bytes touch
    this server.
 2. The client `PUT`s the file bytes directly to that signed URL (not yet
    implemented on the client side - out of scope for this unit).
 3. `POST /repair-requests/:id/damage-images/finalize` - the server re-verifies the
-   *actual* stored object (content type, size) directly against Firebase
+   *actual* stored object (content type, size) directly against Supabase
    Storage, never trusting client-declared metadata, then atomically
    attaches the image to the request (MongoDB transaction, max 3 images,
    race-safe).
@@ -167,10 +175,10 @@ through the API impractical). The flow is:
    signed *read* URL generated on demand. No client implementation exists
    yet for this either.
 
-No Firebase Storage Security Rules deployment is required for this flow:
-signed URLs are pre-authorized by the Admin SDK and bypass Storage Rules
-entirely (rules only govern direct Firebase Client SDK access, which this
-feature does not use). Objects are never made publicly readable; the
+No Supabase Row Level Security policy deployment is required for this flow:
+signed URLs are pre-authorized server-side with the secret key and bypass RLS
+entirely (policies only govern direct client-key access, which this feature
+does not use). Objects are never made publicly readable; the
 persisted `damage.images[].url` is a stable, non-public identifier, never
 returned by the authorized list endpoint - actual byte access always goes
 through a fresh signed read URL, generated per request, never persisted.
@@ -184,7 +192,7 @@ through a fresh signed read URL, generated per request, never persisted.
   "uploadSessionId": "...",
   "upload": {
     "method": "PUT",
-    "url": "https://storage.googleapis.com/...(signed)...",
+    "url": "https://<ref>.supabase.co/storage/v1/object/upload/sign/...(signed)...",
     "headers": { "Content-Type": "image/jpeg" },
     "expiresAt": "2026-01-01T00:20:00.000Z"
   },
@@ -201,19 +209,20 @@ expired/abandoned upload sessions - it never deletes anything.
 
 ### Non-production live verification (manual, optional)
 
-No Firebase Storage bucket is configured in this repository's default
-development setup - the automated test suite never contacts real Firebase
+No Supabase Storage bucket is configured in this repository's default
+development setup - the automated test suite never contacts real Supabase
 Storage (it uses an injected fake adapter). To manually verify the real
-Firebase Storage integration end-to-end, only against a **non-production**
+Supabase Storage integration end-to-end, only against a **non-production**
 bucket:
 
-1. Create or reuse a Firebase project/bucket you control that is clearly
-   NOT the production bucket (e.g. a separate dev/staging Firebase project).
-2. Set `FIREBASE_STORAGE_BUCKET` in your local `.env` to that bucket's name.
-3. Confirm the service account behind `FB_SERVICE_KEY` belongs to that same
-   non-production project, or has been granted only narrow, bucket-scoped
-   permissions - never a production project's service account.
-4. Never point `FIREBASE_STORAGE_BUCKET` at a production bucket for
+1. Create or reuse a Supabase project/bucket you control that is clearly
+   NOT the production bucket (e.g. a separate dev/staging Supabase project).
+   The bucket must be created with "Public bucket" OFF.
+2. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` and
+   `SUPABASE_STORAGE_BUCKET` in your local `.env`.
+3. Confirm the secret key belongs to that same non-production project - it
+   bypasses Row Level Security, so never use a production project's key.
+4. Never point `SUPABASE_STORAGE_BUCKET` at a production bucket for
    ordinary local testing.
 5. Start the local dev server (`node index.js`).
 6. Create a synthetic v2 repair request (a real customer account is fine
@@ -231,12 +240,12 @@ bucket:
     anonymously - it should 403/401 without a signed query string.
 12. Call `DELETE /repair-requests/:id/damage-images/:imageId` and confirm the
     response reports success.
-13. Confirm both the MongoDB metadata and the Firebase Storage object are
+13. Confirm both the MongoDB metadata and the Supabase Storage object are
     gone (re-listing returns no images; the object no longer exists in the
     bucket).
 14. Delete the synthetic request/session documents you created for this
     check.
-15. Unset `FIREBASE_STORAGE_BUCKET` again afterward if you don't want the
+15. Unset the `SUPABASE_*` variables again afterward if you don't want the
     feature active in your local environment by default.
 
 Do not perform this walkthrough against a production bucket, and never
