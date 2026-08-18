@@ -10,6 +10,8 @@
 // the problem description and a count without ever receiving a storageKey.
 //
 // Pure: does not mutate its input.
+const { isRepairRequestPaid } = require('./paymentState');
+
 function stripDamageImages(repairRequest) {
     if (!repairRequest || !repairRequest.damage || typeof repairRequest.damage !== 'object') {
         return repairRequest;
@@ -54,8 +56,8 @@ function summarizeQuoteForList(quote) {
 //     GET /repair-requests/:id/repair.
 //   - quote:      the full pricing breakdown, notes, submitter identity, and
 //     decision reason - reduced to the agreed-price summary above.
-//   - payment:    the Stripe paymentIntentId and provider name. The top-level
-//     `paymentStatus` (the only field any list renders) is preserved.
+//   - payment:    the Stripe paymentIntentId and provider name. A canonical
+//     server-derived `isPaid` boolean is emitted instead.
 //
 // The three sub-documents are replaced with boolean existence markers
 // (hasInspection / hasQuote / hasRepair) so the client's deletion-eligibility
@@ -70,12 +72,13 @@ function projectSafeListRepairRequest(repairRequest) {
     // technicianEarning (Phase 8.11) is internal accounting - it carries the
     // settling admin's email (paidBy) and is never customer-facing. It is
     // stripped from every GENERAL list here; the technician Completed Repairs
-    // view re-attaches a sanitized, paidBy-free earning in the controller, and
-    // admin settlement reads the full earning through GET /repair-requests/:id.
+    // view re-attaches the safe wallet settlement projection in the controller;
+    // admins can still read historical earning records on request details.
     // eslint-disable-next-line no-unused-vars
-    const { assignmentHistory, inspection, repair, quote, payment, technicianEarning, ...rest } = safe;
+    const { assignmentHistory, inspection, repair, quote, payment, technicianEarning, technicianSettlement, ...rest } = safe;
     const projected = {
         ...rest,
+        isPaid: isRepairRequestPaid(safe),
         hasInspection: Boolean(inspection),
         hasQuote: Boolean(quote),
         hasRepair: Boolean(repair),

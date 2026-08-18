@@ -6,6 +6,7 @@ const { PAYMENT_CURRENCY, V2_PAYMENT_CURRENCY, toSmallestUnit, isValidStoredCost
 const { isV2RepairRequest } = require('../utils/repairRequestSchema');
 const { QUOTE_APPROVED, PAYMENT_COMPLETED } = require('../utils/repairRequestStatus');
 const { calculateSettlement, buildSettlementDocument } = require('../utils/settlement');
+const { isRepairRequestPaid } = require('../utils/paymentState');
 
 function normalize(value) {
     return (value || '').trim().toLowerCase();
@@ -69,7 +70,7 @@ function createPaymentProcessor(models, collections, notifications) {
         }
         // Already completed through a different session (this exact session was
         // ruled out by the existing-payment fast path in the caller).
-        if (repairRequest.deliveryStatus === PAYMENT_COMPLETED || (repairRequest.payment && repairRequest.payment.status === 'completed')) {
+        if (isRepairRequestPaid(repairRequest)) {
             return { code: 'ALREADY_PAID_OTHER_SESSION' };
         }
 
@@ -131,6 +132,29 @@ function createPaymentProcessor(models, collections, notifications) {
                 // approved quote total/currency were validated above; the
                 // payment sub-document records the completion without ever
                 // altering the quote line items.
+                const paymentSet = {
+                    deliveryStatus: PAYMENT_COMPLETED,
+                    payment: {
+                        status: 'completed',
+                        provider: 'stripe',
+                        paymentIntentId,
+                        amount: quote.totalAmount,
+                        currency: quote.currency,
+                        quoteVersion: quote.version,
+                        completedAt: now,
+                    },
+                    updatedAt: now,
+                };
+                const settlementResult = calculateSettlement(quote);
+                const settlementTechnicianEmail = normalize(repairRequest.technicianEmail);
+                if (settlementResult.valid && settlementTechnicianEmail && repairRequest.technicianId) {
+                    paymentSet.technicianSettlement = buildSettlementDocument(settlementResult.settlement, {
+                        technicianId: repairRequest.technicianId,
+                        technicianEmail: settlementTechnicianEmail,
+                        now,
+                    });
+                }
+
                 const updateResult = await collections.repairRequests.updateOne(
                     {
                         _id: repairRequest._id,
@@ -139,21 +163,7 @@ function createPaymentProcessor(models, collections, notifications) {
                         'quote.status': 'approved',
                         'payment.status': { $ne: 'completed' },
                     },
-                    {
-                        $set: {
-                            deliveryStatus: PAYMENT_COMPLETED,
-                            payment: {
-                                status: 'completed',
-                                provider: 'stripe',
-                                paymentIntentId,
-                                amount: quote.totalAmount,
-                                currency: quote.currency,
-                                quoteVersion: quote.version,
-                                completedAt: now,
-                            },
-                            updatedAt: now,
-                        },
-                    },
+                    { $set: paymentSet },
                     { session: mongoSession }
                 );
                 if (updateResult.matchedCount === 0) {
@@ -313,7 +323,7 @@ function createPaymentProcessor(models, collections, notifications) {
             return { code: 'REQUEST_CANCELLED' };
         }
 
-        if (repairRequest.paymentStatus === 'paid') {
+        if (isRepairRequestPaid(repairRequest)) {
             // No payment record referenced this sessionId above, so this
             // repair request was already paid through a different session. Reconcile
             // defensively in case that other session's own completion never

@@ -34,7 +34,9 @@ class RepairRequestModel {
         'product.brand': 1,
         'product.model': 1,
         deliveryStatus: 1,
+        schemaVersion: 1,
         paymentStatus: 1,
+        'payment.status': 1,
         cost: 1,
         technicianName: 1,
         technicianEmail: 1,
@@ -231,4 +233,3 @@ class RepairRequestModel {
 }
 
 module.exports = RepairRequestModel;
-

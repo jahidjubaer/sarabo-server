@@ -22,7 +22,8 @@ const {
     buildServiceLocationSnapshot, validateClientPricingAbsence
 } = require('../utils/repairRequestV2');
 const { getPricingEstimate } = require('../services/pricingService');
-const { SETTLEMENT_AVAILABLE } = require('../utils/settlement');
+const { SETTLEMENT_PENDING, SETTLEMENT_AVAILABLE, buildSettlementView } = require('../utils/settlement');
+const { isRepairRequestPaid, buildPaymentStateMatch } = require('../utils/paymentState');
 const {
     ELIGIBILITY_VERSION, DIAGNOSTIC_INELIGIBLE_CAP, validateDiagnosticFlag, validatePagination,
     deriveRequestTaxonomy, validateCurrentServiceDefinition, deriveServiceAreaMatch, evaluateTechnician,
@@ -132,9 +133,9 @@ class RepairRequestController {
                 // 'parcel_delivered'. Kept as a distinct explicit branch so the
                 // existing active-jobs ($nin) and legacy-delivered branches are
                 // untouched.
-                query.deliveryStatus = 'repair_completed';
+                query.deliveryStatus = { $in: ['repair_completed', 'parcel_delivered'] };
             } else if (deliveryStatus !== 'parcel_delivered') {
-                query.deliveryStatus = { $nin: ['parcel_delivered'] };
+                query.deliveryStatus = { $nin: ['parcel_delivered', 'repair_completed', 'cancelled'] };
             } else {
                 query.deliveryStatus = deliveryStatus;
             }
@@ -142,13 +143,12 @@ class RepairRequestController {
             // BL-032: same damage-image strip for the technician assigned-jobs list.
             const result = await this.RepairRequest.findAll(query);
             const rows = result.map(projectSafeListRepairRequest);
-            // Completed Repairs view (Phase 8.11): re-attach the sanitized,
-            // paidBy-free technician earning (persisted or derived fallback) that
-            // the shared projection strips, so each completed row can show the
-            // technician's own earning + settlement status.
+            // Completed Repairs view: attach only the current wallet settlement
+            // projection. The retired labour-only technicianEarning is not a
+            // Technician-facing accounting source.
             if (deliveryStatus === 'repair_completed') {
                 for (let i = 0; i < rows.length; i++) {
-                    rows[i].technicianEarning = technicianEarningView(result[i]);
+                    rows[i].technicianSettlement = buildSettlementView(result[i]);
                 }
             }
             res.send(rows);
@@ -198,11 +198,16 @@ class RepairRequestController {
             // Phase 8.3 / BL-032: damage.images (raw storageKey/url/mimeType) is
             // reduced to a safe { description, imageCount } aggregate here -
             // images are served only through GET /repair-requests/:id/damage-images.
-            // Phase 8.5: the payment sub-document (Stripe paymentIntentId +
-            // provider) is a payment-provider internal never read by any client -
-            // the UI reads only the top-level paymentStatus - so it is stripped
-            // here too, alongside the inspection/quote/repair detail documents.
-            const { inspection, quote, repair, assignmentHistory, payment, ...safeRepairRequest } = repairRequest;
+            // The payment sub-document (Stripe paymentIntentId + provider) is
+            // provider-internal and stripped. Clients receive only canonical
+            // isPaid. The raw settlement is also stripped because it carries
+            // technician identity; assigned Technician/Admin viewers get the
+            // safe buildSettlementView projection below.
+            const { inspection, quote, repair, assignmentHistory, payment, technicianSettlement, ...safeRepairRequest } = repairRequest;
+            safeRepairRequest.isPaid = isRepairRequestPaid(repairRequest);
+            if (isAssignedTechnician || isAdmin) {
+                safeRepairRequest.technicianSettlement = buildSettlementView(repairRequest);
+            }
             // technicianEarning (Phase 8.11) is internal accounting - only an
             // admin reads it through this endpoint (for the settlement UI +
             // mark-paid action). The owner never sees it; the assigned technician
@@ -251,15 +256,16 @@ class RepairRequestController {
             }
 
             const query = {};
+            const queryClauses = [];
 
             if (status && status !== 'all' && ADMIN_LIST_VALID_STATUSES.includes(status)) {
                 query.deliveryStatus = status;
             }
 
             if (paymentStatus === 'paid') {
-                query.paymentStatus = 'paid';
+                queryClauses.push(buildPaymentStateMatch(true));
             } else if (paymentStatus === 'unpaid') {
-                query.paymentStatus = { $ne: 'paid' };
+                queryClauses.push(buildPaymentStateMatch(false));
             }
 
             const searchText = sanitizeSearchText(search, ADMIN_LIST_MAX_SEARCH_LENGTH);
@@ -269,7 +275,7 @@ class RepairRequestController {
                 // their device identity in the product snapshot instead, so
                 // searching deviceName alone silently matched no v2 request by
                 // device at all (Phase 9.2). Both shapes are searched now.
-                query.$or = [
+                queryClauses.push({ $or: [
                     { trackingId: pattern },
                     { senderEmail: pattern },
                     { senderName: pattern },
@@ -277,7 +283,11 @@ class RepairRequestController {
                     { 'product.brand': pattern },
                     { 'product.model': pattern },
                     { 'product.categorySlug': pattern }
-                ];
+                ] });
+            }
+
+            if (queryClauses.length > 0) {
+                query.$and = queryClauses;
             }
 
             const sortDirection = sort === 'oldest' ? 1 : -1;
@@ -288,10 +298,14 @@ class RepairRequestController {
                 sort: { createdAt: sortDirection }
             });
 
-            const enrichedData = data.map(repairRequest => ({
-                ...repairRequest,
-                canAssign: canAssignRequest(repairRequest)
-            }));
+            const enrichedData = data.map(repairRequest => {
+                const { payment, ...safeRepairRequest } = repairRequest;
+                return {
+                    ...safeRepairRequest,
+                    isPaid: isRepairRequestPaid(repairRequest),
+                    canAssign: canAssignRequest(repairRequest),
+                };
+            });
 
             const totalPages = Math.max(Math.ceil(totalItems / limit), 1);
 
@@ -1802,9 +1816,9 @@ class RepairRequestController {
     // repaired device. Owner-only and existence-preserving - any non-owner
     // (technician, admin, another customer) gets the same 404 as a nonexistent
     // request, so this endpoint never reveals that someone else's request
-    // exists. It never changes deliveryStatus, never touches the repair
-    // sub-document, and never affects technician workStatus - technician
-    // release already happened at completion time.
+    // exists. It advances the separate handover state to parcel_delivered,
+    // never touches the repair sub-document, and never affects technician
+    // workStatus - technician release already happened at completion time.
     async confirmReceipt(req, res) {
         try {
             const id = req.params.id;
@@ -1847,14 +1861,16 @@ class RepairRequestController {
                 // A dotted path is used rather than replacing the sub-document,
                 // so the frozen snapshot (amounts, commission, receivable) is
                 // untouched - only its status and availability timestamp move.
-                // Repairs with no settlement are unaffected: the dotted $set is
-                // a no-op on a document that has no technicianSettlement.
+                // Repairs with no current pending settlement are unaffected;
+                // legacy work is never backfilled here.
                 {
                     $set: {
+                        deliveryStatus: 'parcel_delivered',
                         customerReceiptConfirmation: { status: 'confirmed', confirmedAt: now, confirmedBy: ownerEmail },
-                        ...(repairRequest.technicianSettlement
+                        ...(repairRequest.technicianSettlement?.status === SETTLEMENT_PENDING
                             ? { 'technicianSettlement.status': SETTLEMENT_AVAILABLE, 'technicianSettlement.availableAt': now }
                             : {}),
+                        updatedAt: now,
                     },
                 }
             );
@@ -1890,6 +1906,7 @@ class RepairRequestController {
 
             return res.status(200).send({
                 message: 'receipt confirmed',
+                deliveryStatus: 'parcel_delivered',
                 customerReceiptConfirmation: { status: 'confirmed', confirmedAt: now, confirmedBy: ownerEmail },
             });
         } catch (error) {
