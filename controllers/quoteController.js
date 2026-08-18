@@ -6,6 +6,7 @@ const { isV2RepairRequest } = require('../utils/repairRequestSchema');
 const { INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, ACTIVE_STATUSES } = require('../utils/repairRequestStatus');
 const {
     validateQuoteSubmission, buildQuoteDocument, validateQuoteDecision, buildQuoteView,
+    getQuoteRound, countArchivedQuotes,
 } = require('../utils/quote');
 
 // Repair-quote workflow (Phase 6.4 Unit 5): technician submits a quote after
@@ -68,6 +69,11 @@ class QuoteController {
 
             const ownerRole = (await this.User.findRoleByEmail(repairRequest.senderEmail)) || 'user';
 
+            // Server-derived quote round - the customer's notification identity
+            // depends on it, so it is never accepted from the request body.
+            const archivedQuotes = countArchivedQuotes(repairRequest);
+            const quoteRound = getQuoteRound(repairRequest);
+
             const mongoSession = client.startSession();
             let conflictCode = null;
             let quoteDoc = null;
@@ -96,6 +102,16 @@ class QuoteController {
                             technicianEmail: email,
                             technicianId: repairRequest.technicianId,
                             'quote.status': { $exists: false },
+                            // Pins the write to the exact history size the
+                            // round was derived from, so the notification can
+                            // never be filed under a stale round if a
+                            // decline+revise cycle landed between the read
+                            // above and this write. Same "the filter condition
+                            // itself is the race-resolver" pattern used
+                            // throughout this controller - a mismatch matches
+                            // zero documents and is reported as a conflict
+                            // rather than silently reusing another round's key.
+                            $expr: { $eq: [{ $size: { $ifNull: ['$quoteHistory', []] } }, archivedQuotes] },
                         },
                         { $set: { quote: quoteDoc, deliveryStatus: QUOTE_SUBMITTED, updatedAt: now } },
                         { session: mongoSession }
@@ -111,31 +127,25 @@ class QuoteController {
                     }
 
                     await logTracking(this.collections.trackingEvents, repairRequest.trackingId, QUOTE_SUBMITTED, mongoSession);
-                    // A restored development/QA request can legitimately be
-                    // back at inspection_completed while its previously
-                    // committed quote notification remains. Attempting the
-                    // same unique insert would abort this Mongo transaction;
-                    // notificationService's legacy duplicate catch would then
-                    // leave withTransaction retrying forever. Reuse the
-                    // committed logical event instead of issuing that doomed
-                    // write. Normal submissions still create the notification
-                    // atomically with the quote and tracking event.
-                    const existingNotification = await this.collections.notifications.findOne(
-                        { deduplicationKey: `repair:${repairRequest._id.toString()}:quote_submitted` },
-                        { session: mongoSession }
-                    );
-                    if (!existingNotification) {
-                        await this.notifications.createNotification({
-                            session: mongoSession,
-                            recipientEmail: repairRequest.senderEmail,
-                            recipientRole: ownerRole,
-                            type: 'quote_submitted',
-                            entityType: 'repair_request',
-                            entityId: repairRequest._id.toString(),
-                            metadata: { trackingId: repairRequest.trackingId },
-                            actorEmail: null,
-                        });
-                    }
+                    // The notification is per QUOTE ROUND, so a revised quote
+                    // reaches the customer instead of colliding with the
+                    // previous round's key. Duplicate handling for the SAME
+                    // round is the notification service's job and is now
+                    // transaction-safe there - this controller neither
+                    // pre-checks a hard-coded key nor suppresses the event.
+                    await this.notifications.createNotification({
+                        session: mongoSession,
+                        recipientEmail: repairRequest.senderEmail,
+                        recipientRole: ownerRole,
+                        type: 'quote_submitted',
+                        entityType: 'repair_request',
+                        entityId: repairRequest._id.toString(),
+                        // Metadata values must be non-empty STRINGS - the round
+                        // is stringified here rather than passed as the number
+                        // it is counted as (same as reviseQuote below).
+                        metadata: { trackingId: repairRequest.trackingId, revisionRound: String(quoteRound) },
+                        actorEmail: null,
+                    });
                 });
             } catch (txError) {
                 if (!conflictCode) throw txError;
@@ -373,8 +383,10 @@ class QuoteController {
             if (loaded.error) return res.status(loaded.error.status).send(loaded.error.body);
             const repairRequest = loaded.repairRequest;
 
-            const archivedCount = Array.isArray(repairRequest.quoteHistory) ? repairRequest.quoteHistory.length : 0;
-            const revisionRound = archivedCount + 1;
+            // The round of the quote being archived - the SAME server-derived
+            // counter submitQuote files its notification under, so the archived
+            // quote and the round-N notification can never disagree.
+            const revisionRound = getQuoteRound(repairRequest);
 
             const mongoSession = client.startSession();
             let conflictCode = null;

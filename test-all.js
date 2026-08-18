@@ -4264,6 +4264,17 @@ async function testAdminParcelsList() {
         const f4 = await insertFixture('F4', { createdAt: new Date(base - 20000), deliveryStatus: 'cancelled' }); // cancelled
         const f5 = await insertFixture('F5', { createdAt: new Date(base - 10000), paymentStatus: 'paid' }); // pending-pickup but already paid
         const f6 = await insertFixture('REGEX-(SPECIAL)', { createdAt: new Date(base) }); // regex-metacharacter marker
+        const f7 = await insertFixture('F7-V2-PAID', {
+            schemaVersion: 2,
+            createdAt: new Date(base + 10000),
+            deliveryStatus: 'repair_completed',
+            payment: { status: 'completed', provider: 'stripe', paymentIntentId: 'private-test-id' },
+        });
+        const f8 = await insertFixture('F8-V2-UNPAID', {
+            schemaVersion: 2,
+            createdAt: new Date(base + 20000),
+            deliveryStatus: 'repair_in_progress',
+        });
 
         // ===== Authorization =====
 
@@ -4292,7 +4303,7 @@ async function testAdminParcelsList() {
 
         // --- 6. Default newest-first sort. ---
         const orderedIds = res.body.data.map(p => p._id.toString());
-        const expectedNewestFirst = [f6.id, f5.id, f4.id, f3.id, f2.id, f1.id];
+        const expectedNewestFirst = [f8.id, f7.id, f6.id, f5.id, f4.id, f3.id, f2.id, f1.id];
         logTest('Default sort is newest-first', JSON.stringify(orderedIds) === JSON.stringify(expectedNewestFirst));
 
         // --- 7. Pagination defaults. ---
@@ -4360,7 +4371,7 @@ async function testAdminParcelsList() {
         // --- 18. Invalid status is safely ignored (not a 500, not an
         // unfiltered-crash - just falls back to no status filter). ---
         res = await callGetAdminParcels({ search: marker, status: 'totally-invalid-status' });
-        logTest('Invalid status filter is safely ignored (no crash)', res.statusCode !== 500 && res.body.data.length === 6);
+        logTest('Invalid status filter is safely ignored (no crash)', res.statusCode !== 500 && res.body.data.length === 8);
 
         // --- 19, 24. Cancelled and completed requests are both reachable. ---
         res = await callGetAdminParcels({ search: marker, status: 'parcel_delivered' });
@@ -4371,12 +4382,14 @@ async function testAdminParcelsList() {
         // --- 20. Paid filter. ---
         res = await callGetAdminParcels({ search: marker, paymentStatus: 'paid' });
         const paidIds = res.body.data.map(p => p._id.toString()).sort();
-        logTest('Paid filter returns exactly the paid fixtures', JSON.stringify(paidIds) === JSON.stringify([f3.id, f5.id].sort()));
+        logTest('Paid filter returns legacy and V2 authoritative paid fixtures', JSON.stringify(paidIds) === JSON.stringify([f3.id, f5.id, f7.id].sort()));
+        const progressedPaid = res.body.data.find((p) => p._id.toString() === f7.id);
+        logTest('V2 repair_completed row is normalized to isPaid=true', progressedPaid?.isPaid === true && progressedPaid.payment === undefined);
 
         // --- 21. Unpaid filter. ---
         res = await callGetAdminParcels({ search: marker, paymentStatus: 'unpaid' });
         const unpaidIds = res.body.data.map(p => p._id.toString()).sort();
-        logTest('Unpaid filter returns exactly the unpaid/unset fixtures', JSON.stringify(unpaidIds) === JSON.stringify([f1.id, f2.id, f4.id, f6.id].sort()));
+        logTest('Unpaid filter excludes V2 paid and includes V2 unpaid', JSON.stringify(unpaidIds) === JSON.stringify([f1.id, f2.id, f4.id, f6.id, f8.id].sort()));
 
         // --- 22. Combined search + status. ---
         res = await callGetAdminParcels({ search: f2.deviceName, status: 'driver_assigned' });
@@ -11746,7 +11759,7 @@ async function testQuoteWorkflow() {
             await decide(p.id, ownerEmail, { decision: 'approve' });
             logTest('36. quote_submitted tracking event once', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED })) === 1);
             logTest('37. quote_approved tracking event once', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_APPROVED })) === 1);
-            const subNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:quote_submitted` }).toArray();
+            const subNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:quote_submitted:1` }).toArray();
             logTest('40. Customer quote_submitted notification once', subNotif.length === 1 && subNotif[0].recipientEmail === ownerEmail);
             // Phase 8.3: assert the exact business invariant structurally rather
             // than scanning the whole serialized document for the substring
@@ -11758,7 +11771,7 @@ async function testQuoteWorkflow() {
             const notif = subNotif[0];
             const metadataKeys = Object.keys(notif.metadata || {});
             const noAmountFields = !('totalAmount' in notif) && !('amount' in notif) && !('laborAmount' in notif) && !('partsAmount' in notif) && !('additionalAmount' in notif);
-            logTest('41. Notification carries no line-item/total/internal data', notif.message === 'Your repair quote is ready for review.' && noAmountFields && metadataKeys.length === 1 && metadataKeys[0] === 'trackingId');
+            logTest('41. Notification carries no line-item/total/internal data', notif.message === 'Your repair quote is ready for review.' && noAmountFields && metadataKeys.every((k) => k === 'trackingId' || k === 'revisionRound'));
             const apprNotif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:quote_approved` }).toArray();
             logTest('37b. Technician quote_approved notification once', apprNotif.length === 1 && apprNotif[0].recipientEmail === techEmail && apprNotif[0].recipientRole === 'rider');
         }
@@ -11772,7 +11785,7 @@ async function testQuoteWorkflow() {
             // 39. failed submit -> no tracking event, no notification.
             const p = await createRepairRequest();
             await submit(p.id, techEmail, validQuote({ laborAmount: -5 }));
-            logTest('39. Failed submit creates no tracking/notification', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED })) === 0 && (await collections.notifications.countDocuments({ deduplicationKey: `repair:${p.id}:quote_submitted` })) === 0);
+            logTest('39. Failed submit creates no tracking/notification', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED })) === 0 && (await collections.notifications.countDocuments({ deduplicationKey: `repair:${p.id}:quote_submitted:1` })) === 0);
         }
 
         // Regression: a development/QA request can be restored to
@@ -11806,7 +11819,7 @@ async function testQuoteWorkflow() {
             ]);
             const doc = await collections.repairRequests.findOne({ _id: p._id });
             const trackingAfter = await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED });
-            const notificationCount = await collections.notifications.countDocuments({ deduplicationKey: `repair:${p.id}:quote_submitted` });
+            const notificationCount = await collections.notifications.countDocuments({ deduplicationKey: `repair:${p.id}:quote_submitted:1` });
 
             logTest('50. Pre-existing quote notification does not hang submitQuote', outcome.type === 'response');
             logTest('51. Recovered quote submission returns HTTP 201', outcome.response?.statusCode === 201);
@@ -12076,10 +12089,21 @@ async function testV2PaymentWorkflow() {
             logTest('33. Quote unchanged by payment', JSON.stringify(doc.quote) === beforeQuote);
             logTest('34. Inspection unchanged by payment', JSON.stringify(doc.inspection) === beforeInsp);
             logTest('35. request.pricing unchanged by payment', JSON.stringify(doc.pricing) === beforePricing);
+            const settlement = doc.technicianSettlement;
+            logTest('35a. Payment snapshots one pending 10%/90% settlement',
+                settlement?.status === 'pending'
+                && settlement.repairSubtotal === 4500
+                && settlement.platformCommission === 450
+                && settlement.technicianReceivable === 4050
+                && settlement.commissionRate === 0.10
+                && settlement.technicianEmail === techEmail
+                && settlement.technicianId === techRiderId);
+            const settlementBeforeRetry = JSON.stringify(settlement);
             // 36. Second completion is idempotent.
             const r2 = await pay(sid, ownerEmail);
             const payCount = await collections.payments.countDocuments({ sessionId: sid });
-            logTest('36. Second completion idempotent (no double payment)', r2.statusCode === 200 && r2.body.alreadyProcessed === true && payCount === 1);
+            const afterRetry = await collections.repairRequests.findOne({ _id: p._id });
+            logTest('36. Second completion idempotent (no double payment or settlement)', r2.statusCode === 200 && r2.body.alreadyProcessed === true && payCount === 1 && JSON.stringify(afterRetry.technicianSettlement) === settlementBeforeRetry);
             // 37. Tracking once.
             logTest('37. payment_completed tracking event once', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: PAYMENT_COMPLETED })) === 1);
             // 38. Notifications once (customer + technician), no card/Stripe data.
@@ -12151,6 +12175,7 @@ async function testRepairWorkflow() {
     const { ACTIVE_STATUSES, PAYMENT_COMPLETED, QUOTE_APPROVED, REPAIR_IN_PROGRESS, REPAIR_COMPLETED } = require('./utils/repairRequestStatus');
     const { getV2PaymentEligibility } = require('./services/paymentEligibility');
     const { MAX_PROGRESS_UPDATES } = require('./utils/repair');
+    const { calculateSettlement, buildSettlementDocument, calculateWallet } = require('./utils/settlement');
     const { SERVICE_DEFINITION_SEED } = require('./data/serviceDefinitionSeed');
 
     function fakeRes() {
@@ -12207,16 +12232,27 @@ async function testRepairWorkflow() {
 
         async function createRepairRequest(overrides = {}) {
             const now = new Date();
+            const quote = { status: 'approved', laborAmount: 800, partsAmount: 3500, additionalCharges: 200, totalAmount: 4500, currency: 'BDT', notes: null, submittedAt: now, decidedAt: now, decisionReason: null, version: 1 };
             const doc = {
                 schemaVersion: 2, trackingId: makeTrackingId(), senderEmail: ownerEmail, deviceName: `TEST-REP-DEVICE-${runId}`,
                 product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
                 inspection: { status: 'submitted', estimate: { laborEstimate: 500, partsEstimate: 3000, currency: 'BDT' }, submittedAt: now, version: 1 },
                 pricing: { currency: 'BDT', estimateMin: 1500, estimateMax: 6000, calculationVersion: 2 },
-                quote: { status: 'approved', laborAmount: 800, partsAmount: 3500, additionalCharges: 200, totalAmount: 4500, currency: 'BDT', notes: null, submittedAt: now, decidedAt: now, decisionReason: null, version: 1 },
+                quote,
                 payment: { status: 'completed', provider: 'stripe', paymentIntentId: 'pi_test', amount: 4500, currency: 'BDT', quoteVersion: 1, completedAt: now },
                 deliveryStatus: PAYMENT_COMPLETED, technicianId: techRiderId, technicianName: `TEST-REP-TECH-${runId}`, technicianEmail: techEmail,
                 createdAt: now, updatedAt: now, ...overrides,
             };
+            if (doc.payment?.status === 'completed' && !Object.prototype.hasOwnProperty.call(overrides, 'technicianSettlement')) {
+                const settlementResult = calculateSettlement(doc.quote);
+                if (settlementResult.valid) {
+                    doc.technicianSettlement = buildSettlementDocument(settlementResult.settlement, {
+                        technicianId: doc.technicianId,
+                        technicianEmail: doc.technicianEmail,
+                        now,
+                    });
+                }
+            }
             const r = await collections.repairRequests.insertOne(doc);
             createdParcelIds.push(r.insertedId);
             return { id: r.insertedId.toString(), _id: r.insertedId, ...doc };
@@ -12492,6 +12528,7 @@ async function testRepairWorkflow() {
                 const doc = await collections.repairRequests.findOne({ _id: p._id });
                 const c = doc.customerReceiptConfirmation;
                 logTest('66. Completion initializes receipt confirmation to pending', !!c && c.status === 'pending' && c.confirmedAt === null && c.confirmedBy === null);
+                logTest('66b. Repair completion leaves settlement Pending and unavailable', doc.technicianSettlement.status === 'pending' && doc.technicianSettlement.availableAt === null && calculateWallet({ repairRequests: [doc] }).availableBalance === 0);
             }
             {
                 // Valid owner confirms a completed repair - success + persistence
@@ -12507,7 +12544,9 @@ async function testRepairWorkflow() {
                 logTest('68. Confirmation object persisted as confirmed', c.status === 'confirmed');
                 logTest('69. confirmedAt stored as a Date', c.confirmedAt instanceof Date);
                 logTest('70. confirmedBy is the canonical customer email', c.confirmedBy === ownerEmail);
-                logTest('71. Repair completion metadata unchanged after confirm', JSON.stringify(doc.repair.completion) === beforeCompletion && doc.deliveryStatus === REPAIR_COMPLETED && doc.repair.status === 'completed');
+                logTest('71. Receipt advances terminal handover without changing repair completion', JSON.stringify(doc.repair.completion) === beforeCompletion && doc.deliveryStatus === 'parcel_delivered' && doc.repair.status === 'completed');
+                const walletAfterReceipt = calculateWallet({ repairRequests: [doc] });
+                logTest('71b. Receipt makes exactly the 90% settlement Available', doc.technicianSettlement.status === 'available' && doc.technicianSettlement.availableAt instanceof Date && walletAfterReceipt.pendingBalance === 0 && walletAfterReceipt.availableBalance === 4050);
                 logTest('72. customer_receipt_confirmed tracking event once', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: 'customer_receipt_confirmed' })) === 1);
                 const notif = await collections.notifications.find({ deduplicationKey: `repair:${p.id}:receipt_confirmed` }).toArray();
                 logTest('73. Technician notified of receipt confirmation once', notif.length === 1 && notif[0].recipientEmail === techEmail);
@@ -13299,6 +13338,7 @@ async function runAllTests() {
     await testCP4RouteContract();
     await testTechnicianFinancialSystem();
     await testWorkflowStabilization();
+    await testQuoteRoundNotificationSafety();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
@@ -13678,12 +13718,23 @@ async function testDamageProjectionHardening() {
             deviceName: `DEV-${marker}`, product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
             deliveryStatus: 'repair_completed',
             quote: { status: 'approved', laborAmount: 800, partsAmount: 3500, additionalCharges: 200, totalAmount: 4500, currency: 'bdt' },
+            technicianSettlement: {
+                status: 'pending', technicianId: 'safe-tech-id', technicianEmail: tEmail,
+                partsAmount: 3500, laborAmount: 800, additionalAmount: 200,
+                repairSubtotal: 4500, commissionRate: 0.10, platformCommission: 450,
+                technicianReceivable: 4050, currency: 'BDT', settledAt: new Date(), availableAt: null,
+            },
             createdAt: new Date(), updatedAt: new Date(),
         });
         const cmpMine = await collections.repairRequests.insertOne(mkCompleted('MINE', techEmail));
         const cmpActive = await collections.repairRequests.insertOne({ ...mkCompleted('ACTIVE', techEmail), trackingId: `TEST-DP-ACT-${runId}`, deliveryStatus: 'repair_in_progress' });
         const cmpOther = await collections.repairRequests.insertOne(mkCompleted('OTHER', otherTechEmail));
-        createdIds.push(cmpMine.insertedId, cmpActive.insertedId, cmpOther.insertedId);
+        const cmpHandedOver = await collections.repairRequests.insertOne({
+            ...mkCompleted('HANDED', techEmail),
+            deliveryStatus: 'parcel_delivered',
+            technicianSettlement: { ...mkCompleted('X', techEmail).technicianSettlement, status: 'available', availableAt: new Date() },
+        });
+        createdIds.push(cmpMine.insertedId, cmpActive.insertedId, cmpOther.insertedId, cmpHandedOver.insertedId);
         emails.push(otherTechEmail, noJobsTechEmail);
 
         const getCompleted = (email) => { const res = fakeRes(); return parcelController.getTechnicianRepairRequests({ query: { deliveryStatus: 'repair_completed' }, decoded_email: email }, res).then(() => res); };
@@ -13691,8 +13742,13 @@ async function testDamageProjectionHardening() {
         const completedMine = await getCompleted(techEmail);
         const mineRow = (completedMine.body || []).find((p) => p.trackingId === `TEST-DP-CMP-MINE-${runId}`);
         logTest('12. Technician sees own repair_completed repairs (with BDT quote amount)', completedMine.statusCode === 200 && !!mineRow && mineRow.quote.totalAmount === 4500 && mineRow.quote.currency === 'bdt');
+        logTest('12b. Completed row exposes only the safe current settlement view', mineRow.technicianSettlement?.technicianReceivable === 4050 && mineRow.technicianSettlement.technicianEmail === undefined && mineRow.technicianEarning === undefined);
+        logTest('12c. Completed history retains receipt-confirmed parcel_delivered work', (completedMine.body || []).some((p) => p.trackingId === `TEST-DP-CMP-HANDED-${runId}`));
         logTest('13. Technician cannot see another technician\'s completed repair', !(completedMine.body || []).some((p) => p.trackingId === `TEST-DP-CMP-OTHER-${runId}`));
         logTest('14. Non-completed (in-progress) repair excluded from Completed Repairs', !(completedMine.body || []).some((p) => p.trackingId === `TEST-DP-ACT-${runId}`));
+        const activeMine = await getRider(techEmail);
+        logTest('14b. Active Technician list excludes repair_completed and parcel_delivered work',
+            !(activeMine.body || []).some((p) => [`TEST-DP-CMP-MINE-${runId}`, `TEST-DP-CMP-HANDED-${runId}`].includes(p.trackingId)));
         const completedNone = await getCompleted(noJobsTechEmail);
         logTest('15. Technician with no completed repairs gets a controlled empty array', completedNone.statusCode === 200 && Array.isArray(completedNone.body) && completedNone.body.length === 0);
     } finally {
@@ -14717,6 +14773,455 @@ async function testTechnicianFinancialSystem() {
 // cover lives in a plain module or a route registration, which is exactly why
 // they can be asserted directly.
 // ============================================================================
+// Quote-round notification identity and transaction-safe deduplication
+// (Phase 9.3). These are deliberately NOT mocked-insertOne tests: the bug was
+// MongoDB transaction behaviour, so the section drives the real notification
+// service, against the real notifications collection and its real unique
+// deduplicationKey index, inside real withTransaction sessions. A mocked
+// insert cannot abort a transaction, so it cannot reproduce the defect.
+//
+// Synthetic fixtures only (q93-*@test.local / TEST-Q93-*), cleaned in finally.
+async function testQuoteRoundNotificationSafety() {
+    console.log('\n\nPhase 9.3: Quote Round Notification Safety');
+    console.log('------------------------------------------------------------');
+
+    const { connectDatabase, collections, client } = require('./config/database');
+    const { ObjectId } = require('mongodb');
+    const { initializeModels } = require('./models');
+    const { initializeControllers } = require('./controllers');
+    const { createNotificationService } = require('./services/notificationService');
+    const { NOTIFICATION_EVENTS } = require('./utils/notificationEvents');
+    const { getQuoteRound, countArchivedQuotes } = require('./utils/quote');
+    const { INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_REJECTED } = require('./utils/repairRequestStatus');
+
+    function fakeRes() {
+        return { statusCode: 200, body: undefined, status(c) { this.statusCode = c; return this; }, send(p) { this.body = p; return this; } };
+    }
+
+    const runId = Date.now();
+    const createdParcelIds = [];
+    const createdUserEmails = [];
+    const createdRiderIds = [];
+    const usedTrackingIds = [];
+    const recipientEmails = [];
+
+    try {
+        await connectDatabase();
+        const models = initializeModels(collections);
+        const controllers = initializeControllers(models, collections);
+        const quoteController = controllers.quote;
+        const notificationService = createNotificationService(models);
+
+        const ownerEmail = `q93-owner-${runId}@test.local`;
+        const techEmail = `q93-tech-${runId}@test.local`;
+        createdUserEmails.push(ownerEmail, techEmail);
+        recipientEmails.push(ownerEmail, techEmail);
+
+        await collections.users.insertMany([
+            { email: ownerEmail, role: 'user', createdAt: new Date() },
+            { email: techEmail, role: 'rider', createdAt: new Date() },
+        ]);
+        const techInsert = await collections.technicians.insertOne({
+            name: `TEST-Q93-TECH-${runId}`, email: techEmail, status: 'approved',
+            workStatus: 'in_delivery', region: 'Dhaka', district: 'Dhaka', createdAt: new Date(),
+        });
+        createdRiderIds.push(techInsert.insertedId);
+        const techRiderId = techInsert.insertedId.toString();
+
+        let seq = 0;
+        async function createRequest() {
+            const now = new Date();
+            const trackingId = `TEST-Q93-${runId}-${seq++}`;
+            usedTrackingIds.push(trackingId);
+            const doc = {
+                schemaVersion: 2, trackingId, senderEmail: ownerEmail,
+                product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
+                service: { definitionId: new ObjectId().toString(), repairCategorySlug: 'display-screen' },
+                damage: { description: 'Screen cracked after a fall onto pavement.', images: [] },
+                serviceLocation: { region: 'Dhaka', district: 'Dhaka', address: '10 Test Rd' },
+                pricing: { currency: 'BDT', estimateMin: 1500, estimateMax: 6000, inspectionFee: 0, calculationVersion: 2, quotedAmount: null, quoteStatus: 'awaiting_quote', customerApprovedAt: null, finalAmount: null },
+                inspection: { status: 'submitted', diagnosis: { summary: 'panel dead', detectedIssues: [{ code: null, label: 'Panel', severity: 'major', notes: null }] }, repairability: { decision: 'repairable_with_parts', reason: 'needs panel' }, estimate: { laborEstimate: 500, partsEstimate: 3000, currency: 'BDT' }, internalNotes: null, submittedAt: now, submittedByTechnicianId: techInsert.insertedId, submittedByEmail: techEmail, version: 1 },
+                deliveryStatus: INSPECTION_COMPLETED, technicianId: techRiderId,
+                technicianName: `TEST-Q93-TECH-${runId}`, technicianEmail: techEmail,
+                createdAt: now, updatedAt: now,
+            };
+            const r = await collections.repairRequests.insertOne(doc);
+            createdParcelIds.push(r.insertedId);
+            return { id: r.insertedId.toString(), _id: r.insertedId, trackingId };
+        }
+
+        function submit(id, body) {
+            const res = fakeRes();
+            return quoteController.submitQuote(
+                { params: { id }, decoded_email: techEmail, body },
+                res
+            ).then(() => res);
+        }
+        function decide(id, decision, reason) {
+            const res = fakeRes();
+            return quoteController.decideQuote(
+                { params: { id }, decoded_email: ownerEmail, body: reason ? { decision, reason } : { decision } },
+                res
+            ).then(() => res);
+        }
+        function revise(id) {
+            const res = fakeRes();
+            return quoteController.reviseQuote({ params: { id }, decoded_email: techEmail }, res).then(() => res);
+        }
+
+        const QUOTE_1 = { laborAmount: 500, partsAmount: 3000, additionalCharges: 0 };
+        const QUOTE_2 = { laborAmount: 46, partsAmount: 344, additionalCharges: 5 };
+
+        // ---- 1. Round derivation is server-owned and centralized ----
+        {
+            logTest('9.3-1: a request with no history is round 1',
+                getQuoteRound({}) === 1 && getQuoteRound({ quoteHistory: [] }) === 1);
+            logTest('9.3-2: one archived quote makes the next quote round 2',
+                getQuoteRound({ quoteHistory: [{}] }) === 2);
+            logTest('9.3-3: two archived quotes make the next quote round 3',
+                getQuoteRound({ quoteHistory: [{}, {}] }) === 3);
+            logTest('9.3-4: a malformed/absent history never throws or yields a non-round',
+                getQuoteRound(null) === 1 && getQuoteRound({ quoteHistory: 'nope' }) === 1);
+            logTest('9.3-5: countArchivedQuotes is the companion the round is derived from',
+                countArchivedQuotes({ quoteHistory: [{}, {}] }) === 2 && countArchivedQuotes({}) === 0);
+        }
+
+        // ---- 2. The dedup key is per round, and round is never client input ----
+        {
+            const event = NOTIFICATION_EVENTS.quote_submitted;
+            const r1 = event.deduplicationKey({ entityId: 'req1', metadata: { revisionRound: '1' } });
+            const r1again = event.deduplicationKey({ entityId: 'req1', metadata: { revisionRound: '1' } });
+            const r2 = event.deduplicationKey({ entityId: 'req1', metadata: { revisionRound: '2' } });
+            const otherReq = event.deduplicationKey({ entityId: 'req2', metadata: { revisionRound: '1' } });
+
+            logTest('9.3-6: the same round re-derives an identical key (retry stays idempotent)', r1 === r1again, r1);
+            logTest('9.3-7: a later round derives a DISTINCT key (the actual bug)', r1 !== r2, r1 + ' vs ' + r2);
+            logTest('9.3-8: a different request is still a different key', r1 !== otherReq);
+            logTest('9.3-9: the round is part of the key, not the request id alone',
+                r2.endsWith(':2') && r2.startsWith('repair:req1:quote_submitted:'));
+            logTest('9.3-10: an absent round degrades to round 1 rather than rendering "undefined"',
+                event.deduplicationKey({ entityId: 'req1', metadata: {} }) === r1);
+            logTest('9.3-11: revisionRound is an allowed metadata key but never required',
+                event.allowedMetadataKeys.includes('revisionRound') && !event.requiresMetadata.includes('revisionRound'));
+        }
+
+        // ---- 3. Round 1: one notification, transaction commits ----
+        let round1Key;
+        const req = await createRequest();
+        {
+            const res = await submit(req.id, QUOTE_1);
+            logTest('9.3-12: the initial quote submission resolves with 201', res.statusCode === 201, 'status=' + res.statusCode);
+
+            const fresh = await collections.repairRequests.findOne({ _id: req._id });
+            logTest('9.3-13: the request transitioned inspection_completed -> quote_submitted',
+                fresh.deliveryStatus === QUOTE_SUBMITTED && fresh.quote.status === 'submitted');
+            logTest('9.3-14: the quote persisted the submitted amounts',
+                fresh.quote.totalAmount === 3500 && fresh.quote.laborAmount === 500 && fresh.quote.partsAmount === 3000);
+
+            round1Key = `repair:${req.id}:quote_submitted:1`;
+            const n = await collections.notifications.countDocuments({ deduplicationKey: round1Key });
+            logTest('9.3-15: exactly one round-1 notification reached the customer', n === 1, round1Key);
+
+            const track = await collections.trackingEvents.countDocuments({ trackingId: req.trackingId, status: QUOTE_SUBMITTED });
+            logTest('9.3-16: the tracking event committed with it', track === 1);
+        }
+
+        // ---- 4. Replaying the SAME round is idempotent, never a hang ----
+        {
+            const started = Date.now();
+            const res = await submit(req.id, QUOTE_1);
+            const elapsed = Date.now() - started;
+
+            logTest('9.3-17: replaying the same round is rejected deterministically, not retried forever',
+                res.statusCode === 409 && res.body.code === 'QUOTE_ALREADY_SUBMITTED',
+                'status=' + res.statusCode + ' code=' + (res.body && res.body.code));
+            // The defect made this sit in withTransaction's retry loop until the
+            // driver's 120s ceiling. A generous bound still fails loudly on it.
+            logTest('9.3-18: it resolves promptly (the hang was a >100s retry loop)',
+                elapsed < 10000, elapsed + 'ms');
+            const n = await collections.notifications.countDocuments({ deduplicationKey: round1Key });
+            logTest('9.3-19: no duplicate round-1 notification was created', n === 1);
+        }
+
+        // ---- 5. Decline + revise returns the request to inspection_completed ----
+        {
+            const rejected = await decide(req.id, 'reject', 'Too expensive for this repair.');
+            logTest('9.3-20: the customer can decline the round-1 quote', rejected.statusCode === 200, 'status=' + rejected.statusCode);
+
+            const revised = await revise(req.id);
+            logTest('9.3-21: the technician can reopen it for revision', revised.statusCode === 200, 'status=' + revised.statusCode);
+
+            const fresh = await collections.repairRequests.findOne({ _id: req._id });
+            logTest('9.3-22: the request is back at inspection_completed', fresh.deliveryStatus === INSPECTION_COMPLETED);
+            logTest('9.3-23: the round-1 quote is archived in quoteHistory, not lost',
+                Array.isArray(fresh.quoteHistory) && fresh.quoteHistory.length === 1
+                && fresh.quoteHistory[0].totalAmount === 3500
+                && fresh.quoteHistory[0].revisionRound === 1);
+            logTest('9.3-24: the live quote is cleared so the declined one cannot be approved',
+                fresh.quote === undefined);
+            logTest('9.3-25: the next quote is now derived as round 2', getQuoteRound(fresh) === 2);
+        }
+
+        // ---- 6. Round 2: THE BUG. Must resolve promptly and notify the customer ----
+        let round2Key;
+        {
+            const started = Date.now();
+            const res = await submit(req.id, QUOTE_2);
+            const elapsed = Date.now() - started;
+
+            logTest('9.3-26: the REVISED quote submission resolves with 201 (was an endless "Working...")',
+                res.statusCode === 201, 'status=' + res.statusCode);
+            logTest('9.3-27: it resolves promptly instead of exhausting the transaction retry ceiling',
+                elapsed < 10000, elapsed + 'ms');
+
+            const fresh = await collections.repairRequests.findOne({ _id: req._id });
+            logTest('9.3-28: the request transitioned to quote_submitted again',
+                fresh.deliveryStatus === QUOTE_SUBMITTED && fresh.quote.status === 'submitted');
+            logTest('9.3-29: the round-2 amounts are live (46+344+5 = 395)',
+                fresh.quote.totalAmount === 395);
+            logTest('9.3-30: the round-1 quote is still archived alongside it',
+                fresh.quoteHistory.length === 1 && fresh.quoteHistory[0].totalAmount === 3500);
+
+            round2Key = `repair:${req.id}:quote_submitted:2`;
+            logTest('9.3-31: the round-2 dedup key differs from round 1', round1Key !== round2Key);
+            const n2 = await collections.notifications.countDocuments({ deduplicationKey: round2Key });
+            logTest('9.3-32: the customer received a NEW round-2 notification', n2 === 1, round2Key);
+            const n1 = await collections.notifications.countDocuments({ deduplicationKey: round1Key });
+            logTest('9.3-33: the round-1 notification remains intact', n1 === 1);
+            const total = await collections.notifications.countDocuments({ entityId: req.id, type: 'quote_submitted' });
+            logTest('9.3-34: exactly one quote_submitted notification exists per round', total === 2, 'total=' + total);
+
+            const track = await collections.trackingEvents.countDocuments({ trackingId: req.trackingId, status: QUOTE_SUBMITTED });
+            logTest('9.3-35: both submissions produced a tracking event', track === 2, 'events=' + track);
+        }
+
+        // ---- 7. Replaying round 2 is idempotent too ----
+        {
+            const started = Date.now();
+            const res = await submit(req.id, QUOTE_2);
+            const elapsed = Date.now() - started;
+            logTest('9.3-36: replaying round 2 is rejected deterministically',
+                res.statusCode === 409 && res.body.code === 'QUOTE_ALREADY_SUBMITTED');
+            logTest('9.3-37: it too resolves promptly', elapsed < 10000, elapsed + 'ms');
+            const n2 = await collections.notifications.countDocuments({ deduplicationKey: round2Key });
+            logTest('9.3-38: still exactly one round-2 notification', n2 === 1);
+        }
+
+        // ---- 8. THE ROOT CAUSE, reproduced directly against the real index ----
+        // A session-backed insert of an already-committed dedup key used to be
+        // swallowed as "duplicate", leaving the caller to commit an aborted
+        // transaction - which withTransaction then retried forever. These drive
+        // the real service inside a real transaction against the real index.
+        {
+            const dedupTarget = round1Key;
+
+            // 8a. The pre-check path: an already-committed event is skipped
+            // WITHOUT issuing the doomed insert, so the transaction stays
+            // healthy and its OTHER writes still commit.
+            const probeTrackingId = `TEST-Q93-${runId}-probe`;
+            usedTrackingIds.push(probeTrackingId);
+            const session = client.startSession();
+            let attempts = 0;
+            let committed = false;
+            let result = null;
+            const started = Date.now();
+            try {
+                await session.withTransaction(async () => {
+                    attempts++;
+                    await collections.trackingEvents.insertOne(
+                        { trackingId: probeTrackingId, status: QUOTE_SUBMITTED, details: 'probe', createdAt: new Date() },
+                        { session }
+                    );
+                    result = await notificationService.createNotification({
+                        session,
+                        recipientEmail: ownerEmail,
+                        recipientRole: 'user',
+                        type: 'quote_submitted',
+                        entityType: 'repair_request',
+                        entityId: req.id,
+                        metadata: { trackingId: req.trackingId, revisionRound: '1' },
+                        actorEmail: null,
+                    });
+                });
+                committed = true;
+            } catch (e) {
+                committed = false;
+            } finally {
+                await session.endSession();
+            }
+            const elapsed = Date.now() - started;
+
+            logTest('9.3-39: a duplicate inside a transaction is reported as an idempotent skip',
+                result && result.created === false && result.duplicate === true);
+            logTest('9.3-40: the surrounding transaction still COMMITS (it was never aborted)', committed === true);
+            logTest('9.3-41: the callback ran exactly once - no retry loop',
+                attempts === 1, 'attempts=' + attempts);
+            logTest('9.3-42: it resolved promptly rather than hitting the 120s ceiling',
+                elapsed < 10000, elapsed + 'ms');
+            const probeWrote = await collections.trackingEvents.countDocuments({ trackingId: probeTrackingId });
+            logTest('9.3-43: the transaction\'s other writes committed normally', probeWrote === 1);
+            const stillOne = await collections.notifications.countDocuments({ deduplicationKey: dedupTarget });
+            logTest('9.3-44: no duplicate notification was written', stillOne === 1);
+        }
+
+        // 8b. The race path: if an E11000 DOES escape the pre-check because a
+        // concurrent writer won, the error must PROPAGATE, never be swallowed
+        // into a "duplicate" result on a transaction that can no longer commit.
+        {
+            const raceKey = `repair:${req.id}:quote_submitted:99`;
+            const session = client.startSession();
+            let sawDuplicateResult = false;
+            let propagated = false;
+            let attempts = 0;
+            try {
+                await session.withTransaction(async () => {
+                    attempts++;
+                    // Pin this transaction's read snapshot BEFORE the racing
+                    // write lands - otherwise the pre-check would simply
+                    // observe it and the race would never be exercised.
+                    await collections.notifications.findOne({ deduplicationKey: 'q93-snapshot-pin' }, { session });
+                    // Now simulate the concurrent winner landing between the
+                    // pre-check and the insert: commit the key outside this
+                    // session, after the snapshot is already fixed.
+                    if (attempts === 1) {
+                        await collections.notifications.insertOne({
+                            recipientEmail: ownerEmail, recipientRole: 'user', type: 'quote_submitted',
+                            title: 't', message: 'm', entityType: 'repair_request', entityId: req.id,
+                            actionUrl: '/x', priority: 'normal', isRead: false, readAt: null,
+                            createdAt: new Date(), actorEmail: null, actorRole: null,
+                            deduplicationKey: raceKey, metadata: {}, schemaVersion: 1,
+                        });
+                    }
+                    const r = await notificationService.createNotification({
+                        session,
+                        recipientEmail: ownerEmail,
+                        recipientRole: 'user',
+                        type: 'quote_submitted',
+                        entityType: 'repair_request',
+                        entityId: req.id,
+                        metadata: { trackingId: req.trackingId, revisionRound: '99' },
+                        actorEmail: null,
+                    });
+                    if (r && r.duplicate === true && attempts === 1) sawDuplicateResult = true;
+                });
+            } catch (e) {
+                propagated = true;
+            } finally {
+                await session.endSession();
+            }
+
+            // On attempt 1 the pre-check cannot see the outside-session insert,
+            // so the insert fails and MUST propagate. On the driver's retry the
+            // pre-check now observes it and the operation converges.
+            logTest('9.3-45: a racing duplicate is never reported as a healthy skip on the aborted attempt',
+                sawDuplicateResult === false);
+            logTest('9.3-46: the error propagated so the driver could restart from a clean callback',
+                attempts >= 2, 'attempts=' + attempts);
+            logTest('9.3-46b: and the retry converged rather than looping or failing',
+                propagated === false && attempts < 10, 'attempts=' + attempts);
+            const raceCount = await collections.notifications.countDocuments({ deduplicationKey: raceKey });
+            logTest('9.3-47: exactly one notification exists for the raced key', raceCount === 1, 'count=' + raceCount);
+        }
+
+        // ---- 9. Non-transactional idempotency is unchanged ----
+        {
+            const soloKey = `repair:${req.id}:quote_submitted:77`;
+            const first = await notificationService.createNotification({
+                recipientEmail: ownerEmail, recipientRole: 'user', type: 'quote_submitted',
+                entityType: 'repair_request', entityId: req.id,
+                metadata: { trackingId: req.trackingId, revisionRound: '77' }, actorEmail: null,
+            });
+            const second = await notificationService.createNotification({
+                recipientEmail: ownerEmail, recipientRole: 'user', type: 'quote_submitted',
+                entityType: 'repair_request', entityId: req.id,
+                metadata: { trackingId: req.trackingId, revisionRound: '77' }, actorEmail: null,
+            });
+            logTest('9.3-48: without a session the first create still succeeds', first.created === true);
+            logTest('9.3-49: without a session a duplicate is still a safe idempotent skip',
+                second.created === false && second.duplicate === true);
+            logTest('9.3-50: and it did not write a second row',
+                (await collections.notifications.countDocuments({ deduplicationKey: soloKey })) === 1);
+            logTest('9.3-51: both report the same deduplication key',
+                first.deduplicationKey === soloKey && second.deduplicationKey === soloKey);
+        }
+
+        // ---- 10. Atomicity: a failed notification rolls the whole quote back ----
+        {
+            const fresh2 = await createRequest();
+            const session = client.startSession();
+            let threw = false;
+            try {
+                await session.withTransaction(async () => {
+                    await collections.repairRequests.updateOne(
+                        { _id: fresh2._id },
+                        { $set: { deliveryStatus: QUOTE_SUBMITTED, quote: { status: 'submitted', totalAmount: 1 } } },
+                        { session }
+                    );
+                    await collections.trackingEvents.insertOne(
+                        { trackingId: fresh2.trackingId, status: QUOTE_SUBMITTED, details: 'x', createdAt: new Date() },
+                        { session }
+                    );
+                    // A genuine validation failure, not a duplicate.
+                    await notificationService.createNotification({
+                        session, recipientEmail: ownerEmail, recipientRole: 'user',
+                        type: 'quote_submitted', entityType: 'repair_request', entityId: fresh2.id,
+                        metadata: { trackingId: fresh2.trackingId, revisionRound: 2 }, actorEmail: null,
+                    });
+                });
+            } catch (e) {
+                threw = true;
+            } finally {
+                await session.endSession();
+            }
+            const after = await collections.repairRequests.findOne({ _id: fresh2._id });
+            const trackAfter = await collections.trackingEvents.countDocuments({ trackingId: fresh2.trackingId });
+            logTest('9.3-52: a rejected notification aborts the whole submission', threw === true);
+            logTest('9.3-53: the quote/status change rolled back with it',
+                after.deliveryStatus === INSPECTION_COMPLETED && after.quote === undefined);
+            logTest('9.3-54: the tracking event rolled back too - no partial state', trackAfter === 0);
+        }
+
+        // ---- 11. No other event's identity regressed ----
+        {
+            const regressions = [];
+            for (const [type, def] of Object.entries(NOTIFICATION_EVENTS)) {
+                if (type === 'quote_submitted') continue;
+                const ctx = {
+                    entityId: 'e1', recipientEmail: 'r@test.local', recipientRole: 'user',
+                    actorEmail: null, actorRole: null,
+                    metadata: { trackingId: 'T', revisionRound: '1', deviceLabel: 'D', amount: '1', reason: 'r' },
+                };
+                try {
+                    const k = def.deduplicationKey(ctx);
+                    if (typeof k !== 'string' || !k.length || /undefined/.test(k)) regressions.push(type);
+                } catch (e) {
+                    // Events that intentionally refuse an untrusted context are fine.
+                    if (e.code !== 'MISSING_TRUSTED_RECIPIENT_CONTEXT') regressions.push(type + ':' + e.message);
+                }
+            }
+            logTest('9.3-55: every other notification event still renders a sane dedup key',
+                regressions.length === 0, regressions.join(', '));
+            logTest('9.3-56: quote_revision_started remains per-round (the precedent this fix follows)',
+                NOTIFICATION_EVENTS.quote_revision_started.deduplicationKey({ entityId: 'x', metadata: { revisionRound: '2' } })
+                !== NOTIFICATION_EVENTS.quote_revision_started.deduplicationKey({ entityId: 'x', metadata: { revisionRound: '1' } }));
+        }
+
+    } finally {
+        if (createdParcelIds.length) await collections.repairRequests.deleteMany({ _id: { $in: createdParcelIds } });
+        if (createdRiderIds.length) await collections.technicians.deleteMany({ _id: { $in: createdRiderIds } });
+        if (createdUserEmails.length) await collections.users.deleteMany({ email: { $in: createdUserEmails } });
+        if (usedTrackingIds.length) await collections.trackingEvents.deleteMany({ trackingId: { $in: usedTrackingIds } });
+        if (recipientEmails.length) await collections.notifications.deleteMany({ recipientEmail: { $in: recipientEmails } });
+        const leftoverP = await collections.repairRequests.countDocuments({ trackingId: { $regex: '^TEST-Q93-' } });
+        const leftoverR = await collections.technicians.countDocuments({ name: { $regex: '^TEST-Q93-' } });
+        const leftoverU = await collections.users.countDocuments({ email: { $regex: '^q93-.*@test.local$' } });
+        logTest('9.3-57: no Phase 9.3 fixture leakage after tests',
+            leftoverP === 0 && leftoverR === 0 && leftoverU === 0);
+    }
+
+    console.log('');
+}
+
 async function testWorkflowStabilization() {
     console.log('\n\nPhase 9.2: Workflow Stabilization');
     console.log('------------------------------------------------------------');

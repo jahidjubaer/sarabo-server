@@ -102,6 +102,32 @@ function buildQuoteDocument(normalized, { submittedByTechnicianId, now }) {
     };
 }
 
+// The 1-based round number of the repair request's CURRENT quote cycle.
+//
+// Derived from canonical workflow data only - NEVER from client input. Every
+// revision archives the live quote into quoteHistory[] and unsets the live
+// quote (see controllers/quoteController.js's reviseQuote), so the number of
+// archived quotes IS the number of completed rounds: the initial quote is
+// round 1, the quote after one revision is round 2, and so on.
+//
+// This is the single source of truth for the round. reviseQuote labels the
+// quote it archives with it and submitQuote derives the customer notification's
+// identity from it - a second, competing counter would let those two disagree
+// and silently collapse two real rounds onto one notification (Phase 9.3).
+//
+// Note this is NOT QUOTE_VERSION above: that is the quote document's schema
+// version and is unrelated to how many times a quote has been revised.
+function getQuoteRound(repairRequest) {
+    return countArchivedQuotes(repairRequest) + 1;
+}
+
+// Companion to getQuoteRound - the count the round is derived from, exposed so
+// a caller can guard its write on the exact history size it computed the round
+// from rather than trusting a pre-transaction read.
+function countArchivedQuotes(repairRequest) {
+    return Array.isArray(repairRequest && repairRequest.quoteHistory) ? repairRequest.quoteHistory.length : 0;
+}
+
 // Validates a customer decision. `reason` is required (and length-bounded) for
 // a rejection, optional for an approval.
 function validateQuoteDecision(body) {
@@ -162,6 +188,8 @@ module.exports = {
     FORBIDDEN_SUBMIT_FIELDS,
     validateQuoteSubmission,
     buildQuoteDocument,
+    getQuoteRound,
+    countArchivedQuotes,
     validateQuoteDecision,
     buildQuoteView,
 };

@@ -280,12 +280,21 @@ const NOTIFICATION_EVENTS = {
         // Owner-facing, same variable-role reasoning as technician_assigned.
         recipientRoles: ['user', 'rider', 'admin'],
         priority: 'normal',
-        allowedMetadataKeys: ['trackingId'],
+        allowedMetadataKeys: ['trackingId', 'revisionRound'],
         requiresMetadata: [],
         title: () => 'Your repair quote is ready',
         message: () => 'Your repair quote is ready for review.',
         actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
-        deduplicationKey: ({ entityId }) => `repair:${entityId}:quote_submitted`,
+        // Per QUOTE ROUND, not per request-forever. A declined quote can be
+        // revised (quote_revision_started below), which legitimately returns the
+        // request to inspection_completed for a genuinely new quote the customer
+        // must be told about. A key fixed on entityId alone made every round
+        // after the first collide on the unique deduplicationKey index - and
+        // because that insert happens inside the submit transaction, the
+        // collision aborted the transaction rather than skipping a notification,
+        // hanging quote submission until the driver's retry ceiling (Phase 9.3).
+        // The round is always server-derived via utils/quote.js's getQuoteRound.
+        deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:quote_submitted:${metadata.revisionRound || 1}`,
     },
     quote_approved: {
         entityType: 'repair_request',

@@ -20,9 +20,14 @@ class NotificationModel {
         return await this.collection.insertOne(document, options);
     }
 
-    // Debugging/test convenience only - not part of any public read API.
-    async findByDeduplicationKey(deduplicationKey) {
-        return await this.collection.findOne({ deduplicationKey });
+    // Deduplication lookup - not part of any public read API. `options` exists
+    // so the caller can pass the SAME ClientSession the surrounding transaction
+    // is using: services/notificationService.js checks this before inserting
+    // inside a transaction, because letting the unique index reject that insert
+    // would abort the transaction instead of skipping a duplicate (Phase 9.3).
+    // Also used by tests for direct assertions.
+    async findByDeduplicationKey(deduplicationKey, options = {}) {
+        return await this.collection.findOne({ deduplicationKey }, options);
     }
 
     // Test-fixture cleanup only. Deliberately narrow (recipient-scoped), not

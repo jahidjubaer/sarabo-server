@@ -155,11 +155,47 @@ function createNotificationService(models) {
         };
 
         const options = session ? { session } : {};
+
+        // Duplicate handling is fundamentally different inside a transaction.
+        //
+        // OUTSIDE one, letting the unique index reject the insert and catching
+        // E11000 is the cheapest correct idempotency check - a rejected insert
+        // costs nothing and there is no surrounding state to invalidate.
+        //
+        // INSIDE one, a failed write ABORTS the whole transaction server-side.
+        // Catching E11000 here cannot revive it: the caller would carry on and
+        // commit an already-dead transaction, that commit would fail with a
+        // TransientTransactionError-labelled NoSuchTransaction, and
+        // withTransaction would dutifully retry the entire callback - which
+        // fails identically every time, until the driver's 120s ceiling. That
+        // is precisely how a re-submitted quote hung the technician's browser
+        // on "Working..." (Phase 9.3). So when a session is present the key is
+        // looked up FIRST, in that same session, and the doomed insert is never
+        // issued at all.
+        if (session) {
+            const existing = await Notification.findByDeduplicationKey(document.deduplicationKey, options);
+            if (existing) {
+                return { created: false, duplicate: true, notificationId: null, deduplicationKey: document.deduplicationKey };
+            }
+        }
+
         try {
             const result = await Notification.insertOne(document, options);
             return { created: true, notificationId: result.insertedId.toString(), deduplicationKey: document.deduplicationKey };
         } catch (error) {
             if (error.code === 11000) {
+                if (session) {
+                    // The pre-check above already ruled out "this event was
+                    // recorded earlier", so reaching here means a CONCURRENT
+                    // writer won the race in between - a genuinely transient
+                    // conflict. This transaction is now aborted, so reporting an
+                    // idempotent skip would hand the caller a transaction it can
+                    // never commit. Propagate instead: withTransaction restarts
+                    // from a clean callback, and on that attempt the pre-check
+                    // observes the committed event and converges immediately.
+                    // Never invent a retry loop here - that is the driver's job.
+                    throw error;
+                }
                 // Same logical event already produced a notification - an
                 // intentional, expected idempotent skip, not a failure.
                 return { created: false, duplicate: true, notificationId: null, deduplicationKey: document.deduplicationKey };
