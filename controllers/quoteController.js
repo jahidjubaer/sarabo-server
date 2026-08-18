@@ -111,16 +111,31 @@ class QuoteController {
                     }
 
                     await logTracking(this.collections.trackingEvents, repairRequest.trackingId, QUOTE_SUBMITTED, mongoSession);
-                    await this.notifications.createNotification({
-                        session: mongoSession,
-                        recipientEmail: repairRequest.senderEmail,
-                        recipientRole: ownerRole,
-                        type: 'quote_submitted',
-                        entityType: 'repair_request',
-                        entityId: repairRequest._id.toString(),
-                        metadata: { trackingId: repairRequest.trackingId },
-                        actorEmail: null,
-                    });
+                    // A restored development/QA request can legitimately be
+                    // back at inspection_completed while its previously
+                    // committed quote notification remains. Attempting the
+                    // same unique insert would abort this Mongo transaction;
+                    // notificationService's legacy duplicate catch would then
+                    // leave withTransaction retrying forever. Reuse the
+                    // committed logical event instead of issuing that doomed
+                    // write. Normal submissions still create the notification
+                    // atomically with the quote and tracking event.
+                    const existingNotification = await this.collections.notifications.findOne(
+                        { deduplicationKey: `repair:${repairRequest._id.toString()}:quote_submitted` },
+                        { session: mongoSession }
+                    );
+                    if (!existingNotification) {
+                        await this.notifications.createNotification({
+                            session: mongoSession,
+                            recipientEmail: repairRequest.senderEmail,
+                            recipientRole: ownerRole,
+                            type: 'quote_submitted',
+                            entityType: 'repair_request',
+                            entityId: repairRequest._id.toString(),
+                            metadata: { trackingId: repairRequest.trackingId },
+                            actorEmail: null,
+                        });
+                    }
                 });
             } catch (txError) {
                 if (!conflictCode) throw txError;

@@ -11775,6 +11775,54 @@ async function testQuoteWorkflow() {
             logTest('39. Failed submit creates no tracking/notification', (await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED })) === 0 && (await collections.notifications.countDocuments({ deduplicationKey: `repair:${p.id}:quote_submitted` })) === 0);
         }
 
+        // Regression: a development/QA request can be restored to
+        // inspection_completed while its previously committed notification
+        // and tracking row remain. The notification deduplication key then
+        // already exists when the technician submits again. E11000 used to be
+        // swallowed inside the transaction, leaving withTransaction to retry
+        // forever and the client stuck on "Working...".
+        {
+            const p = await createRepairRequest();
+            await quoteController.notifications.createNotification({
+                recipientEmail: ownerEmail,
+                recipientRole: 'user',
+                type: 'quote_submitted',
+                entityType: 'repair_request',
+                entityId: p.id,
+                metadata: { trackingId: p.trackingId },
+                actorEmail: null,
+            });
+            await collections.trackingEvents.insertOne({
+                trackingId: p.trackingId,
+                status: QUOTE_SUBMITTED,
+                details: 'quote submitted',
+                createdAt: new Date(),
+            });
+            const trackingBefore = await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED });
+            const outcome = await Promise.race([
+                submit(p.id, techEmail, { laborAmount: 46, partsAmount: 344, additionalCharges: 5, notes: 'Regression quote.' })
+                    .then((response) => ({ type: 'response', response })),
+                new Promise((resolve) => setTimeout(() => resolve({ type: 'timeout' }), 10000)),
+            ]);
+            const doc = await collections.repairRequests.findOne({ _id: p._id });
+            const trackingAfter = await collections.trackingEvents.countDocuments({ trackingId: p.trackingId, status: QUOTE_SUBMITTED });
+            const notificationCount = await collections.notifications.countDocuments({ deduplicationKey: `repair:${p.id}:quote_submitted` });
+
+            logTest('50. Pre-existing quote notification does not hang submitQuote', outcome.type === 'response');
+            logTest('51. Recovered quote submission returns HTTP 201', outcome.response?.statusCode === 201);
+            logTest('52. Recovered submission persists the exact quote and quote_submitted state',
+                doc.deliveryStatus === QUOTE_SUBMITTED
+                && doc.quote?.status === 'submitted'
+                && doc.quote.laborAmount === 46
+                && doc.quote.partsAmount === 344
+                && doc.quote.additionalCharges === 5
+                && doc.quote.totalAmount === 395);
+            logTest('53. Recovered submission commits a new tracking event', trackingAfter === trackingBefore + 1);
+            logTest('54. Existing customer notification is reused without duplication', notificationCount === 1);
+            logTest('55. Duplicate quote protection remains intact after recovery',
+                (await submit(p.id, techEmail, validQuote())).body.code === 'QUOTE_ALREADY_SUBMITTED');
+        }
+
         // ================= Read (42-46) =================
         {
             const p = await submittedParcel();
@@ -11797,7 +11845,7 @@ async function testQuoteWorkflow() {
         const leftoverP = await collections.repairRequests.countDocuments({ trackingId: { $regex: '^TEST-QUOTE-' } });
         const leftoverR = await collections.technicians.countDocuments({ name: { $regex: '^TEST-QUOTE-' } });
         const leftoverU = await collections.users.countDocuments({ email: { $regex: '^quote-.*@test.local$' } });
-        logTest('53. No quote fixture leakage after tests', leftoverP === 0 && leftoverR === 0 && leftoverU === 0);
+        logTest('56. No quote fixture leakage after tests', leftoverP === 0 && leftoverR === 0 && leftoverU === 0);
     }
 
     console.log('');
