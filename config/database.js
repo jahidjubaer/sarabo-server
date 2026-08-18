@@ -41,6 +41,7 @@ const collections = {
     damageUploadSessions: db.collection("damage_upload_sessions"),
     repairEvidenceSessions: db.collection("repair_evidence_sessions"),
     deletionCleanups: db.collection("deletion_cleanups"),
+    technicianWithdrawals: db.collection("technician_withdrawals"),
 };
 
 let connectionPromise = null;
@@ -219,6 +220,43 @@ async function connectDatabase() {
                 await collections.deletionCleanups.createIndex(
                     { status: 1 },
                     { name: 'deletionCleanups_status' }
+                );
+                // Technician withdrawals. Enforces "at most ONE open withdrawal
+                // per technician" at the database level - the same "guard the
+                // invariant in the database, not just in application code"
+                // pattern used above for payments.sessionId and
+                // checkoutSessions.requestId. Partial filter expressions support
+                // only simple equality, which 'requested' (the sole open status)
+                // satisfies. Without this, two concurrent POSTs could both pass
+                // the controller's read-then-write check and reserve the same
+                // balance twice.
+                await collections.technicianWithdrawals.createIndex(
+                    { technicianEmail: 1 },
+                    {
+                        unique: true,
+                        partialFilterExpression: { status: 'requested' },
+                        name: 'technicianWithdrawals_openPerTechnician_unique',
+                    }
+                );
+                // Wallet read path - "this technician's withdrawals, newest
+                // first".
+                await collections.technicianWithdrawals.createIndex(
+                    { technicianEmail: 1, requestedAt: -1 },
+                    { name: 'technicianWithdrawals_technicianEmail_requestedAt' }
+                );
+                // Admin queue - "all withdrawals in this status, newest first".
+                await collections.technicianWithdrawals.createIndex(
+                    { status: 1, requestedAt: -1 },
+                    { name: 'technicianWithdrawals_status_requestedAt' }
+                );
+                // Wallet aggregation reads every settled repair for one
+                // technician. technicianEmail is the identity the settlement
+                // snapshot and the withdrawal both key on (the existing
+                // technicianId+deliveryStatus index does not serve this query,
+                // which filters on the settlement's own existence instead).
+                await collections.repairRequests.createIndex(
+                    { technicianEmail: 1, 'technicianSettlement.status': 1 },
+                    { name: 'repairRequests_technicianEmail_settlementStatus' }
                 );
                 return { db, collections };
             })

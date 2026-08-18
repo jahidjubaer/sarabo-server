@@ -35,10 +35,14 @@ function repairRequestRoutes(app, controllers) {
     // AssignTechnicians and is not changed by this route).
     app.get('/admin/repair-requests', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => repairRequestController.getAdminRepairRequests(req, res));
 
-    // Admin-only manual settlement of a completed repair's technician earning
-    // (Phase 8.11). Accounting/settlement state only - marks the earning "paid";
-    // no external money transfer occurs. Idempotent (duplicate settlement -> 409).
-    app.post('/admin/repair-requests/:id/technician-earning/mark-paid', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => repairRequestController.markTechnicianEarningPaid(req, res));
+    // RETIRED (Phase 9): POST /admin/repair-requests/:id/technician-earning/mark-paid.
+    //
+    // The per-repair admin payout is gone. Technician money is now settled
+    // through the wallet: 90% of the customer-approved subtotal is snapshotted
+    // at payment, released by customer receipt confirmation, and paid out via
+    // POST /admin/withdrawals/:id/mark-paid (routes/wallet.js). Keeping this
+    // endpoint alive alongside that would be a second, independent way to pay a
+    // technician for the same repair.
 
     // Create new repair request. Customer-exclusive business mutation - gated
     // by verifyEmailVerified (Phase 8.1) so an unverified email/password user

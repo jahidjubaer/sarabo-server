@@ -10,6 +10,7 @@ const DamageUploadController = require('./damageUploadController');
 const InspectionController = require('./inspectionController');
 const QuoteController = require('./quoteController');
 const RepairController = require('./repairController');
+const WalletController = require('./walletController');
 
 function initializeControllers(models, collections) {
     return {
@@ -24,7 +25,8 @@ function initializeControllers(models, collections) {
         damageUpload: new DamageUploadController(models, collections),
         inspection: new InspectionController(models, collections),
         quote: new QuoteController(models, collections),
-        repair: new RepairController(models, collections)
+        repair: new RepairController(models, collections),
+        wallet: new WalletController(models, collections)
     };
 }
 

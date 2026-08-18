@@ -422,28 +422,25 @@ class RepairController {
                         completedAt: now,
                     };
 
-                    // technicianEarning (Phase 8.11): the labor component of the
-                    // approved quote, snapshotted once at completion. NO
-                    // commission/percentage; parts + additional charges are
-                    // platform cost, never technician income. Server-authoritative
-                    // - derived from the persisted approved quote (guaranteed
-                    // present + approved by the start-repair gate), never from the
-                    // client. Written inside the same single-winner guarded update
-                    // as completion, so it is created exactly once and a retry can
-                    // never duplicate or overwrite it. Accounting/settlement only:
-                    // no money is transferred here.
-                    const laborAmount = repairRequest.quote ? Number(repairRequest.quote.laborAmount) : NaN;
-                    const technicianEarning = Number.isFinite(laborAmount) && laborAmount >= 0
-                        ? {
-                            amount: laborAmount,
-                            currency: String(repairRequest.quote.currency || 'BDT').toLowerCase(),
-                            status: 'pending',
-                            calculatedAt: now,
-                            paidAt: null,
-                            paidBy: null,
-                        }
-                        : null;
-
+                    // RETIRED (Phase 9): the labour-only `technicianEarning`
+                    // snapshot is no longer written here.
+                    //
+                    // It paid the technician the quote's laborAmount and nothing
+                    // else, which meant two quotes charging the customer the same
+                    // total paid the technician wildly different amounts purely on
+                    // how the technician had split parts against labour. It is
+                    // replaced by `technicianSettlement` - 90% of the whole
+                    // customer-approved subtotal - written at PAYMENT
+                    // confirmation instead of here (services/paymentProcessor.js),
+                    // because money the customer has not paid yet should never
+                    // appear in a technician's wallet.
+                    //
+                    // The field itself is deliberately NOT deleted from existing
+                    // documents: historical records keep it, it is still read for
+                    // display, and a repair whose legacy earning was already
+                    // marked paid is permanently excluded from wallet balances so
+                    // it can never be paid a second time (see
+                    // utils/settlement.js's isLegacyAlreadyPaid).
                     const completionSet = {
                         deliveryStatus: REPAIR_COMPLETED,
                         'repair.status': 'completed',
@@ -451,7 +448,6 @@ class RepairController {
                         customerReceiptConfirmation: { status: 'pending', confirmedAt: null, confirmedBy: null },
                         updatedAt: now,
                     };
-                    if (technicianEarning) completionSet.technicianEarning = technicianEarning;
 
                     // Guarded transition: still v2, still in progress, still
                     // this technician, repair still in_progress. Any concurrent
@@ -467,14 +463,14 @@ class RepairController {
                             technicianId: repairRequest.technicianId,
                             'repair.status': 'in_progress',
                         },
-                        // customerReceiptConfirmation (Phase 8.9) + technicianEarning
-                        // (Phase 8.11) are both written here in the same guarded
-                        // update (see completionSet above): the confirmation is a
+                        // customerReceiptConfirmation (Phase 8.9) is written here
+                        // in the same guarded update (see completionSet above): a
                         // post-completion handover object initialized to 'pending'
                         // (NOT a deliveryStatus enum - that migration stays frozen,
-                        // and it never gates technician release), and the earning is
-                        // the labor-only accounting snapshot. Both are set exactly
-                        // once by the single winner.
+                        // and it never gates technician release), set exactly once
+                        // by the single winner. Confirming it later is also what
+                        // releases the technician's settlement into their
+                        // withdrawable balance (Phase 9).
                         { $set: completionSet },
                         { session: mongoSession }
                     );

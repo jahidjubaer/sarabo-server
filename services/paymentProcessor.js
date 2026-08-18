@@ -5,6 +5,7 @@ const { createCheckoutSessionManager } = require('./checkoutSessionManager');
 const { PAYMENT_CURRENCY, V2_PAYMENT_CURRENCY, toSmallestUnit, isValidStoredCost, isValidQuoteTotal, isBdtQuoteCurrency } = require('../config/paymentConfig');
 const { isV2RepairRequest } = require('../utils/repairRequestSchema');
 const { QUOTE_APPROVED, PAYMENT_COMPLETED } = require('../utils/repairRequestStatus');
+const { calculateSettlement, buildSettlementDocument } = require('../utils/settlement');
 
 function normalize(value) {
     return (value || '').trim().toLowerCase();
@@ -378,9 +379,44 @@ function createPaymentProcessor(models, collections, notifications) {
                 // query condition itself is the race-resolver, not a
                 // read-then-write check (the early check above only catches
                 // the non-racing case).
+                // Technician settlement snapshot, frozen here at the moment
+                // payment becomes final and written in the SAME guarded update
+                // as paymentStatus - so it is created exactly once, by the
+                // single winner, and a retry can never duplicate it or
+                // overwrite one that already exists.
+                //
+                // Derived from the persisted APPROVED quote (guaranteed present
+                // and approved by the payment-eligibility gate above), never
+                // from Stripe metadata and never from the client. Because it is
+                // a snapshot that nothing ever recomputes, a later quote edit
+                // cannot silently move money that has already been settled.
+                //
+                // Deliberately non-fatal when it cannot be derived: a repair
+                // with no assigned technician, or a quote whose lines do not
+                // reconcile, records no settlement rather than failing the
+                // customer's payment. Accounting must never be able to reject
+                // money that Stripe has already taken. Such a repair simply
+                // never enters any wallet.
+                const paymentSet = { paymentStatus: 'paid' };
+                const settlementTechnicianEmail = normalize(repairRequest.technicianEmail);
+                const settlementResult = calculateSettlement(repairRequest.quote);
+                if (settlementResult.valid && settlementTechnicianEmail && repairRequest.technicianId) {
+                    paymentSet.technicianSettlement = buildSettlementDocument(settlementResult.settlement, {
+                        technicianId: repairRequest.technicianId,
+                        technicianEmail: settlementTechnicianEmail,
+                        now: new Date(),
+                    });
+                }
+
+                // The guard is unchanged from before this snapshot existed:
+                // paymentStatus: { $ne: 'paid' } already means "nobody has
+                // completed this payment yet", and the settlement is only ever
+                // written together with that flip. Adding a second condition on
+                // technicianSettlement would introduce a new way for this
+                // update to fail without describing a real conflict.
                 const updateResult = await collections.repairRequests.updateOne(
                     { _id: repairRequest._id, paymentStatus: { $ne: 'paid' }, deliveryStatus: { $ne: 'cancelled' } },
-                    { $set: { paymentStatus: 'paid' } },
+                    { $set: paymentSet },
                     { session: mongoSession }
                 );
                 if (updateResult.matchedCount === 0) {

@@ -8,6 +8,7 @@ const { ServiceDefinitionModel } = require('./ServiceDefinition');
 const DamageUploadSessionModel = require('./DamageUploadSession');
 const RepairEvidenceSessionModel = require('./RepairEvidenceSession');
 const DeletionCleanupModel = require('./DeletionCleanup');
+const TechnicianWithdrawalModel = require('./TechnicianWithdrawal');
 
 function initializeModels(collections) {
     return {
@@ -20,7 +21,8 @@ function initializeModels(collections) {
         ServiceDefinition: new ServiceDefinitionModel(collections.serviceDefinitions),
         DamageUploadSession: new DamageUploadSessionModel(collections.damageUploadSessions),
         RepairEvidenceSession: new RepairEvidenceSessionModel(collections.repairEvidenceSessions),
-        DeletionCleanup: new DeletionCleanupModel(collections.deletionCleanups)
+        DeletionCleanup: new DeletionCleanupModel(collections.deletionCleanups),
+        TechnicianWithdrawal: new TechnicianWithdrawalModel(collections.technicianWithdrawals)
     };
 }
 

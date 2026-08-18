@@ -12478,66 +12478,59 @@ async function testRepairWorkflow() {
             }
         }
 
-        // ================= Technician earning + settlement (Phase 8.11, 82-106) =================
-        // Earning = approved quote laborAmount (NO commission/percentage; parts +
-        // additional charges excluded). Accounting/settlement only - no transfer.
+        // ================= Technician earning: retired write + surviving summary (Phase 9, 82-106) =================
+        // RETIRED (Phase 9): completion no longer writes a technicianEarning, and
+        // there is no admin per-repair mark-paid. The old labour-only model paid
+        // wildly different amounts for identical customer totals; technician money
+        // is now 90% of the customer-approved subtotal, snapshotted at payment and
+        // paid out through the wallet withdrawal queue (see the Phase 9 financial
+        // section). What survives here is the read-only earnings summary, which
+        // still has to report correctly over the historical rows already in the
+        // database - those repairs really were paid this way and their record must
+        // keep reading back.
         {
             const RepairRequestController = require('./controllers/repairRequestController');
             const earnController = new RepairRequestController(models, collections, fakeStorage);
             const summaryFor = (email) => { const res = fakeRes(); return earnController.getTechnicianEarningsSummary({ decoded_email: email }, res).then(() => res); };
-            const markPaid = (pid, email) => { const res = fakeRes(); return earnController.markTechnicianEarningPaid({ params: { id: pid }, decoded_email: email }, res).then(() => res); };
 
             {
-                // Creation on successful completion, derived from quote.laborAmount
-                // (fixture quote: labor 800, parts 3500, additional 200, total 4500).
+                // The retired write. Completion must leave no earning behind at
+                // all - a half-retired model that still stamped an amount would
+                // give the admin queue a second, contradictory figure beside the
+                // settlement snapshot.
                 const p = await startedParcel();
                 await completeWithEvidence(p.id);
                 const doc = await collections.repairRequests.findOne({ _id: p._id });
-                const e = doc.technicianEarning;
-                logTest('82. Completion creates a technician earning', !!e);
-                logTest('83. Earning amount === quote.laborAmount (800)', e.amount === 800 && e.amount === doc.quote.laborAmount);
-                logTest('84. partsAmount excluded from earning', e.amount !== doc.quote.partsAmount);
-                logTest('85. additionalCharges excluded from earning', e.amount !== doc.quote.additionalCharges);
-                logTest('86. totalAmount not used as earning', e.amount !== doc.quote.totalAmount);
-                logTest('87. Earning currency is bdt', e.currency === 'bdt');
-                logTest('88. Default earning status is pending', e.status === 'pending');
-                logTest('89. calculatedAt stored as a Date', e.calculatedAt instanceof Date);
-                logTest('90. paidAt initially null', e.paidAt === null);
-                logTest('91. paidBy initially null', e.paidBy === null);
-                // Retry completion does not duplicate/overwrite the earning.
-                const cAt = e.calculatedAt.getTime();
+                logTest('82. Completion no longer writes a technician earning (retired)', doc.technicianEarning === undefined || doc.technicianEarning === null);
+                logTest('83. Completion still succeeds without the earning write', doc.deliveryStatus === REPAIR_COMPLETED);
+                logTest('84. Completion summary still stored', !!doc.repair && !!doc.repair.completion && doc.repair.completion.summary === validSummary);
+                logTest('85. Quote untouched by the retirement', doc.quote.laborAmount === 800 && doc.quote.totalAmount === 4500);
+                // Retry must stay idempotent for the same reason it always did.
                 await complete(p.id, techEmail, { summary: validSummary, evidenceImageIds: [] });
                 const doc2 = await collections.repairRequests.findOne({ _id: p._id });
-                logTest('92. Completion retry does not overwrite/duplicate earning', doc2.technicianEarning.status === 'pending' && doc2.technicianEarning.calculatedAt.getTime() === cAt && doc2.technicianEarning.paidBy === null);
+                logTest('86. Completion retry still creates no earning', doc2.technicianEarning === undefined || doc2.technicianEarning === null);
             }
 
             {
-                // Admin settlement + duplicate + role rejections on a real completion.
-                const p = await startedParcel();
-                await completeWithEvidence(p.id);
-                const r = await markPaid(p.id, adminEmail);
-                const doc = await collections.repairRequests.findOne({ _id: p._id });
-                logTest('93. Admin can mark technician earning paid (200)', r.statusCode === 200 && r.body.technicianEarning.status === 'paid');
-                logTest('94. paidAt stored as a Date', doc.technicianEarning.paidAt instanceof Date);
-                logTest('95. paidBy is the admin email', doc.technicianEarning.paidBy === adminEmail);
-                const beforeAt = doc.technicianEarning.paidAt.getTime();
-                const dup = await markPaid(p.id, adminEmail);
-                const doc2 = await collections.repairRequests.findOne({ _id: p._id });
-                logTest('96. Duplicate mark-paid rejected (409 ALREADY_PAID)', dup.statusCode === 409 && dup.body.code === 'TECHNICIAN_EARNING_ALREADY_PAID');
-                logTest('97. Paid earning not overwritten by duplicate', doc2.technicianEarning.paidAt.getTime() === beforeAt && doc2.technicianEarning.paidBy === adminEmail);
-                logTest('98. Technician cannot mark earning paid (403)', (await markPaid(p.id, techEmail)).statusCode === 403);
-                logTest('99. Customer cannot mark earning paid (403)', (await markPaid(p.id, ownerEmail)).statusCode === 403);
+                // The retired admin control. Both the controller method and the
+                // route are gone; asserting on the method is what stops it being
+                // quietly reintroduced as a second way to pay for one repair.
+                logTest('87. markTechnicianEarningPaid removed from the controller', typeof earnController.markTechnicianEarningPaid !== 'function');
+                logTest('88. Read-only earnings summary survives', typeof earnController.getTechnicianEarningsSummary === 'function');
             }
 
             {
-                // Earnings summary (server-side aggregation, own-only) + historical fallback.
-                const earnTech = `rep-earn-${runId}@test.local`;
-                const otherEarnTech = `rep-earn-other-${runId}@test.local`;
+                // Earnings summary (server-side aggregation, own-only) + historical
+                // fallback. Fixtures are inserted directly because completion no
+                // longer produces them - which is exactly the historical shape this
+                // endpoint now exists to read.
+                const earnTech = 'rep-earn-' + runId + '@test.local';
+                const otherEarnTech = 'rep-earn-other-' + runId + '@test.local';
                 createdUserEmails.push(earnTech); recipientEmails.push(earnTech);
                 await collections.users.insertOne({ email: earnTech, role: 'rider', createdAt: new Date() });
                 const tId = new ObjectId().toString();
                 const mkDoc = (marker, earning, laborAmount, tEmail) => ({
-                    schemaVersion: 2, trackingId: `TEST-REP-EARN-${marker}-${runId}`, senderEmail: ownerEmail,
+                    schemaVersion: 2, trackingId: 'TEST-REP-EARN-' + marker + '-' + runId, senderEmail: ownerEmail,
                     deviceName: 'D', product: { categorySlug: 'smartphone', brand: 'B', model: 'M' },
                     technicianEmail: tEmail, technicianId: tId, deliveryStatus: REPAIR_COMPLETED,
                     quote: { status: 'approved', laborAmount, partsAmount: 999, additionalCharges: 0, totalAmount: laborAmount + 999, currency: 'bdt' },
@@ -12557,10 +12550,12 @@ async function testRepairWorkflow() {
                 logTest('103. paidAmount correct (1200)', sum.body.paidAmount === 1200);
                 logTest('104. completedRepairCount = own repair_completed count (3)', sum.body.completedRepairCount === 3);
                 logTest('105. Summary currency is bdt', sum.body.currency === 'bdt');
-
-                const histPaid = await markPaid(i3.insertedId.toString(), adminEmail);
+                // 106 (settle-a-historical-repair) is retired with the endpoint it
+                // called. The historical row it used, i3, still proves what mattered
+                // about it: an old repair with no earning document is read back
+                // through the laborAmount fallback, asserted by 101 and 102 above.
                 const histDoc = await collections.repairRequests.findOne({ _id: i3.insertedId });
-                logTest('106. Historical completed repair: settle initializes earning from laborAmount', histPaid.statusCode === 200 && histDoc.technicianEarning.amount === 500 && histDoc.technicianEarning.status === 'paid' && histDoc.technicianEarning.paidBy === adminEmail);
+                logTest('106. Historical repair without an earning stays untouched', histDoc.technicianEarning === undefined || histDoc.technicianEarning === null);
             }
         }
     } finally {
@@ -13238,6 +13233,7 @@ async function runAllTests() {
     await testTechnicianMatchingProfileFlow();
     await testCP3IdentityFieldContract();
     await testCP4RouteContract();
+    await testTechnicianFinancialSystem();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
@@ -14398,3 +14394,252 @@ setTimeout(() => {
     });
 }, 2000);
 
+
+// ============================================================================
+// Phase 9: technician financial system - commission, settlement, wallet,
+// withdrawals.
+//
+// Pure-function tests against utils/settlement.js plus guard-level tests of the
+// wallet routes' authorization, in the same style as
+// testEmailVerificationMiddleware() above. No HTTP round trip and no database
+// is needed for any of this: every rule that decides who gets paid what lives
+// in one pure module precisely so it can be verified directly and exhaustively.
+// ============================================================================
+async function testTechnicianFinancialSystem() {
+    console.log('\nPhase 9: Technician Financial System (commission / wallet / withdrawals)');
+    console.log('-'.repeat(60));
+
+    const settlementModule = require('./utils/settlement');
+    const {
+        PLATFORM_COMMISSION_RATE, COMMISSION_NUMERATOR, COMMISSION_DENOMINATOR, COMMISSION_BASE_FIELDS,
+        SETTLEMENT_PENDING, SETTLEMENT_AVAILABLE,
+        WITHDRAWAL_REQUESTED, WITHDRAWAL_PAID, WITHDRAWAL_REJECTED,
+        calculateSettlement, calculateWallet, validateWithdrawalRequest, isLegacyAlreadyPaid,
+    } = settlementModule;
+
+    const quote = (partsAmount, laborAmount, additionalCharges = 0) => ({
+        partsAmount, laborAmount, additionalCharges,
+        totalAmount: partsAmount + laborAmount + additionalCharges,
+        currency: 'BDT', status: 'approved',
+    });
+    const settled = (receivable, status, legacyPaid = false) => ({
+        technicianSettlement: { technicianReceivable: receivable, status },
+        ...(legacyPaid ? { technicianEarning: { amount: 1, status: 'paid' } } : {}),
+    });
+
+    // --- 1. 10% commission on parts + labour ------------------------------
+    {
+        const r = calculateSettlement(quote(4000, 2000));
+        logTest('Phase 9: 10% commission on parts + labour (4000+2000 -> 600 / 5400)',
+            r.valid && r.settlement.repairSubtotal === 6000
+            && r.settlement.platformCommission === 600
+            && r.settlement.technicianReceivable === 5400,
+            r.valid ? 'subtotal=' + r.settlement.repairSubtotal + ' commission=' + r.settlement.platformCommission + ' receivable=' + r.settlement.technicianReceivable : r.message);
+    }
+
+    // --- 2. commission includes the existing additional charge ------------
+    {
+        const r = calculateSettlement(quote(4000, 2000, 1500));
+        logTest('Phase 9: additionalCharges is inside the commission base (7500 -> 750 / 6750)',
+            r.valid && r.settlement.repairSubtotal === 7500
+            && r.settlement.platformCommission === 750
+            && r.settlement.technicianReceivable === 6750,
+            r.valid ? 'subtotal=' + r.settlement.repairSubtotal + ' commission=' + r.settlement.platformCommission : r.message);
+        logTest('Phase 9: commission base is exactly parts + labour + additional',
+            COMMISSION_BASE_FIELDS.length === 3
+            && COMMISSION_BASE_FIELDS.includes('partsAmount')
+            && COMMISSION_BASE_FIELDS.includes('laborAmount')
+            && COMMISSION_BASE_FIELDS.includes('additionalCharges'),
+            'fields=' + COMMISSION_BASE_FIELDS.join('+'));
+    }
+
+    // --- 3. the split cannot change the outcome ---------------------------
+    {
+        const a = calculateSettlement(quote(4000, 2000));
+        const b = calculateSettlement(quote(5500, 500));
+        const c = calculateSettlement(quote(0, 6000));
+        logTest('Phase 9: same subtotal, different parts/labour split -> identical commission and receivable',
+            a.valid && b.valid && c.valid
+            && a.settlement.platformCommission === b.settlement.platformCommission
+            && b.settlement.platformCommission === c.settlement.platformCommission
+            && a.settlement.technicianReceivable === b.settlement.technicianReceivable
+            && b.settlement.technicianReceivable === c.settlement.technicianReceivable,
+            '4000/2000 -> ' + a.settlement.technicianReceivable + ', 5500/500 -> ' + b.settlement.technicianReceivable + ', 0/6000 -> ' + c.settlement.technicianReceivable);
+    }
+
+    // --- 4. the invariant, including subtotals that do not divide by 10 ---
+    {
+        let holds = true;
+        let counterExample = null;
+        const cases = [0, 1, 7, 9, 10, 55, 99, 101, 333, 6000, 6005, 7777, 123457, 1500000];
+        for (const subtotal of cases) {
+            const r = calculateSettlement(quote(subtotal, 0));
+            if (!r.valid || r.settlement.platformCommission + r.settlement.technicianReceivable !== subtotal) {
+                holds = false; counterExample = subtotal; break;
+            }
+            if (!Number.isInteger(r.settlement.platformCommission) || !Number.isInteger(r.settlement.technicianReceivable)) {
+                holds = false; counterExample = subtotal; break;
+            }
+        }
+        logTest('Phase 9: platformCommission + technicianReceivable === repairSubtotal, always, in integers',
+            holds, holds ? 'verified across ' + cases.length + ' subtotals including non-multiples of 10' : 'failed at subtotal ' + counterExample);
+        logTest('Phase 9: the declared rate and the integer ratio actually used agree',
+            PLATFORM_COMMISSION_RATE === COMMISSION_NUMERATOR / COMMISSION_DENOMINATOR,
+            'rate=' + PLATFORM_COMMISSION_RATE + ' ratio=' + COMMISSION_NUMERATOR + '/' + COMMISSION_DENOMINATOR);
+    }
+
+    // --- 5. paid but not receipt-confirmed => pending ---------------------
+    {
+        const w = calculateWallet({ repairRequests: [settled(5400, SETTLEMENT_PENDING)], withdrawals: [] });
+        logTest('Phase 9: paid but not receipt-confirmed sits in pendingBalance and is NOT available',
+            w.pendingBalance === 5400 && w.grossAvailableBalance === 0 && w.availableBalance === 0,
+            'pending=' + w.pendingBalance + ' available=' + w.availableBalance);
+    }
+
+    // --- 6. receipt-confirmed => available --------------------------------
+    {
+        const w = calculateWallet({ repairRequests: [settled(5400, SETTLEMENT_AVAILABLE)], withdrawals: [] });
+        logTest('Phase 9: receipt-confirmed settlement becomes available',
+            w.pendingBalance === 0 && w.availableBalance === 5400 && w.lifetimeReceivable === 5400,
+            'available=' + w.availableBalance);
+    }
+
+    // --- 7. cannot withdraw above available -------------------------------
+    {
+        const w = calculateWallet({ repairRequests: [settled(5400, SETTLEMENT_AVAILABLE)], withdrawals: [] });
+        const over = validateWithdrawalRequest({ amount: 5401 }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
+        const exact = validateWithdrawalRequest({ amount: 5400 }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
+        const zero = validateWithdrawalRequest({ amount: 0 }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
+        const negative = validateWithdrawalRequest({ amount: -100 }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
+        const fractional = validateWithdrawalRequest({ amount: 100.5 }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
+        logTest('Phase 9: withdrawal above availableBalance is refused, exactly-available is allowed',
+            over.valid === false && over.code === 'WITHDRAWAL_EXCEEDS_AVAILABLE' && exact.valid === true,
+            '5401 -> ' + over.code + ', 5400 -> ' + (exact.valid ? 'allowed' : 'refused'));
+        logTest('Phase 9: zero, negative and fractional withdrawal amounts are refused',
+            zero.valid === false && negative.valid === false && fractional.valid === false,
+            '0/' + zero.code + ', -100/' + negative.code + ', 100.5/' + fractional.code);
+    }
+
+    // --- 8. cannot withdraw pending balance -------------------------------
+    {
+        const w = calculateWallet({
+            repairRequests: [settled(5400, SETTLEMENT_PENDING), settled(900, SETTLEMENT_AVAILABLE)],
+            withdrawals: [],
+        });
+        const reachPending = validateWithdrawalRequest({ amount: 1000 }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
+        logTest('Phase 9: pending (unconfirmed) money is unreachable - only the confirmed 900 can be withdrawn',
+            w.pendingBalance === 5400 && w.availableBalance === 900 && reachPending.valid === false,
+            'pending=' + w.pendingBalance + ' available=' + w.availableBalance + ' request(1000) -> ' + reachPending.code);
+    }
+
+    // --- 9. only one open withdrawal --------------------------------------
+    {
+        const second = validateWithdrawalRequest({ amount: 100 }, { availableBalance: 5000, hasOpenWithdrawal: true });
+        logTest('Phase 9: a second withdrawal is refused while one is still open',
+            second.valid === false && second.code === 'WITHDRAWAL_ALREADY_OPEN', 'code=' + second.code);
+    }
+
+    // --- 10. rejection releases the reservation ---------------------------
+    {
+        const repairRequests = [settled(5400, SETTLEMENT_AVAILABLE)];
+        const open = calculateWallet({ repairRequests, withdrawals: [{ amount: 2000, status: WITHDRAWAL_REQUESTED }] });
+        const rejected = calculateWallet({ repairRequests, withdrawals: [{ amount: 2000, status: WITHDRAWAL_REJECTED }] });
+        logTest('Phase 9: an open withdrawal reserves the money, and rejecting it releases it again',
+            open.reservedBalance === 2000 && open.availableBalance === 3400
+            && rejected.reservedBalance === 0 && rejected.availableBalance === 5400,
+            'open: reserved=' + open.reservedBalance + ' available=' + open.availableBalance + ' | rejected: reserved=' + rejected.reservedBalance + ' available=' + rejected.availableBalance);
+    }
+
+    // --- 11. a paid withdrawal permanently reduces the balance ------------
+    {
+        const repairRequests = [settled(5400, SETTLEMENT_AVAILABLE)];
+        const paidOnce = calculateWallet({ repairRequests, withdrawals: [{ amount: 5400, status: WITHDRAWAL_PAID }] });
+        const paidTwice = calculateWallet({ repairRequests, withdrawals: [{ amount: 5400, status: WITHDRAWAL_PAID }, { amount: 5400, status: WITHDRAWAL_PAID }] });
+        const afterPayout = validateWithdrawalRequest({ amount: 1 }, { availableBalance: paidOnce.availableBalance, hasOpenWithdrawal: false });
+        logTest('Phase 9: a paid withdrawal leaves nothing withdrawable, and double-counting cannot drive the balance negative',
+            paidOnce.withdrawnBalance === 5400 && paidOnce.availableBalance === 0
+            && paidTwice.availableBalance === 0 && afterPayout.valid === false,
+            'paid once: withdrawn=' + paidOnce.withdrawnBalance + ' available=' + paidOnce.availableBalance + ' | next request -> ' + afterPayout.code);
+    }
+
+    // --- 12/13. authorization guards --------------------------------------
+    {
+        const { verifyTechnician, verifyAdmin } = require('./middleware/auth');
+        const fakeRes = () => ({
+            statusCode: null, body: null,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; },
+        });
+        const collectionsFor = (user) => ({ users: { findOne: async () => user } });
+        const guards = [['verifyTechnician', verifyTechnician, 'rider'], ['verifyAdmin', verifyAdmin, 'admin']];
+
+        for (const [label, guard, allowedRole] of guards) {
+            const outcomes = [];
+            for (const role of ['user', 'rider', 'admin', null]) {
+                const res = fakeRes();
+                let passed = false;
+                await guard(
+                    { collections: collectionsFor(role ? { email: 'x@test.local', role } : null), decoded_email: 'x@test.local' },
+                    res,
+                    () => { passed = true; }
+                );
+                outcomes.push({ role: role || 'no-account', passed, status: res.statusCode, allowed: role === allowedRole });
+            }
+            const correct = outcomes.every((o) => (o.allowed ? o.passed === true : o.passed === false && o.status === 403));
+            logTest('Phase 9: ' + label + " admits only '" + allowedRole + "' to the wallet/withdrawal routes",
+                correct, outcomes.map((o) => o.role + ':' + (o.passed ? 'allow' : o.status)).join(' '));
+        }
+    }
+
+    // --- 14. historical already-paid legacy earning stays paid ------------
+    {
+        const legacy = settled(5400, SETTLEMENT_AVAILABLE, true);
+        const w = calculateWallet({ repairRequests: [legacy], withdrawals: [] });
+        const mixed = calculateWallet({ repairRequests: [legacy, settled(900, SETTLEMENT_AVAILABLE)], withdrawals: [] });
+        logTest('Phase 9: a repair already settled under the retired labour-only payout never becomes withdrawable again',
+            isLegacyAlreadyPaid(legacy) === true
+            && w.availableBalance === 0 && w.lifetimeReceivable === 0 && w.settlementCount === 0
+            && mixed.availableBalance === 900,
+            'legacy-only available=' + w.availableBalance + ' | legacy + new available=' + mixed.availableBalance);
+
+        const stillPending = calculateWallet({
+            repairRequests: [{
+                technicianSettlement: { technicianReceivable: 5400, status: SETTLEMENT_AVAILABLE },
+                technicianEarning: { amount: 1, status: 'pending' },
+            }],
+            withdrawals: [],
+        });
+        logTest('Phase 9: a legacy earning that was never paid does NOT block its settlement',
+            stillPending.availableBalance === 5400, 'available=' + stillPending.availableBalance);
+    }
+
+    // --- server-owned fields cannot be supplied by a client ---------------
+    {
+        const fields = ['technicianEmail', 'technicianId', 'status', 'commissionRate', 'technicianReceivable', 'processedBy'];
+        const attempts = fields.map((field) => validateWithdrawalRequest(
+            { amount: 100, [field]: 'x' },
+            { availableBalance: 5000, hasOpenWithdrawal: false }
+        ));
+        logTest('Phase 9: a client cannot supply identity, status, commissionRate or receivable on a withdrawal',
+            attempts.every((a) => a.valid === false && a.code === 'INVALID_WITHDRAWAL'),
+            attempts.filter((a) => !a.valid).length + '/' + attempts.length + ' rejected');
+    }
+
+    // --- a drifted quote total is a fault, not a silent commission base ---
+    {
+        const drifted = calculateSettlement({ partsAmount: 4000, laborAmount: 2000, additionalCharges: 0, totalAmount: 99999 });
+        logTest('Phase 9: a quote whose stored total disagrees with its line items is refused, not commissioned',
+            drifted.valid === false && drifted.code === 'QUOTE_TOTAL_MISMATCH', 'code=' + drifted.code);
+    }
+
+    // --- the retired per-repair payout route is really gone ---------------
+    {
+        const routeSource = require('fs').readFileSync(require('path').join(__dirname, 'routes', 'repairRequests.js'), 'utf8');
+        const activeRegistration = routeSource
+            .split('\n')
+            .some((line) => line.includes('technician-earning/mark-paid') && !line.trim().startsWith('//'));
+        logTest('Phase 9: the retired per-repair technician-earning payout route is no longer registered',
+            activeRegistration === false,
+            activeRegistration ? 'still registered' : 'removed - wallet withdrawals are the only payout path');
+    }
+}

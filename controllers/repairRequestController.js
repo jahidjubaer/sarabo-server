@@ -22,6 +22,7 @@ const {
     buildServiceLocationSnapshot, validateClientPricingAbsence
 } = require('../utils/repairRequestV2');
 const { getPricingEstimate } = require('../services/pricingService');
+const { SETTLEMENT_AVAILABLE } = require('../utils/settlement');
 const {
     ELIGIBILITY_VERSION, DIAGNOSTIC_INELIGIBLE_CAP, validateDiagnosticFlag, validatePagination,
     deriveRequestTaxonomy, validateCurrentServiceDefinition, deriveServiceAreaMatch, evaluateTechnician,
@@ -1769,7 +1770,28 @@ class RepairRequestController {
                         { 'customerReceiptConfirmation.status': { $ne: 'confirmed' } },
                     ],
                 },
-                { $set: { customerReceiptConfirmation: { status: 'confirmed', confirmedAt: now, confirmedBy: ownerEmail } } }
+                // The technician's settlement becomes withdrawable at exactly
+                // this moment, and in exactly this update - receipt
+                // confirmation is the single event that releases it, so
+                // payment alone can never make money available. Written with
+                // the confirmation itself rather than afterwards, so the
+                // single winner releases the money exactly once and a failure
+                // cannot leave a confirmed repair with a still-pending
+                // settlement.
+                //
+                // A dotted path is used rather than replacing the sub-document,
+                // so the frozen snapshot (amounts, commission, receivable) is
+                // untouched - only its status and availability timestamp move.
+                // Repairs with no settlement are unaffected: the dotted $set is
+                // a no-op on a document that has no technicianSettlement.
+                {
+                    $set: {
+                        customerReceiptConfirmation: { status: 'confirmed', confirmedAt: now, confirmedBy: ownerEmail },
+                        ...(repairRequest.technicianSettlement
+                            ? { 'technicianSettlement.status': SETTLEMENT_AVAILABLE, 'technicianSettlement.availableAt': now }
+                            : {}),
+                    },
+                }
             );
 
             if (updateResult.matchedCount === 0) {
@@ -1840,103 +1862,20 @@ class RepairRequestController {
         }
     }
 
-    // Admin-only manual settlement (Phase 8.11): records the technician earning
-    // for a completed repair as PAID. This is accounting/settlement state only -
-    // NO external money transfer occurs (no Stripe Connect / bank / wallet). The
-    // amount is authoritative server-side (existing pending earning, else the
-    // canonical quote laborAmount for a historical record); it is never accepted
-    // from the client. Idempotent single-winner guard: a duplicate settlement is
-    // a controlled 409 and never overwrites paidAt/paidBy.
-    async markTechnicianEarningPaid(req, res) {
-        try {
-            const id = req.params.id;
-            if (!ObjectId.isValid(id)) {
-                return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
-            }
-            // Admin-only, checked in-controller (defense in depth alongside the
-            // route's verifyAdmin) and BEFORE any request lookup, so a non-admin
-            // learns nothing about whether the request exists.
-            const caller = await this.User.findByEmail(req.decoded_email);
-            if (!caller || caller.role !== 'admin') {
-                return res.status(403).send({ message: 'forbidden access', code: 'ADMIN_REQUIRED' });
-            }
-            const repairRequest = await this.RepairRequest.findById(id);
-            if (!repairRequest) {
-                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
-            }
-            if (repairRequest.deliveryStatus !== REPAIR_COMPLETED) {
-                return res.status(409).send({ message: 'the repair is not completed', code: 'REPAIR_NOT_COMPLETED' });
-            }
-            if (!repairRequest.technicianEmail || !repairRequest.technicianId) {
-                return res.status(409).send({ message: 'this repair has no assigned technician', code: 'REQUEST_NOT_ASSIGNED' });
-            }
-            const existing = repairRequest.technicianEarning;
-            if (existing && existing.status === 'paid') {
-                return res.status(409).send({ message: 'the technician earning has already been marked paid', code: 'TECHNICIAN_EARNING_ALREADY_PAID' });
-            }
-
-            let amount;
-            let currency;
-            let calculatedAt;
-            if (existing && Number.isFinite(Number(existing.amount))) {
-                amount = Number(existing.amount);
-                currency = existing.currency || 'bdt';
-                calculatedAt = existing.calculatedAt || new Date();
-            } else {
-                const labor = repairRequest.quote ? Number(repairRequest.quote.laborAmount) : NaN;
-                if (!Number.isFinite(labor) || labor < 0) {
-                    return res.status(409).send({ message: 'no technician earning can be resolved for this repair', code: 'TECHNICIAN_EARNING_UNAVAILABLE' });
-                }
-                amount = labor;
-                currency = String(repairRequest.quote.currency || 'bdt').toLowerCase();
-                calculatedAt = new Date();
-            }
-
-            const now = new Date();
-            const adminEmail = normalize(req.decoded_email);
-            const paidEarning = { amount, currency, status: 'paid', calculatedAt, paidAt: now, paidBy: adminEmail };
-
-            const updateResult = await this.collections.repairRequests.updateOne(
-                {
-                    _id: repairRequest._id,
-                    deliveryStatus: REPAIR_COMPLETED,
-                    $or: [
-                        { technicianEarning: { $exists: false } },
-                        { 'technicianEarning.status': { $ne: 'paid' } },
-                    ],
-                },
-                { $set: { technicianEarning: paidEarning } }
-            );
-            if (updateResult.matchedCount === 0) {
-                const latest = await this.RepairRequest.findById(id);
-                if (latest && latest.technicianEarning && latest.technicianEarning.status === 'paid') {
-                    return res.status(409).send({ message: 'the technician earning has already been marked paid', code: 'TECHNICIAN_EARNING_ALREADY_PAID' });
-                }
-                return res.status(409).send({ message: 'the technician earning could not be settled', code: 'TECHNICIAN_EARNING_SETTLE_FAILED' });
-            }
-
-            try {
-                await this.notifications.createNotification({
-                    recipientEmail: repairRequest.technicianEmail,
-                    recipientRole: 'rider',
-                    type: 'technician_earning_paid',
-                    entityType: 'repair_request',
-                    entityId: repairRequest._id.toString(),
-                    metadata: { trackingId: repairRequest.trackingId },
-                    actorEmail: adminEmail,
-                });
-            } catch (notifyError) {
-                console.error('technician_earning_paid notification failed (non-fatal):', notifyError.message);
-            }
-
-            return res.status(200).send({
-                message: 'technician earning marked as paid',
-                technicianEarning: paidEarning,
-            });
-        } catch (error) {
-            res.status(500).send({ message: 'Error settling technician earning', code: 'TECHNICIAN_EARNING_SETTLE_FAILED' });
-        }
-    }
+    // RETIRED (Phase 9): markTechnicianEarningPaid.
+    //
+    // The per-repair admin payout that settled a single repair's labour-only
+    // earning is gone, together with its route. Technician money is now settled
+    // through the wallet (controllers/walletController.js): a settlement
+    // snapshot is frozen at payment, released by customer receipt confirmation,
+    // and paid out against a withdrawal request. Two independent ways to pay a
+    // technician for the same repair is exactly the failure this replaces.
+    //
+    // The stored `technicianEarning` field is deliberately left in place on
+    // existing documents - it is still read for display, and any repair whose
+    // legacy earning was already marked paid is permanently excluded from wallet
+    // balances (utils/settlement.js's isLegacyAlreadyPaid) so that money can
+    // never be paid out a second time.
 }
 
 module.exports = RepairRequestController;
