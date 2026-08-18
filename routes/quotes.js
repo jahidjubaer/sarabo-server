@@ -16,6 +16,15 @@ function quoteRoutes(app, controllers) {
     // owner authority + quote/payment state.
     app.post('/repair-requests/:id/quote/decision', verifyFBToken, ensureDatabaseReady, verifyEmailVerified, (req, res) => quoteController.decideQuote(req, res));
     app.get('/repair-requests/:id/quote', verifyFBToken, ensureDatabaseReady, (req, res) => quoteController.getQuote(req, res));
+
+    // Post-rejection technician actions (Phase 9.2). Both are technician-side,
+    // so like quote submission above they are deliberately NOT gated by
+    // verifyEmailVerified (that gate exists for customer-exclusive business
+    // mutations). The controller enforces assigned-technician identity, v2,
+    // not-already-paid, and quote_rejected state - route middleware never
+    // carries that authority here, matching this file's existing convention.
+    app.post('/repair-requests/:id/quote/revise', verifyFBToken, ensureDatabaseReady, (req, res) => quoteController.reviseQuote(req, res));
+    app.post('/repair-requests/:id/quote/cancel-request', verifyFBToken, ensureDatabaseReady, (req, res) => quoteController.cancelAfterQuoteRejection(req, res));
 }
 
 module.exports = quoteRoutes;

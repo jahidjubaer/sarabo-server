@@ -65,10 +65,23 @@ const ASSIGNMENT_PENDING = 'assignment_pending';
 // repair_in_progress. repair_completed is intentionally excluded (terminal).
 // Used by assignTechnicianToRepairRequest (Phase 6.2 Unit 2) and technicianEligibilityService
 // to find any request still occupying a technician's single active-assignment slot.
+// quote_rejected is deliberately EXCLUDED (Phase 9.2). It used to be listed
+// here, which is what stranded the technician: a declined quote is not work in
+// progress, but the request still occupied the technician's single
+// active-assignment slot, so they could be given nothing else while the
+// customer had already walked away from this one. Excluding it frees the slot
+// without unassigning anybody - technicianId/technicianEmail stay on the
+// request, so the SAME technician can still revise the quote or cancel it (see
+// controllers/quoteController.js's reopenForRevision / cancelAfterQuoteRejection).
+//
+// The trade-off is deliberate and worth naming: a technician holding a
+// declined quote can now also be offered new work. That is correct - a rejected
+// quote may sit indefinitely waiting on a customer who is never coming back,
+// and blocking a technician on it indefinitely is the worse failure.
 const ACTIVE_STATUSES = [
     ASSIGNMENT_PENDING,
     ...VALID_STATUSES.filter((status) => status !== 'parcel_delivered'),
-    INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, PAYMENT_COMPLETED, REPAIR_IN_PROGRESS
+    INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, PAYMENT_COMPLETED, REPAIR_IN_PROGRESS
 ];
 
 // Maps a repair request's current deliveryStatus to the statuses it may move to next

@@ -181,6 +181,63 @@ class TechnicianController {
         }
     }
 
+    // GET /technicians/me (Phase 9.2)
+    //
+    // The authenticated technician's own stored application/profile record.
+    // Identity is req.decoded_email from the verified token ONLY - never an
+    // email, id or query parameter, so this endpoint cannot be pointed at
+    // somebody else's record.
+    //
+    // Explicit allow-list projection, the same convention as the model's other
+    // reads: every field returned is one the technician themselves supplied on
+    // their application or that the workflow set on their record. Nothing is
+    // invented - no rating, no completed-job count, no certifications, no
+    // fabricated experience. A field the record genuinely lacks comes back
+    // null, so the UI can say so honestly instead of rendering a blank.
+    async getMyTechnicianProfile(req, res) {
+        try {
+            const email = normalize(req.decoded_email);
+            const technician = await this.collections.technicians.findOne(
+                { email },
+                {
+                    projection: {
+                        name: 1, email: 1, phone: 1, avatar: 1,
+                        region: 1, district: 1, address: 1,
+                        status: 1, workStatus: 1, expertise: 1, createdAt: 1,
+                    },
+                }
+            );
+
+            // A 'rider' with no technician record is a real, reportable state
+            // (e.g. the record was removed) - not a 500, and not an empty
+            // object pretending to be a profile.
+            if (!technician) {
+                return res.status(404).send({ message: 'no technician profile found for this account', code: 'TECHNICIAN_PROFILE_NOT_FOUND' });
+            }
+
+            // nid and any other sensitive vetting field are deliberately NOT
+            // projected above: this is the technician's own profile view, not
+            // the admin vetting view, and it has no reason to echo a national
+            // ID back over the wire.
+            return res.status(200).send({
+                id: technician._id.toString(),
+                name: technician.name ?? null,
+                email: technician.email ?? null,
+                phone: technician.phone ?? null,
+                avatar: technician.avatar ?? null,
+                region: technician.region ?? null,
+                district: technician.district ?? null,
+                address: technician.address ?? null,
+                status: technician.status ?? null,
+                workStatus: technician.workStatus ?? null,
+                expertise: Array.isArray(technician.expertise) ? technician.expertise : [],
+                appliedAt: technician.createdAt ?? null,
+            });
+        } catch (error) {
+            return res.status(500).send({ message: 'Error loading technician profile', code: 'TECHNICIAN_PROFILE_FAILED' });
+        }
+    }
+
     async notifyAdminsOfNewApplication(technician, technicianId) {
         let adminEmails = [];
         try {

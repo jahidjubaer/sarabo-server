@@ -4481,10 +4481,15 @@ async function testNotificationFoundation() {
             'repair_in_progress', 'repair_completed', 'receipt_confirmed', 'technician_earning_paid', 'payment_confirmed',
             'inspection_completed', 'quote_submitted', 'quote_approved', 'quote_rejected',
             'payment_completed', 'payment_completed_technician',
-            'repair_started', 'repair_finished'
+            'repair_started', 'repair_finished',
+            // Phase 9.2: admin new-request notification, the two post-rejection
+            // workflow events, and the two withdrawal outcomes that were being
+            // emitted by walletController with no definition to render them.
+            'repair_request_created', 'quote_revision_started', 'repair_cancelled_by_technician',
+            'withdrawal_paid', 'withdrawal_rejected'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 19 event types exist', actualTypes.length === 19 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 24 event types exist', actualTypes.length === 24 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -4900,7 +4905,7 @@ async function testNotificationFoundation() {
         logTest('57. Each lifecycle event accepts recipientRole admin', allLifecycleAcceptAdmin);
         logTest('58. Each lifecycle event rejects an unsupported role', allLifecycleRejectUnsupported);
 
-        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed', 'quote_submitted', 'payment_completed', 'repair_started', 'repair_finished'];
+        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed', 'quote_submitted', 'payment_completed', 'repair_started', 'repair_finished', 'quote_revision_started', 'repair_cancelled_by_technician'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -13245,6 +13250,7 @@ async function runAllTests() {
     await testCP3IdentityFieldContract();
     await testCP4RouteContract();
     await testTechnicianFinancialSystem();
+    await testWorkflowStabilization();
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
@@ -14652,5 +14658,351 @@ async function testTechnicianFinancialSystem() {
         logTest('Phase 9: the retired per-repair technician-earning payout route is no longer registered',
             activeRegistration === false,
             activeRegistration ? 'still registered' : 'removed - wallet withdrawals are the only payout path');
+    }
+}
+
+// ============================================================================
+// Phase 9.2: workflow stabilization (device identity, admin notification,
+// quote rejection recovery, payment CTA authority, technician profile).
+//
+// Pure/contract-level throughout - no HTTP and no database. Every rule these
+// cover lives in a plain module or a route registration, which is exactly why
+// they can be asserted directly.
+// ============================================================================
+async function testWorkflowStabilization() {
+    console.log('\n\nPhase 9.2: Workflow Stabilization');
+    console.log('------------------------------------------------------------');
+
+    const { NOTIFICATION_EVENTS, ENTITY_TYPES } = require('./utils/notificationEvents');
+    const { ACTIVE_STATUSES, QUOTE_REJECTED, INSPECTION_COMPLETED } = require('./utils/repairRequestStatus');
+    const { getV2PaymentEligibility } = require('./services/paymentEligibility');
+
+    function fakeRes() {
+        return {
+            statusCode: 200,
+            body: undefined,
+            status(code) { this.statusCode = code; return this; },
+            send(payload) { this.body = payload; return this; },
+        };
+    }
+
+    // ---- 1. Admin notification for a new repair request ----
+    {
+        const event = NOTIFICATION_EVENTS.repair_request_created;
+        logTest('9.2-1: a repair_request_created notification event exists', !!event);
+        logTest('9.2-2: it is addressed to admins', event.recipientRole === 'admin');
+        logTest('9.2-3: it carries the tracking id as required context',
+            event.requiresMetadata.includes('trackingId'));
+        logTest('9.2-4: it can carry a device label but never requires one',
+            event.allowedMetadataKeys.includes('deviceLabel') && !event.requiresMetadata.includes('deviceLabel'));
+
+        const withDevice = event.message({ metadata: { trackingId: 'SRB-1', deviceLabel: 'Honor honor400' } });
+        const withoutDevice = event.message({ metadata: { trackingId: 'SRB-1' } });
+        logTest('9.2-5: the message states the real tracking id and device',
+            withDevice.includes('SRB-1') && withDevice.includes('Honor honor400'));
+        logTest('9.2-6: with no device label it still renders truthfully (no "undefined")',
+            withoutDevice.includes('SRB-1') && !/undefined/.test(withoutDevice));
+        // No invented urgency/SLA/status anywhere in the copy.
+        const copy = (event.title() + ' ' + withDevice).toLowerCase();
+        logTest('9.2-7: the copy invents no urgency, SLA or status',
+            !/urgent|asap|immediately|sla|priority|overdue|deadline/.test(copy));
+        logTest('9.2-8: it links to the admin request surface',
+            event.actionUrl({ entityId: 'abc' }) === '/dashboard/manage-repair-requests/abc');
+    }
+
+    // ---- 2. Duplicate suppression on retry ----
+    {
+        const event = NOTIFICATION_EVENTS.repair_request_created;
+        const a = event.deduplicationKey({ entityId: 'req1', recipientEmail: 'admin1@x.test' });
+        const again = event.deduplicationKey({ entityId: 'req1', recipientEmail: 'admin1@x.test' });
+        const otherAdmin = event.deduplicationKey({ entityId: 'req1', recipientEmail: 'admin2@x.test' });
+        const otherRequest = event.deduplicationKey({ entityId: 'req2', recipientEmail: 'admin1@x.test' });
+
+        logTest('9.2-9: a retry re-derives the identical dedup key (unique index rejects the duplicate)',
+            a === again, a);
+        logTest('9.2-10: each admin gets a distinct key, so fan-out is not swallowed',
+            a !== otherAdmin);
+        logTest('9.2-11: a different request gets a different key',
+            a !== otherRequest);
+
+        let threw = false;
+        try { event.deduplicationKey({ entityId: 'req1' }); } catch (e) { threw = e.code === 'MISSING_TRUSTED_RECIPIENT_CONTEXT'; }
+        logTest('9.2-12: an untrusted/absent recipient context is refused, never silently keyed',
+            threw);
+    }
+
+    // ---- 3-4. Quote decline leaves the technician recoverable, not stuck ----
+    {
+        logTest('9.2-13: quote_rejected is NOT an active-assignment status (technician slot freed)',
+            ACTIVE_STATUSES.includes(QUOTE_REJECTED) === false);
+        // The states that genuinely occupy a technician must be unchanged.
+        logTest('9.2-14: genuinely active repair states still occupy the technician',
+            ACTIVE_STATUSES.includes('repair_in_progress')
+            && ACTIVE_STATUSES.includes(INSPECTION_COMPLETED)
+            && ACTIVE_STATUSES.includes('quote_submitted')
+            && ACTIVE_STATUSES.includes('quote_approved'));
+        logTest('9.2-15: cancelled/delivered remain non-active',
+            !ACTIVE_STATUSES.includes('parcel_delivered') && !ACTIVE_STATUSES.includes('cancelled'));
+    }
+
+    // ---- 5-8. Post-rejection technician actions are registered and guarded ----
+    {
+        const registered = [];
+        const fakeApp = {
+            get(path) { registered.push('GET ' + path); },
+            post(path) { registered.push('POST ' + path); },
+            patch(path) { registered.push('PATCH ' + path); },
+            delete(path) { registered.push('DELETE ' + path); },
+        };
+        require('./routes/quotes')(fakeApp, { quote: {} });
+
+        logTest('9.2-16: the revise route is registered',
+            registered.includes('POST /repair-requests/:id/quote/revise'));
+        logTest('9.2-17: the technician cancel route is registered',
+            registered.includes('POST /repair-requests/:id/quote/cancel-request'));
+        // Both are 4-segment paths, so Express can never confuse them with the
+        // 2-segment /repair-requests/:id routes.
+        logTest('9.2-18: both use distinct sub-paths under the quote namespace',
+            registered.filter((r) => r.startsWith('POST /repair-requests/:id/quote')).length === 4
+            && new Set(registered).size === registered.length);
+
+        const QuoteController = require('./controllers/quoteController');
+        const proto = QuoteController.prototype;
+        logTest('9.2-19: reviseQuote and cancelAfterQuoteRejection exist on the controller',
+            typeof proto.reviseQuote === 'function' && typeof proto.cancelAfterQuoteRejection === 'function');
+        logTest('9.2-20: both share ONE guard, so revise and cancel cannot drift apart',
+            typeof proto.loadRejectedQuoteRequestForTechnician === 'function');
+
+        // The shared guard's refusals, exercised directly against its real
+        // logic with a stubbed context - no DB needed.
+        const makeCtrl = (repairRequest, role) => {
+            const ctrl = Object.create(proto);
+            ctrl.RepairRequest = { findById: async () => repairRequest };
+            ctrl.User = { findByEmail: async () => ({ role }) };
+            return ctrl;
+        };
+        const base = {
+            _id: { toString: () => 'r1' }, schemaVersion: 2,
+            senderEmail: 'owner@x.test', technicianEmail: 'tech@x.test',
+            deliveryStatus: QUOTE_REJECTED, quote: { status: 'rejected' },
+        };
+        const req = (email) => ({ params: { id: '507f1f77bcf86cd799439011' }, decoded_email: email });
+
+        const okCase = await makeCtrl(base, 'rider').loadRejectedQuoteRequestForTechnician(req('tech@x.test'));
+        logTest('9.2-21: the assigned technician passes the guard from quote_rejected',
+            !okCase.error && !!okCase.repairRequest);
+
+        const wrongRole = await makeCtrl(base, 'user').loadRejectedQuoteRequestForTechnician(req('owner@x.test'));
+        logTest('9.2-22: the customer cannot use the technician actions',
+            !!wrongRole.error && wrongRole.error.status === 403);
+
+        const otherTech = await makeCtrl(base, 'rider').loadRejectedQuoteRequestForTechnician(req('someone@x.test'));
+        logTest('9.2-23: an unrelated technician gets an existence-preserving 404',
+            !!otherTech.error && otherTech.error.status === 404);
+
+        const notRejected = await makeCtrl({ ...base, deliveryStatus: 'quote_submitted' }, 'rider')
+            .loadRejectedQuoteRequestForTechnician(req('tech@x.test'));
+        logTest('9.2-24: the actions are refused from any state except quote_rejected',
+            !!notRejected.error && notRejected.error.body.code === 'QUOTE_NOT_REJECTED');
+
+        const paid = await makeCtrl({ ...base, paymentStatus: 'paid' }, 'rider')
+            .loadRejectedQuoteRequestForTechnician(req('tech@x.test'));
+        logTest('9.2-25: a PAID repair can never be reopened or cancelled through this path',
+            !!paid.error && paid.error.body.code === 'REQUEST_ALREADY_PAID');
+    }
+
+    // ---- 6. A revised quote must be approved by the customer again ----
+    {
+        // Reopening returns the request to inspection_completed, which is the
+        // exact state submitQuote requires - so the customer's normal
+        // review/approve cycle is reused, never bypassed.
+        const revisionEvent = NOTIFICATION_EVENTS.quote_revision_started;
+        logTest('9.2-26: a quote_revision_started event notifies the customer',
+            !!revisionEvent && revisionEvent.recipientRoles.includes('user'));
+        // Per-round dedup, so a second decline/revise cycle is not swallowed.
+        const round1 = revisionEvent.deduplicationKey({ entityId: 'r1', metadata: { revisionRound: 1 } });
+        const round2 = revisionEvent.deduplicationKey({ entityId: 'r1', metadata: { revisionRound: 2 } });
+        logTest('9.2-27: each revision round notifies separately (not deduped away)',
+            round1 !== round2);
+
+        // An unapproved (reopened) request is not payable - the rejected quote
+        // can never be silently treated as approved.
+        const reopened = { schemaVersion: 2, deliveryStatus: INSPECTION_COMPLETED, quote: undefined };
+        const e1 = getV2PaymentEligibility(reopened);
+        logTest('9.2-28: a reopened request with no live quote is not payable',
+            e1.eligible === false && e1.code === 'NO_QUOTE');
+
+        const stillRejected = { schemaVersion: 2, deliveryStatus: QUOTE_REJECTED, quote: { status: 'rejected' } };
+        const e2 = getV2PaymentEligibility(stillRejected);
+        logTest('9.2-29: a rejected quote is never payable',
+            e2.eligible === false && e2.code === 'QUOTE_REJECTED');
+
+        const newSubmitted = { schemaVersion: 2, deliveryStatus: 'quote_submitted', quote: { status: 'submitted', totalAmount: 4500, currency: 'BDT' } };
+        const e3 = getV2PaymentEligibility(newSubmitted);
+        logTest('9.2-30: a newly submitted revised quote still needs customer approval before payment',
+            e3.eligible === false && e3.code === 'QUOTE_NOT_APPROVED');
+    }
+
+    // ---- 7. Cancellation after rejection reuses the existing model ----
+    {
+        const event = NOTIFICATION_EVENTS.repair_cancelled_by_technician;
+        logTest('9.2-31: cancelling after rejection notifies the customer',
+            !!event && event.recipientRoles.includes('user'));
+        logTest('9.2-32: it uses the existing repair_request entity type (no new model)',
+            event.entityType === 'repair_request');
+    }
+
+    // ---- 10. A paid request can never behave as unpaid, server-side ----
+    {
+        // The exact shape that used to slip through: paid, but the workflow has
+        // moved on, so deliveryStatus is no longer payment_completed.
+        const paidThenRepaired = {
+            schemaVersion: 2, paymentStatus: 'paid', deliveryStatus: 'repair_completed',
+            quote: { status: 'approved', totalAmount: 4500, currency: 'BDT' },
+        };
+        const r = getV2PaymentEligibility(paidThenRepaired);
+        logTest('9.2-33: a paid, already-repaired request reports ALREADY_PAID (not a payable state)',
+            r.eligible === false && r.code === 'ALREADY_PAID', 'code=' + r.code);
+
+        const paidInProgress = {
+            schemaVersion: 2, paymentStatus: 'paid', deliveryStatus: 'repair_in_progress',
+            quote: { status: 'approved', totalAmount: 4500, currency: 'BDT' },
+        };
+        logTest('9.2-34: the same holds mid-repair',
+            getV2PaymentEligibility(paidInProgress).code === 'ALREADY_PAID');
+
+        // And the genuinely payable case still is.
+        const payable = {
+            schemaVersion: 2, deliveryStatus: 'quote_approved',
+            quote: { status: 'approved', totalAmount: 4500, currency: 'BDT' },
+        };
+        const ok = getV2PaymentEligibility(payable);
+        logTest('9.2-35: an approved, unpaid quote is still payable (no over-correction)',
+            ok.eligible === true && ok.amount === 4500);
+    }
+
+    // ---- 12-13. GET /technicians/me ----
+    {
+        const registered = [];
+        const seen = [];
+        const capture = (path, ...handlers) => {
+            registered.push(path);
+            seen.push({ path, middleware: handlers.slice(0, -1).map((fn) => fn && fn.name) });
+        };
+        const fakeApp = { get: capture, post: capture, patch: capture, delete: capture };
+        require('./routes/technicians')(fakeApp, { technician: {} });
+
+        logTest('9.2-36: GET /technicians/me is registered', registered.includes('/technicians/me'));
+        const meIndex = registered.indexOf('/technicians/me');
+        const idIndex = registered.findIndex((p) => p.startsWith('/technicians/:id'));
+        logTest('9.2-37: it is registered BEFORE /technicians/:id, so "me" is never matched as an id',
+            meIndex !== -1 && (idIndex === -1 || meIndex < idIndex));
+
+        const meRoute = seen.find((r) => r.path === '/technicians/me');
+        logTest('9.2-38: it is authenticated and technician-gated',
+            meRoute.middleware.includes('verifyFBToken') && meRoute.middleware.includes('verifyTechnician'),
+            meRoute.middleware.join(', '));
+
+        const TechnicianController = require('./controllers/technicianController');
+        logTest('9.2-39: the controller method exists',
+            typeof TechnicianController.prototype.getMyTechnicianProfile === 'function');
+
+        // Identity from the token only, and real stored fields returned.
+        const ctrl = Object.create(TechnicianController.prototype);
+        let queriedFilter = null;
+        let queriedProjection = null;
+        ctrl.collections = {
+            technicians: {
+                findOne: async (filter, options) => {
+                    queriedFilter = filter;
+                    queriedProjection = options.projection;
+                    return {
+                        _id: { toString: () => 't1' },
+                        name: 'Jahid Hasan', email: 'tech@x.test', phone: null,
+                        district: 'Sylhet', region: 'Sylhet', status: 'approved', workStatus: 'available',
+                        nid: 'SECRET-NID-123',
+                        expertise: [{ productCategorySlug: 'air-conditioner', level: 'advanced', experienceYears: 3, repairCategorySlugs: ['gas-refill'] }],
+                    };
+                },
+            },
+        };
+        const res = fakeRes();
+        await ctrl.getMyTechnicianProfile({ decoded_email: 'Tech@X.test  ' }, res);
+
+        logTest('9.2-40: identity comes from the verified token, normalized - never a supplied email',
+            queriedFilter && queriedFilter.email === 'tech@x.test',
+            JSON.stringify(queriedFilter));
+        logTest('9.2-41: it returns the real stored skills and experience',
+            res.statusCode === 200
+            && res.body.expertise.length === 1
+            && res.body.expertise[0].productCategorySlug === 'air-conditioner'
+            && res.body.expertise[0].experienceYears === 3
+            && res.body.expertise[0].level === 'advanced');
+        logTest('9.2-42: it returns the real service area and approval status',
+            res.body.district === 'Sylhet' && res.body.status === 'approved');
+        logTest('9.2-43: a genuinely absent field is null, never invented',
+            res.body.phone === null);
+        logTest('9.2-44: no rating/job-count/certification is fabricated',
+            res.body.rating === undefined && res.body.completedJobs === undefined && res.body.certifications === undefined);
+        logTest('9.2-45: the vetting-only NID is never echoed back to the technician',
+            res.body.nid === undefined && !Object.prototype.hasOwnProperty.call(queriedProjection, 'nid'));
+
+        // A rider with no technician record is a real, reported state.
+        const ctrl2 = Object.create(TechnicianController.prototype);
+        ctrl2.collections = { technicians: { findOne: async () => null } };
+        const res2 = fakeRes();
+        await ctrl2.getMyTechnicianProfile({ decoded_email: 'ghost@x.test' }, res2);
+        logTest('9.2-46: a rider with no technician record gets a controlled 404, not a fake profile',
+            res2.statusCode === 404 && res2.body.code === 'TECHNICIAN_PROFILE_NOT_FOUND');
+    }
+
+    // ---- 14. Legacy pre-wallet payments stay legacy ----
+    {
+        const { calculateWallet } = require('./utils/settlement');
+
+        // A repair paid before settlements existed carries no
+        // technicianSettlement at all - it contributes nothing, and is never
+        // silently backfilled into a balance.
+        const legacyOnly = calculateWallet({
+            repairRequests: [
+                { trackingId: 'QA-08', technicianEarning: undefined },
+                { trackingId: 'QA-09' },
+            ],
+            withdrawals: [],
+        });
+        logTest('9.2-47: legacy paid repairs with no settlement contribute nothing to the wallet',
+            legacyOnly.pendingBalance === 0 && legacyOnly.availableBalance === 0 && legacyOnly.settlementCount === 0);
+
+        // A legacy repair already paid out under the retired model must never
+        // become withdrawable a second time.
+        const legacyPaidPlusNew = calculateWallet({
+            repairRequests: [
+                {
+                    trackingId: 'OLD',
+                    technicianEarning: { status: 'paid', amount: 800 },
+                    technicianSettlement: { status: 'available', technicianReceivable: 5400, currency: 'BDT' },
+                },
+                {
+                    trackingId: 'NEW',
+                    technicianSettlement: { status: 'available', technicianReceivable: 900, currency: 'BDT' },
+                },
+            ],
+            withdrawals: [],
+        });
+        logTest('9.2-48: a repair already settled under the retired payout is excluded, so it cannot be paid twice',
+            legacyPaidPlusNew.availableBalance === 900,
+            'available=' + legacyPaidPlusNew.availableBalance + ' (the 5400 legacy-paid repair is excluded)');
+    }
+
+    // ---- Withdrawal notifications now actually exist ----
+    {
+        logTest('9.2-49: withdrawal_paid/withdrawal_rejected are registered events (they were emitted but undefined)',
+            !!NOTIFICATION_EVENTS.withdrawal_paid && !!NOTIFICATION_EVENTS.withdrawal_rejected);
+        logTest('9.2-50: their entity type is allowed, so creation cannot throw',
+            ENTITY_TYPES.includes('technician_withdrawal')
+            && NOTIFICATION_EVENTS.withdrawal_paid.entityType === 'technician_withdrawal');
+        logTest('9.2-51: both are addressed to the technician and link to the wallet',
+            NOTIFICATION_EVENTS.withdrawal_paid.recipientRole === 'rider'
+            && NOTIFICATION_EVENTS.withdrawal_paid.actionUrl() === '/dashboard/wallet');
     }
 }

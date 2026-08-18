@@ -14,8 +14,12 @@ class TechnicianModel {
         // subset. Listing them explicitly keeps the contract intentional
         // instead of silently exposing any future field added to this
         // collection.
+        // phone and avatar added in Phase 9.2: both are stored application
+        // fields (see technicianController's APPLICATION_ALLOWED_FIELDS) that
+        // the admin surfaces were rendering as blank purely because the
+        // projection never returned them.
         const projection = {
-            name: 1, email: 1, region: 1, district: 1, address: 1,
+            name: 1, email: 1, phone: 1, avatar: 1, region: 1, district: 1, address: 1,
             license: 1, nid: 1, bike: 1, status: 1, workStatus: 1, createdAt: 1,
             expertise: 1
         };

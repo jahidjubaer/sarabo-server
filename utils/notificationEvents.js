@@ -9,7 +9,7 @@
 // `priority: 'high'` is kept in the allowed enum as a safe, forward-
 // compatible value - no V1 event definition below uses it, and nothing here
 // currently produces it.
-const ENTITY_TYPES = ['repair_request', 'technician'];
+const ENTITY_TYPES = ['repair_request', 'technician', 'technician_withdrawal'];
 const ROLES = ['user', 'rider', 'admin'];
 const PRIORITIES = ['normal', 'high'];
 
@@ -23,6 +23,94 @@ const PRIORITIES = ['normal', 'high'];
 // given template actually needs are used. recipientEmail/actorEmail there
 // are already normalized/validated and are never persisted as metadata.
 const NOTIFICATION_EVENTS = {
+    // A customer successfully created a repair request. Addressed to admins,
+    // who own assignment - without this, a new request sat in the queue with
+    // nothing telling anyone it had arrived.
+    //
+    // Fanned out to every admin, so (exactly like
+    // technician_application_submitted below) the deduplicationKey must include
+    // the trusted recipientEmail: keyed on entityId alone, the unique index
+    // would drop every admin's copy after the first insert won the race.
+    //
+    // The message carries the tracking id and a device label the caller derives
+    // from stored product fields. No urgency, no SLA, no invented status.
+    repair_request_created: {
+        entityType: 'repair_request',
+        recipientRole: 'admin',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'deviceLabel'],
+        requiresMetadata: ['trackingId'],
+        title: () => 'New repair request',
+        message: ({ metadata }) => (metadata.deviceLabel
+            ? `A new repair request (${metadata.trackingId}) was submitted for ${metadata.deviceLabel}.`
+            : `A new repair request (${metadata.trackingId}) was submitted.`),
+        actionUrl: ({ entityId }) => `/dashboard/manage-repair-requests/${entityId}`,
+        deduplicationKey: ({ entityId, recipientEmail }) => {
+            if (!recipientEmail) {
+                throw Object.assign(
+                    new Error('repair_request_created requires a trusted recipientEmail to generate a deduplication key'),
+                    { code: 'MISSING_TRUSTED_RECIPIENT_CONTEXT' }
+                );
+            }
+            return `repair:${entityId}:created:${recipientEmail}`;
+        },
+    },
+    // The assigned technician re-opened a rejected quote for revision
+    // (Phase 9.2). Owner-facing, so the customer knows the decline was received
+    // and a revised quote is coming rather than the request having stalled.
+    quote_revision_started: {
+        entityType: 'repair_request',
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'revisionRound'],
+        requiresMetadata: [],
+        title: () => 'Your technician is revising the quote',
+        message: () => 'Your technician is reviewing the repair and will send a revised quote.',
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        // Per-attempt, not per-request: a request can legitimately go through
+        // more than one decline/revision round, and a key fixed on entityId
+        // alone would silently swallow every round after the first.
+        deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:quote_revision_started:${metadata.revisionRound || 1}`,
+    },
+    // The assigned technician cancelled a request the customer had declined the
+    // quote on (Phase 9.2).
+    repair_cancelled_by_technician: {
+        entityType: 'repair_request',
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: ['trackingId'],
+        title: () => 'Repair request cancelled',
+        message: ({ metadata }) => `Repair request ${metadata.trackingId} was cancelled after the quote was declined.`,
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId, recipientEmail }) => `repair:${entityId}:cancelled_by_technician:${recipientEmail}`,
+    },
+    // Phase 9: withdrawal outcomes. These two types were already being emitted
+    // by controllers/walletController.js but had no definition here, so every
+    // call threw 'Unknown notification type' into that controller's non-fatal
+    // catch - technicians silently never heard that they had been paid.
+    withdrawal_paid: {
+        entityType: 'technician_withdrawal',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['amount', 'currency'],
+        requiresMetadata: [],
+        title: () => 'Withdrawal paid',
+        message: () => 'Your withdrawal request has been marked as paid.',
+        actionUrl: () => '/dashboard/wallet',
+        deduplicationKey: ({ entityId }) => `withdrawal:${entityId}:paid`,
+    },
+    withdrawal_rejected: {
+        entityType: 'technician_withdrawal',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['amount', 'currency'],
+        requiresMetadata: [],
+        title: () => 'Withdrawal request declined',
+        message: () => 'Your withdrawal request was declined. The amount is available to request again.',
+        actionUrl: () => '/dashboard/wallet',
+        deduplicationKey: ({ entityId }) => `withdrawal:${entityId}:rejected`,
+    },
     technician_application_submitted: {
         entityType: 'technician',
         recipientRole: 'admin',

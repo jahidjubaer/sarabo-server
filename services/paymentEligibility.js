@@ -75,6 +75,20 @@ function getV2PaymentEligibility(repairRequest) {
     // Already paid takes precedence over any quote/state check - once a v2
     // request has a completed payment it is never eligible to be charged again,
     // regardless of its other fields.
+    //
+    // Phase 9.2: `paymentStatus === 'paid'` is checked FIRST and on its own.
+    // It is the authoritative payment flag (the one the payment processor sets
+    // in the same guarded update that finalizes the charge), and it is the only
+    // one that survives the workflow moving on. The two conditions below are
+    // both positional: deliveryStatus stops being payment_completed as soon as
+    // the repair starts, so a paid repair that had progressed to
+    // repair_in_progress/repair_completed used to fall through to the quote
+    // checks and come back INVALID_PAYMENT_STATE instead of ALREADY_PAID -
+    // which is why paid repairs stopped rendering as paid and clients that keyed
+    // off ALREADY_PAID could offer to charge again.
+    if (repairRequest.paymentStatus === 'paid') {
+        return { eligible: false, code: 'ALREADY_PAID', reason: 'this request has already been paid for' };
+    }
     if (repairRequest.deliveryStatus === PAYMENT_COMPLETED || (repairRequest.payment && repairRequest.payment.status === 'completed')) {
         return { eligible: false, code: 'ALREADY_PAID', reason: 'this request has already been paid for' };
     }

@@ -11,6 +11,13 @@ function technicianRoutes(app, controllers) {
     // Get job stats per day (technician only)
     app.get('/technicians/delivery-per-day', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => technicianController.getDeliveryPerDay(req, res));
 
+    // Authenticated technician's own profile (Phase 9.2). A literal 2-segment
+    // path registered BEFORE any /technicians/:id route so Express can never
+    // match 'me' as an id. Identity comes from the verified token inside the
+    // controller - there is deliberately no email/id parameter, so one
+    // technician can never read another's profile through this endpoint.
+    app.get('/technicians/me', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => technicianController.getMyTechnicianProfile(req, res));
+
     // Create new technician application
     app.post('/technicians', ensureDatabaseReady, (req, res) => technicianController.createTechnicianApplication(req, res));
 

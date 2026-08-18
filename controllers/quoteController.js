@@ -3,7 +3,7 @@ const { client } = require('../config/database');
 const { logTracking } = require('../middleware/logging');
 const { createNotificationService } = require('../services/notificationService');
 const { isV2RepairRequest } = require('../utils/repairRequestSchema');
-const { INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED } = require('../utils/repairRequestStatus');
+const { INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED, QUOTE_REJECTED, ACTIVE_STATUSES } = require('../utils/repairRequestStatus');
 const {
     validateQuoteSubmission, buildQuoteDocument, validateQuoteDecision, buildQuoteView,
 } = require('../utils/quote');
@@ -215,6 +215,34 @@ class QuoteController {
                         throw new Error('quote decision guard failed');
                     }
 
+                    // Phase 9.2: a declined quote releases the technician's
+                    // active-assignment slot, in this same transaction. Before
+                    // this, quote_rejected was an ACTIVE status and the
+                    // technician stayed workStatus 'in_delivery' forever - the
+                    // customer had walked away, but the technician could still
+                    // be given nothing else. The assignment itself is NOT
+                    // removed: technicianId/technicianEmail stay on the request
+                    // so the same technician can revise the quote or cancel it.
+                    //
+                    // Only flips to 'available' when this technician holds no
+                    // OTHER active assignment, the same defense-in-depth guard
+                    // repairController uses at completion.
+                    if (!approve && repairRequest.technicianId) {
+                        const technicianObjectId = new ObjectId(repairRequest.technicianId);
+                        const technician = await this.collections.technicians.findOne({ _id: technicianObjectId }, { session: mongoSession });
+                        if (technician) {
+                            const otherActive = await this.collections.repairRequests.findOne(
+                                { technicianId: repairRequest.technicianId, deliveryStatus: { $in: ACTIVE_STATUSES }, _id: { $ne: repairRequest._id } },
+                                { session: mongoSession }
+                            );
+                            await this.collections.technicians.updateOne(
+                                { _id: technicianObjectId },
+                                { $set: { workStatus: otherActive ? technician.workStatus : 'available' } },
+                                { session: mongoSession }
+                            );
+                        }
+                    }
+
                     await logTracking(this.collections.trackingEvents, repairRequest.trackingId, newDeliveryStatus, mongoSession);
                     // Notify the assigned technician of the customer's decision.
                     await this.notifications.createNotification({
@@ -270,6 +298,243 @@ class QuoteController {
             return res.send({ quote: buildQuoteView(repairRequest.quote) });
         } catch (error) {
             return res.status(500).send({ message: 'Error fetching quote', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // Shared guard for the two post-rejection technician actions (Phase 9.2).
+    // Both are assigned-technician-only, v2-only, and legal ONLY from
+    // quote_rejected - so the authorization and state rules live in one place
+    // and cannot drift apart between revise and cancel.
+    //
+    // Returns either { error: {...} } for the caller to send, or { repairRequest }.
+    async loadRejectedQuoteRequestForTechnician(req) {
+        const id = req.params.id;
+        if (!ObjectId.isValid(id)) {
+            return { error: { status: 400, body: { message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' } } };
+        }
+        const email = req.decoded_email;
+        const repairRequest = await this.RepairRequest.findById(id);
+        const access = await this.resolveAccess(repairRequest, email);
+        const canSee = repairRequest && (access.isOwner || access.isAdmin || access.isAssignedByEmail);
+
+        // Existence-preserving 404 for anyone unrelated, matching this file's
+        // existing convention.
+        if (!repairRequest || !canSee) {
+            return { error: { status: 404, body: { message: 'repair request not found', code: 'REQUEST_NOT_FOUND' } } };
+        }
+        if (!(access.role === 'rider' && access.isAssignedByEmail)) {
+            return { error: { status: 403, body: { message: 'only the assigned technician can do this', code: 'TECHNICIAN_ROLE_REQUIRED' } } };
+        }
+        if (!isV2RepairRequest(repairRequest)) {
+            return { error: { status: 400, body: { message: 'quotes are only available for newer (v2) repair requests', code: 'LEGACY_REQUEST_NOT_SUPPORTED' } } };
+        }
+        // Money check before state check: a paid repair must never be
+        // reopenable or cancellable through this path, whatever its workflow
+        // status says.
+        if (repairRequest.paymentStatus === 'paid') {
+            return { error: { status: 409, body: { message: 'this repair has already been paid for', code: 'REQUEST_ALREADY_PAID' } } };
+        }
+        if (repairRequest.deliveryStatus !== QUOTE_REJECTED) {
+            return { error: { status: 409, body: { message: 'this action is only available after the customer declines a quote', code: 'QUOTE_NOT_REJECTED' } } };
+        }
+        return { repairRequest };
+    }
+
+    // POST /repair-requests/:id/quote/revise (Phase 9.2)
+    //
+    // Re-opens a declined quote for revision by the SAME assigned technician.
+    // The smallest safe mechanism given the schema stores exactly one `quote`:
+    // the rejected quote is archived into quoteHistory[] and the live `quote`
+    // is unset, which puts the request back at inspection_completed - the exact
+    // state submitQuote already requires. So the existing submit -> customer
+    // decide cycle is reused verbatim, with no second quote code path.
+    //
+    // The rejected quote can therefore never be silently approved: it no longer
+    // exists as the live quote, and only a NEWLY submitted one can be decided.
+    // Payment is unaffected because payment reads only the live approved quote.
+    async reviseQuote(req, res) {
+        try {
+            const loaded = await this.loadRejectedQuoteRequestForTechnician(req);
+            if (loaded.error) return res.status(loaded.error.status).send(loaded.error.body);
+            const repairRequest = loaded.repairRequest;
+
+            const archivedCount = Array.isArray(repairRequest.quoteHistory) ? repairRequest.quoteHistory.length : 0;
+            const revisionRound = archivedCount + 1;
+
+            const mongoSession = client.startSession();
+            let conflictCode = null;
+            try {
+                await mongoSession.withTransaction(async () => {
+                    conflictCode = null;
+                    const now = new Date();
+
+                    // Guarded on the exact state read above - a concurrent
+                    // cancel or a second revise attempt matches zero documents
+                    // and is reported as a conflict rather than archiving the
+                    // same quote twice.
+                    const updateResult = await this.collections.repairRequests.updateOne(
+                        {
+                            _id: repairRequest._id,
+                            schemaVersion: 2,
+                            deliveryStatus: QUOTE_REJECTED,
+                            'quote.status': 'rejected',
+                            paymentStatus: { $ne: 'paid' },
+                        },
+                        {
+                            $push: {
+                                quoteHistory: {
+                                    ...repairRequest.quote,
+                                    archivedAt: now,
+                                    archivedReason: 'revision_requested',
+                                    revisionRound,
+                                },
+                            },
+                            $unset: { quote: '' },
+                            $set: { deliveryStatus: INSPECTION_COMPLETED, updatedAt: now },
+                        },
+                        { session: mongoSession }
+                    );
+
+                    if (updateResult.matchedCount === 0) {
+                        conflictCode = 'QUOTE_NOT_REJECTED';
+                        throw new Error('quote revision guard failed');
+                    }
+
+                    // The request is active work again, so the technician's
+                    // slot is re-occupied - the mirror of the release performed
+                    // when the customer declined.
+                    if (repairRequest.technicianId) {
+                        await this.collections.technicians.updateOne(
+                            { _id: new ObjectId(repairRequest.technicianId) },
+                            { $set: { workStatus: 'in_delivery' } },
+                            { session: mongoSession }
+                        );
+                    }
+
+                    await logTracking(this.collections.trackingEvents, repairRequest.trackingId, INSPECTION_COMPLETED, mongoSession);
+                    await this.notifications.createNotification({
+                        session: mongoSession,
+                        recipientEmail: repairRequest.senderEmail,
+                        recipientRole: 'user',
+                        type: 'quote_revision_started',
+                        entityType: 'repair_request',
+                        entityId: repairRequest._id.toString(),
+                        // Metadata values must be non-empty STRINGS (the
+                        // notification service rejects any other type), so the
+                        // round is stringified here rather than passed as the
+                        // number it is counted as above.
+                        metadata: { trackingId: repairRequest.trackingId, revisionRound: String(revisionRound) },
+                        actorEmail: req.decoded_email,
+                    });
+                });
+            } catch (txError) {
+                if (!conflictCode) throw txError;
+            } finally {
+                await mongoSession.endSession();
+            }
+
+            if (conflictCode) {
+                return res.status(409).send({ message: 'this action is only available after the customer declines a quote', code: conflictCode });
+            }
+
+            return res.status(200).send({
+                message: 'quote reopened for revision',
+                deliveryStatus: INSPECTION_COMPLETED,
+                revisionRound,
+                archivedQuotes: revisionRound,
+            });
+        } catch (error) {
+            return res.status(500).send({ message: 'Error reopening the quote for revision', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // POST /repair-requests/:id/quote/cancel-request (Phase 9.2)
+    //
+    // The assigned technician cancels a request whose quote the customer
+    // declined. Reuses the existing cancellation model (deliveryStatus
+    // 'cancelled') rather than inventing a status. Paid/completed/delivered
+    // repairs are excluded by the shared guard plus the update filter.
+    async cancelAfterQuoteRejection(req, res) {
+        try {
+            const loaded = await this.loadRejectedQuoteRequestForTechnician(req);
+            if (loaded.error) return res.status(loaded.error.status).send(loaded.error.body);
+            const repairRequest = loaded.repairRequest;
+
+            const mongoSession = client.startSession();
+            let conflictCode = null;
+            try {
+                await mongoSession.withTransaction(async () => {
+                    conflictCode = null;
+                    const now = new Date();
+
+                    const updateResult = await this.collections.repairRequests.updateOne(
+                        {
+                            _id: repairRequest._id,
+                            schemaVersion: 2,
+                            deliveryStatus: QUOTE_REJECTED,
+                            paymentStatus: { $ne: 'paid' },
+                        },
+                        {
+                            $set: {
+                                deliveryStatus: 'cancelled',
+                                cancelledAt: now,
+                                cancelledBy: req.decoded_email,
+                                cancellationReason: 'quote_declined',
+                                updatedAt: now,
+                            },
+                        },
+                        { session: mongoSession }
+                    );
+
+                    if (updateResult.matchedCount === 0) {
+                        conflictCode = 'CANCELLATION_NOT_ALLOWED';
+                        throw new Error('technician cancellation guard failed');
+                    }
+
+                    // Belt and braces: quote_rejected already released the slot,
+                    // but a technician who was re-assigned elsewhere in between
+                    // must not be flipped available while genuinely busy.
+                    if (repairRequest.technicianId) {
+                        const technicianObjectId = new ObjectId(repairRequest.technicianId);
+                        const technician = await this.collections.technicians.findOne({ _id: technicianObjectId }, { session: mongoSession });
+                        if (technician) {
+                            const otherActive = await this.collections.repairRequests.findOne(
+                                { technicianId: repairRequest.technicianId, deliveryStatus: { $in: ACTIVE_STATUSES }, _id: { $ne: repairRequest._id } },
+                                { session: mongoSession }
+                            );
+                            await this.collections.technicians.updateOne(
+                                { _id: technicianObjectId },
+                                { $set: { workStatus: otherActive ? technician.workStatus : 'available' } },
+                                { session: mongoSession }
+                            );
+                        }
+                    }
+
+                    await logTracking(this.collections.trackingEvents, repairRequest.trackingId, 'cancelled', mongoSession);
+                    await this.notifications.createNotification({
+                        session: mongoSession,
+                        recipientEmail: repairRequest.senderEmail,
+                        recipientRole: 'user',
+                        type: 'repair_cancelled_by_technician',
+                        entityType: 'repair_request',
+                        entityId: repairRequest._id.toString(),
+                        metadata: { trackingId: repairRequest.trackingId },
+                        actorEmail: req.decoded_email,
+                    });
+                });
+            } catch (txError) {
+                if (!conflictCode) throw txError;
+            } finally {
+                await mongoSession.endSession();
+            }
+
+            if (conflictCode) {
+                return res.status(409).send({ message: 'this request can no longer be cancelled', code: conflictCode });
+            }
+
+            return res.status(200).send({ message: 'repair request cancelled', deliveryStatus: 'cancelled' });
+        } catch (error) {
+            return res.status(500).send({ message: 'Error cancelling the repair request', code: 'INTERNAL_ERROR' });
         }
     }
 

@@ -265,11 +265,18 @@ class RepairRequestController {
             const searchText = sanitizeSearchText(search, ADMIN_LIST_MAX_SEARCH_LENGTH);
             if (searchText) {
                 const pattern = { $regex: escapeRegex(searchText), $options: 'i' };
+                // deviceName is the LEGACY (v1) device field; v2 requests carry
+                // their device identity in the product snapshot instead, so
+                // searching deviceName alone silently matched no v2 request by
+                // device at all (Phase 9.2). Both shapes are searched now.
                 query.$or = [
                     { trackingId: pattern },
                     { senderEmail: pattern },
                     { senderName: pattern },
-                    { deviceName: pattern }
+                    { deviceName: pattern },
+                    { 'product.brand': pattern },
+                    { 'product.model': pattern },
+                    { 'product.categorySlug': pattern }
                 ];
             }
 
@@ -461,10 +468,68 @@ class RepairRequestController {
 
             logTracking(this.collections.trackingEvents, document.trackingId, 'repair_request_created');
 
+            // Admin notification (Phase 9.2) - AFTER the request is durably
+            // created, never before, so a failed insert can never announce a
+            // request that does not exist. Non-fatal for the same reason
+            // technician-application notification is: the request itself is
+            // already committed, and a notification/lookup failure must not
+            // turn a successful creation into an error for the customer.
+            await this.notifyAdminsOfNewRepairRequest(document, result.insertedId);
+
             res.send(result);
         } catch (error) {
             res.status(500).send({ message: 'Error creating repair request', error: error.message });
         }
+    }
+
+    // Fans a new-repair-request notification out to every admin (Phase 9.2).
+    // Mirrors technicianController#notifyAdminsOfNewApplication exactly - same
+    // User.findEmailsByRole('admin') lookup, same per-admin fan-out, same
+    // fully non-fatal error handling - rather than introducing a second
+    // notification mechanism.
+    //
+    // Duplicate suppression is the notification layer's own unique
+    // deduplicationKey (repair:<id>:created:<adminEmail>, see
+    // utils/notificationEvents.js): a retried or replayed call re-derives the
+    // identical key per admin and the unique index rejects the second insert,
+    // so no admin can be notified twice about one request.
+    async notifyAdminsOfNewRepairRequest(document, requestId) {
+        let adminEmails = [];
+        try {
+            adminEmails = await this.User.findEmailsByRole('admin');
+        } catch (error) {
+            console.error('Admin lookup failed for new repair request notification (non-fatal):', error.message);
+            return;
+        }
+        if (adminEmails.length === 0) return;
+
+        // Device label from the stored product snapshot - the same fields the
+        // request actually persists. Never a legacy deviceName (v2 requests do
+        // not have one), and omitted entirely rather than guessed when the
+        // category carries no brand/model.
+        const product = document.product || {};
+        const deviceLabel = [product.brand, product.model].filter(Boolean).join(' ').trim()
+            || (product.categorySlug ? String(product.categorySlug).replace(/-/g, ' ') : '');
+
+        await Promise.all(adminEmails.map(async (adminEmail) => {
+            try {
+                await this.notifications.createNotification({
+                    recipientEmail: adminEmail,
+                    recipientRole: 'admin',
+                    type: 'repair_request_created',
+                    entityType: 'repair_request',
+                    entityId: requestId.toString(),
+                    metadata: {
+                        trackingId: document.trackingId,
+                        ...(deviceLabel ? { deviceLabel } : {}),
+                    },
+                    actorEmail: document.senderEmail || null,
+                    actorRole: null,
+                });
+            } catch (error) {
+                console.error('New repair request notification failed (non-fatal):', error.message);
+            }
+        }));
     }
 
     // Admin-only, read-only eligible-technician recommendations (Phase 6.3

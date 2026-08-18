@@ -24,7 +24,15 @@ class RepairRequestModel {
         trackingId: 1,
         senderName: 1,
         senderEmail: 1,
+        // deviceName is the LEGACY (v1) device field. v2 requests carry their
+        // device identity in the product snapshot instead, so projecting
+        // deviceName alone left every v2 row with no device to display at all
+        // (Phase 9.2). Only the three identity fields are included - never the
+        // serial number, which the admin list has no reason to carry.
         deviceName: 1,
+        'product.categorySlug': 1,
+        'product.brand': 1,
+        'product.model': 1,
         deliveryStatus: 1,
         paymentStatus: 1,
         cost: 1,
