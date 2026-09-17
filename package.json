@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "node test-all.js",
+    "test:support": "node test-support.js",
     "start": "node index.js",
     "dev": "node index.js",
     "seed:service-definitions": "node scripts/seed-service-definitions.js",
@@ -14,6 +15,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@google/genai": "^2.23.0",
     "@supabase/supabase-js": "^2.112.3",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",

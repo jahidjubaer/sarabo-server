@@ -11,8 +11,31 @@ const InspectionController = require('./inspectionController');
 const QuoteController = require('./quoteController');
 const RepairController = require('./repairController');
 const WalletController = require('./walletController');
+const SupportController = require('./supportController');
+const { connectDatabase } = require('../config/database');
+const { loadAiSupportConfig } = require('../config/aiSupport');
+const { createAiSupportService } = require('../services/aiSupportService');
+const { createSupportKnowledgeService } = require('../services/supportKnowledgeService');
+const { createConfiguredGeminiSupportProvider } = require('../services/aiProviders/geminiSupportProvider');
 
-function initializeControllers(models, collections) {
+function initializeControllers(models, collections, dependencies = {}) {
+    const aiSupportConfig = dependencies.aiSupportConfig || loadAiSupportConfig();
+    let aiSupportService = dependencies.aiSupportService;
+    if (!aiSupportService) {
+        const hasInjectedProvider = Object.prototype.hasOwnProperty.call(dependencies, 'aiSupportProvider');
+        const provider = hasInjectedProvider
+            ? dependencies.aiSupportProvider
+            : createConfiguredGeminiSupportProvider(aiSupportConfig, {
+                client: dependencies.geminiClient,
+                clientFactory: dependencies.geminiClientFactory,
+            });
+        aiSupportService = createAiSupportService({ provider, config: aiSupportConfig });
+    }
+    const supportKnowledgeService = dependencies.supportKnowledgeService || createSupportKnowledgeService({
+        serviceDefinitionModel: models.ServiceDefinition,
+        connectDatabase: dependencies.connectDatabase || connectDatabase,
+    });
+
     return {
         user: new UserController(models, collections),
         repairRequest: new RepairRequestController(models, collections),
@@ -26,7 +49,12 @@ function initializeControllers(models, collections) {
         inspection: new InspectionController(models, collections),
         quote: new QuoteController(models, collections),
         repair: new RepairController(models, collections),
-        wallet: new WalletController(models, collections)
+        wallet: new WalletController(models, collections),
+        support: new SupportController({
+            aiSupportService,
+            supportKnowledgeService,
+            config: aiSupportConfig,
+        }),
     };
 }
 

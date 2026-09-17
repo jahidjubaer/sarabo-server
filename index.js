@@ -25,6 +25,7 @@ const inspectionRoutes = require('./routes/inspections');
 const quoteRoutes = require('./routes/quotes');
 const repairRoutes = require('./routes/repairs');
 const walletRoutes = require('./routes/wallet');
+const supportRoutes = require('./routes/support');
 
 const app = express();
 // Vercel's edge network is the sole reverse proxy in front of this function,
@@ -101,6 +102,7 @@ inspectionRoutes(app, controllers);
 quoteRoutes(app, controllers);
 repairRoutes(app, controllers);
 walletRoutes(app, controllers);
+supportRoutes(app, controllers);
 
 // Start server (only for local/traditional hosting - Vercel invokes the
 // exported app directly per request and does not use a listening port)

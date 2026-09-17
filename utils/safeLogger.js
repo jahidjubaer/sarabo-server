@@ -15,6 +15,20 @@ const ERROR_CATEGORIES = Object.freeze({
 const SAFE_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 const MAX_LOGGED_PATH_LENGTH = 200;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const SUPPORT_MODEL_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+const SUPPORT_PROVIDER_FAILURE_CLASSES = new Set([
+    'timeout',
+    'rate_limit',
+    'unavailable',
+    'network',
+    'request',
+    'invalid_response',
+]);
+const SUPPORT_PROVIDER_OUTCOMES = new Set([
+    'retrying',
+    'succeeded',
+    'failed',
+]);
 
 function safeRequestId(value) {
     return typeof value === 'string' && REQUEST_ID_PATTERN.test(value) ? value : null;
@@ -66,6 +80,26 @@ function safeDurationMs(value) {
     return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
+function safeSupportProvider(value) {
+    return value === 'gemini' ? value : null;
+}
+
+function safeSupportProviderAttempt(value) {
+    return Number.isInteger(value) && value >= 1 && value <= 2 ? value : null;
+}
+
+function safeSupportProviderModel(value) {
+    return typeof value === 'string' && SUPPORT_MODEL_PATTERN.test(value) ? value : null;
+}
+
+function safeSupportProviderOutcome(value) {
+    return SUPPORT_PROVIDER_OUTCOMES.has(value) ? value : null;
+}
+
+function safeSupportProviderFailureClass(value) {
+    return SUPPORT_PROVIDER_FAILURE_CLASSES.has(value) ? value : null;
+}
+
 // Narrow, allow-list-only structured error log. Deliberately takes exactly
 // these fields rather than a raw error/req object, so a caller can never
 // accidentally pass through an Authorization header, cookie, token, raw
@@ -89,9 +123,38 @@ function logSafeError({ requestId, method, path, status, category, durationMs })
     console.error(JSON.stringify(entry));
 }
 
+function logSafeSupportProviderEvent({
+    requestId,
+    provider,
+    model,
+    attempt,
+    outcome,
+    failureClass,
+    durationMs,
+    totalDurationMs,
+}) {
+    const entry = {
+        timestamp: new Date().toISOString(),
+        event: 'SUPPORT_PROVIDER',
+        requestId: safeRequestId(requestId),
+        provider: safeSupportProvider(provider),
+        model: safeSupportProviderModel(model),
+        attempt: safeSupportProviderAttempt(attempt),
+        outcome: safeSupportProviderOutcome(outcome),
+        failureClass: safeSupportProviderFailureClass(failureClass),
+        durationMs: safeDurationMs(durationMs),
+        totalDurationMs: safeDurationMs(totalDurationMs),
+        runtime: process.env.VERCEL ? 'serverless' : 'node',
+    };
+    console.error(JSON.stringify(entry));
+}
+
 module.exports = {
     ERROR_CATEGORIES,
+    SUPPORT_PROVIDER_FAILURE_CLASSES,
+    SUPPORT_PROVIDER_OUTCOMES,
     logSafeError,
+    logSafeSupportProviderEvent,
     getSafeLogPath,
     safeRequestId,
     safeMethod,

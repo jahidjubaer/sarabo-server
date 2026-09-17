@@ -19,6 +19,9 @@ if (process.env.NODE_ENV !== 'test') {
 // test database works with no manual setup. resolveDatabaseName() fails fast if
 // this ever resolves to the development or a production database.
 process.env.MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'sarabo-test-db';
+// Automated tests use only injected fake/mocked support providers and must
+// never inherit a local shell setting that enables paid external AI traffic.
+process.env.AI_SUPPORT_ENABLED = 'false';
 
 const http = require('http');
 require('dotenv').config();
@@ -27,6 +30,8 @@ const BASE_URL = 'http://localhost:3000';
 let testsPassed = 0;
 let testsFailed = 0;
 const results = [];
+const { runSupportFoundationTests } = require('./tests/supportFoundationTests');
+const { runGeminiSupportProviderTests } = require('./tests/geminiSupportProviderTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -13339,6 +13344,8 @@ async function runAllTests() {
     await testTechnicianFinancialSystem();
     await testWorkflowStabilization();
     await testQuoteRoundNotificationSafety();
+    await runSupportFoundationTests({ logTest });
+    await runGeminiSupportProviderTests({ logTest });
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that
