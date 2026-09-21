@@ -203,7 +203,7 @@ class RepairRequestController {
             // isPaid. The raw settlement is also stripped because it carries
             // technician identity; assigned Technician/Admin viewers get the
             // safe buildSettlementView projection below.
-            const { inspection, quote, repair, assignmentHistory, payment, technicianSettlement, ...safeRepairRequest } = repairRequest;
+            const { inspection, quote, repair, assignmentHistory, payment, technicianSettlement, feedbackRevision, ...safeRepairRequest } = repairRequest;
             safeRepairRequest.isPaid = isRepairRequestPaid(repairRequest);
             if (isAssignedTechnician || isAdmin) {
                 safeRepairRequest.technicianSettlement = buildSettlementView(repairRequest);
@@ -1590,16 +1590,18 @@ class RepairRequestController {
         // checkout row is authoritative and blocks deletion.
         let hasAnyPayment;
         let hasActiveCheckout;
+        let hasTechnicianReport;
         try {
             const existingPayment = await this.collections.payments.findOne({ requestId: id });
             hasAnyPayment = !!existingPayment;
             const activeCheckout = await this.checkoutSessions.findActive(id);
             hasActiveCheckout = !!activeCheckout;
+            hasTechnicianReport = !!await this.collections.technicianReports.findOne({ repairRequestId: id }, { projection: { _id: 1 } });
         } catch (error) {
             return res.status(500).send({ message: 'Error deleting repair request', code: 'REQUEST_DELETE_FAILED' });
         }
 
-        const eligibility = getDeletionEligibility(repairRequest, { hasAnyPayment, hasActiveCheckout });
+        const eligibility = getDeletionEligibility(repairRequest, { hasAnyPayment, hasActiveCheckout, hasTechnicianReport });
         if (!eligibility.eligible) {
             return res.status(409).send({ message: eligibility.reason, code: eligibility.code });
         }
@@ -1647,6 +1649,10 @@ class RepairRequestController {
                 const del = await this.RepairRequest.deleteGuarded({ id, session: mongoSession });
                 if (del.deletedCount === 0) {
                     throw Object.assign(new Error('this request has changed and can no longer be deleted'), { code: 'REQUEST_DELETE_NOT_ALLOWED' });
+                }
+                const retainedReport = await this.collections.technicianReports.findOne({ repairRequestId: id }, { session: mongoSession, projection: { _id: 1 } });
+                if (retainedReport) {
+                    throw Object.assign(new Error('this request has a technician report and must be retained'), { code: 'REQUEST_DELETE_NOT_ALLOWED' });
                 }
                 // Defensive financial re-check inside the transaction - a
                 // payment that raced in is authoritative and must never be left

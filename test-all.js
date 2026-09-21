@@ -32,6 +32,7 @@ let testsFailed = 0;
 const results = [];
 const { runSupportFoundationTests } = require('./tests/supportFoundationTests');
 const { runGeminiSupportProviderTests } = require('./tests/geminiSupportProviderTests');
+const { runFeedbackTests } = require('./tests/feedbackTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -4504,10 +4505,10 @@ async function testNotificationFoundation() {
             // workflow events, and the two withdrawal outcomes that were being
             // emitted by walletController with no definition to render them.
             'repair_request_created', 'quote_revision_started', 'repair_cancelled_by_technician',
-            'withdrawal_paid', 'withdrawal_rejected'
+            'withdrawal_paid', 'withdrawal_rejected', 'technician_report_submitted'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 24 event types exist', actualTypes.length === 24 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 25 event types exist', actualTypes.length === 25 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -13346,6 +13347,7 @@ async function runAllTests() {
     await testQuoteRoundNotificationSafety();
     await runSupportFoundationTests({ logTest });
     await runGeminiSupportProviderTests({ logTest });
+    await runFeedbackTests({ logTest });
 
     // Both database-backed sections above share one cached Mongo connection
     // (config/database.js's connectDatabase()); close it once, here, now that

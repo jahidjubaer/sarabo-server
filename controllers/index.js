@@ -12,6 +12,7 @@ const QuoteController = require('./quoteController');
 const RepairController = require('./repairController');
 const WalletController = require('./walletController');
 const SupportController = require('./supportController');
+const FeedbackController = require('./feedbackController');
 const { connectDatabase } = require('../config/database');
 const { loadAiSupportConfig } = require('../config/aiSupport');
 const { createAiSupportService } = require('../services/aiSupportService');
@@ -50,6 +51,7 @@ function initializeControllers(models, collections, dependencies = {}) {
         quote: new QuoteController(models, collections),
         repair: new RepairController(models, collections),
         wallet: new WalletController(models, collections),
+        feedback: new FeedbackController(models, collections),
         support: new SupportController({
             aiSupportService,
             supportKnowledgeService,

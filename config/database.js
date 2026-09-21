@@ -42,6 +42,8 @@ const collections = {
     repairEvidenceSessions: db.collection("repair_evidence_sessions"),
     deletionCleanups: db.collection("deletion_cleanups"),
     technicianWithdrawals: db.collection("technician_withdrawals"),
+    technicianReviews: db.collection("technician_reviews"),
+    technicianReports: db.collection("technician_reports"),
 };
 
 let connectionPromise = null;
@@ -60,6 +62,13 @@ async function connectDatabase() {
                 // Session can only ever back one payment record, independent of
                 // any application-level race in handlePaymentSuccess.
                 await collections.payments.createIndex({ sessionId: 1 }, { unique: true });
+                await collections.technicianReviews.createIndex({ repairRequestId: 1 }, { unique: true, name: 'reviews_repair_unique' });
+                await collections.technicianReviews.createIndex({ technicianId: 1, visibility: 1, createdAt: -1, _id: -1 }, { name: 'reviews_technician_visibility' });
+                await collections.technicianReviews.createIndex({ visibility: 1, createdAt: -1, _id: -1 }, { name: 'reviews_visibility' });
+                await collections.technicianReports.createIndex({ repairRequestId: 1, technicianId: 1 }, { unique: true, name: 'reports_repair_technician_unique' });
+                await collections.technicianReports.createIndex({ status: 1, createdAt: -1, _id: -1 }, { name: 'reports_status' });
+                await collections.technicianReports.createIndex({ technicianId: 1, status: 1, createdAt: -1, _id: -1 }, { name: 'reports_technician_status' });
+                await collections.technicianReports.createIndex({ createdAt: -1, _id: -1 }, { name: 'reports_created' });
                 // Enforces at the database level that a repair request can have at most
                 // one active (still-occupying-the-slot) checkout session row at
                 // a time - see services/checkoutSessionManager.js. Partial index

@@ -125,6 +125,10 @@ class RepairRequestModel {
         const filter = {
             _id: new ObjectId(id),
             schemaVersion: 2,
+            // Share the repair document write conflict with feedback creation.
+            // Historical assignments remain reportable even after rejection.
+            feedbackRevision: { $not: { $gt: 0 } },
+            $and: [{ $or: [{ assignmentHistory: { $exists: false } }, { assignmentHistory: { $size: 0 } }] }],
             $or: [
                 { deliveryStatus: { $exists: false } },
                 { deliveryStatus: 'pending-pickup' }

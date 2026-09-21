@@ -9,7 +9,7 @@
 // `priority: 'high'` is kept in the allowed enum as a safe, forward-
 // compatible value - no V1 event definition below uses it, and nothing here
 // currently produces it.
-const ENTITY_TYPES = ['repair_request', 'technician', 'technician_withdrawal'];
+const ENTITY_TYPES = ['repair_request', 'technician', 'technician_withdrawal', 'technician_report'];
 const ROLES = ['user', 'rider', 'admin'];
 const PRIORITIES = ['normal', 'high'];
 
@@ -23,6 +23,18 @@ const PRIORITIES = ['normal', 'high'];
 // given template actually needs are used. recipientEmail/actorEmail there
 // are already normalized/validated and are never persisted as metadata.
 const NOTIFICATION_EVENTS = {
+    technician_report_submitted: {
+        entityType: 'technician_report',
+        recipientRole: 'admin',
+        priority: 'normal',
+        allowedMetadataKeys: [],
+        requiresMetadata: [],
+        title: () => 'Technician report received',
+        message: () => 'A private technician report is available for admin review.',
+        // The report queue UI is deferred; use the existing Admin entry point.
+        actionUrl: () => '/dashboard',
+        deduplicationKey: ({ entityId, recipientEmail }) => `report:${entityId}:submitted:${recipientEmail}`,
+    },
     // A customer successfully created a repair request. Addressed to admins,
     // who own assignment - without this, a new request sat in the queue with
     // nothing telling anyone it had arrived.

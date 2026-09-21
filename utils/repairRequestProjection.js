@@ -75,7 +75,7 @@ function projectSafeListRepairRequest(repairRequest) {
     // view re-attaches the safe wallet settlement projection in the controller;
     // admins can still read historical earning records on request details.
     // eslint-disable-next-line no-unused-vars
-    const { assignmentHistory, inspection, repair, quote, payment, technicianEarning, technicianSettlement, ...rest } = safe;
+    const { assignmentHistory, inspection, repair, quote, payment, technicianEarning, technicianSettlement, feedbackRevision, ...rest } = safe;
     const projected = {
         ...rest,
         isPaid: isRepairRequestPaid(safe),

@@ -9,6 +9,8 @@ const DamageUploadSessionModel = require('./DamageUploadSession');
 const RepairEvidenceSessionModel = require('./RepairEvidenceSession');
 const DeletionCleanupModel = require('./DeletionCleanup');
 const TechnicianWithdrawalModel = require('./TechnicianWithdrawal');
+const TechnicianReviewModel = require('./TechnicianReview');
+const TechnicianReportModel = require('./TechnicianReport');
 
 function initializeModels(collections) {
     return {
@@ -22,7 +24,9 @@ function initializeModels(collections) {
         DamageUploadSession: new DamageUploadSessionModel(collections.damageUploadSessions),
         RepairEvidenceSession: new RepairEvidenceSessionModel(collections.repairEvidenceSessions),
         DeletionCleanup: new DeletionCleanupModel(collections.deletionCleanups),
-        TechnicianWithdrawal: new TechnicianWithdrawalModel(collections.technicianWithdrawals)
+        TechnicianWithdrawal: new TechnicianWithdrawalModel(collections.technicianWithdrawals),
+        TechnicianReview: new TechnicianReviewModel(collections.technicianReviews),
+        TechnicianReport: new TechnicianReportModel(collections.technicianReports),
     };
 }
 

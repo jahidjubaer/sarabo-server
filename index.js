@@ -26,6 +26,7 @@ const quoteRoutes = require('./routes/quotes');
 const repairRoutes = require('./routes/repairs');
 const walletRoutes = require('./routes/wallet');
 const supportRoutes = require('./routes/support');
+const feedbackRoutes = require('./routes/feedback');
 
 const app = express();
 // Vercel's edge network is the sole reverse proxy in front of this function,
@@ -89,6 +90,7 @@ app.get('/', (req, res) => {
 // database outage returns 503 instead of the route appearing as an
 // unregistered 404.
 userRoutes(app, controllers);
+feedbackRoutes(app, controllers);
 repairRequestRoutes(app, controllers);
 paymentRoutes(app, controllers);
 technicianRoutes(app, controllers);

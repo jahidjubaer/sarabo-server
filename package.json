@@ -6,6 +6,7 @@
   "scripts": {
     "test": "node test-all.js",
     "test:support": "node test-support.js",
+    "test:feedback": "node test-feedback.js",
     "start": "node index.js",
     "dev": "node index.js",
     "seed:service-definitions": "node scripts/seed-service-definitions.js",

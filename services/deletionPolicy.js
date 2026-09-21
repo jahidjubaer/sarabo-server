@@ -32,8 +32,14 @@ const REQUEST_DELETE_NOT_ALLOWED = 'REQUEST_DELETE_NOT_ALLOWED';
 // the caller (real collection lookups) - a financial record is authoritative
 // even if repair request.paymentStatus is somehow inconsistent with it, and is never
 // silently destroyed.
-function getDeletionEligibility(repairRequest, { hasAnyPayment, hasActiveCheckout }) {
+function getDeletionEligibility(repairRequest, { hasAnyPayment, hasActiveCheckout, hasTechnicianReport = false }) {
     const status = repairRequest.deliveryStatus || 'pending-pickup';
+
+    if (hasTechnicianReport || repairRequest.feedbackRevision > 0
+        || (repairRequest.assignmentHistory !== undefined
+            && (!Array.isArray(repairRequest.assignmentHistory) || repairRequest.assignmentHistory.length > 0))) {
+        return { eligible: false, code: REQUEST_DELETE_NOT_ALLOWED, reason: 'this request has assignment or feedback records and must be retained' };
+    }
 
     if (!KNOWN_STATUSES.includes(status)) {
         return { eligible: false, code: REQUEST_DELETE_NOT_ALLOWED, reason: 'this request is in an unrecognized state and cannot be deleted' };
