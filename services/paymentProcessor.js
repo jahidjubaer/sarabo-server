@@ -1,6 +1,6 @@
 const { ObjectId } = require('mongodb');
 const { client } = require('../config/database');
-const { logTracking } = require('../middleware/logging');
+const { logTracking, logTrackingSafely } = require('../middleware/logging');
 const { createCheckoutSessionManager } = require('./checkoutSessionManager');
 const { PAYMENT_CURRENCY, V2_PAYMENT_CURRENCY, toSmallestUnit, isValidStoredCost, isValidQuoteTotal, isBdtQuoteCurrency } = require('../config/paymentConfig');
 const { isV2RepairRequest } = require('../utils/repairRequestSchema');
@@ -496,7 +496,7 @@ function createPaymentProcessor(models, collections, notifications) {
             return { code: 'ALREADY_PAID_OTHER_SESSION' };
         }
 
-        logTracking(collections.trackingEvents, trackingId, 'repair_request_paid');
+        await logTrackingSafely(collections.trackingEvents, trackingId, 'repair_request_paid');
 
         return {
             code: 'OK',

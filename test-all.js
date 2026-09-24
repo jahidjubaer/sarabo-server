@@ -296,6 +296,24 @@ async function testStatusTransitions() {
             res.statusCode === 200 && trackingCountAfter === trackingCountBefore
         );
 
+        // The tracking log of a completed action is awaited (so the count
+        // above is never read before the previous log lands), but a failed
+        // log write is swallowed - it must never throw or reject.
+        const { logTrackingSafely } = require('./middleware/logging');
+        const failingCollection = { insertOne: async () => { throw new Error('simulated tracking write failure'); } };
+        const originalConsoleError = console.error;
+        console.error = () => {};
+        let safeLogResult;
+        let safeLogThrew = false;
+        try {
+            safeLogResult = await logTrackingSafely(failingCollection, 'TEST-SAFE-LOG', 'rider_arriving');
+        } catch {
+            safeLogThrew = true;
+        } finally {
+            console.error = originalConsoleError;
+        }
+        logTest('A failed tracking-log write after a completed action is non-fatal', !safeLogThrew && safeLogResult === null);
+
         res = await updateStatus(main.id, 'parcel_delivered', RIDER_EMAIL, main.trackingId);
         logTest('Valid transition: parcel_picked_up -> parcel_delivered', res.statusCode === 200);
 
