@@ -1,5 +1,19 @@
 const { ObjectId } = require('mongodb');
 const { normalize } = require('../services/paymentProcessor');
+const { escapeRegex } = require('../utils/searchSanitize');
+
+// Case-insensitive name/email match. The search text is always escaped, so it
+// matches literally and can never inject a pattern (e.g. `.*`) or build a
+// catastrophic-backtracking expression.
+function buildUserQuery({ searchText, role } = {}) {
+    const query = {};
+    if (searchText) {
+        const pattern = { $regex: escapeRegex(searchText), $options: 'i' };
+        query.$or = [{ displayName: pattern }, { email: pattern }];
+    }
+    if (role) query.role = role;
+    return query;
+}
 
 class UserModel {
     // Every role the users collection is ever expected to hold - mirrors the
@@ -11,16 +25,23 @@ class UserModel {
         this.collection = collection;
     }
 
+    // Legacy list: the newest `limit` matches as a bare array. Kept exactly as
+    // before for callers that do not ask for a page (see
+    // UserController.getAllUsers).
     async findAll(searchText = null, limit = 5) {
-        const query = {};
-        if (searchText) {
-            query.$or = [
-                { displayName: { $regex: searchText, $options: 'i' } },
-                { email: { $regex: searchText, $options: 'i' } },
-            ];
-        }
-        const cursor = this.collection.find(query).sort({ createdAt: -1 }).limit(limit);
+        const cursor = this.collection.find(buildUserQuery({ searchText })).sort({ createdAt: -1 }).limit(limit);
         return await cursor.toArray();
+    }
+
+    // Paged list for the admin Users page: one page of matches, newest first,
+    // plus the total count for the same filter.
+    async findPaginated({ searchText, role, page, limit }) {
+        const query = buildUserQuery({ searchText, role });
+        const [data, totalItems] = await Promise.all([
+            this.collection.find(query).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
+            this.collection.countDocuments(query),
+        ]);
+        return { data, totalItems };
     }
 
     async findById(id) {

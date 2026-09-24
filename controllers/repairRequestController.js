@@ -3,7 +3,10 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const { client } = require('../config/database');
 const { generateSecureTrackingId } = require('../utils/trackingId');
 const { logTracking } = require('../middleware/logging');
-const { VALID_STATUSES, ACTIVE_STATUSES, ASSIGNMENT_PENDING, REPAIR_COMPLETED, isValidTransition } = require('../utils/repairRequestStatus');
+const {
+    VALID_STATUSES, ACTIVE_STATUSES, ASSIGNMENT_PENDING, INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED,
+    QUOTE_REJECTED, PAYMENT_COMPLETED, REPAIR_IN_PROGRESS, REPAIR_COMPLETED, isValidTransition,
+} = require('../utils/repairRequestStatus');
 const { validateRejectionReason, buildPendingAssignmentEntry, projectAssignmentForRole } = require('../utils/assignmentDecision');
 const { stripDamageImages, projectSafeListRepairRequest } = require('../utils/repairRequestProjection');
 const { normalize } = require('../services/paymentProcessor');
@@ -33,13 +36,29 @@ const {
 const ADMIN_LIST_DEFAULT_LIMIT = 10;
 const ADMIN_LIST_MAX_LIMIT = 50;
 const ADMIN_LIST_MAX_SEARCH_LENGTH = 100;
-// Every status the admin request-management filter accepts - deliberately
-// the same set utils/repairRequestStatus.js's VALID_STATUSES plus the two values
-// that can never appear in that list (the implicit initial 'pending-pickup'
-// and the terminal 'cancelled', neither of which is a client-settable
-// transition target for updateRepairRequestStatus, but both of which are real,
-// filterable request states).
-const ADMIN_LIST_VALID_STATUSES = ['pending-pickup', 'driver_assigned', 'rider_arriving', 'parcel_picked_up', 'parcel_delivered', 'cancelled'];
+// Every status the admin request-management filter accepts: every real
+// deliveryStatus a request can hold, in lifecycle order. Built from the
+// status constants in utils/repairRequestStatus.js rather than listed by hand,
+// so the filter cannot drift behind the lifecycle again - it used to accept
+// only the six legacy courier-era values, so an admin could not filter by any
+// v2 state (assignment_pending, inspection_completed, the quote states,
+// payment_completed, repair_in_progress, repair_completed). The implicit
+// initial 'pending-pickup' and the terminal 'cancelled' are added explicitly:
+// neither is a client-settable transition target, but both are real,
+// filterable states. Any other value is still ignored (no status filter).
+const ADMIN_LIST_VALID_STATUSES = [...new Set([
+    'pending-pickup',
+    ASSIGNMENT_PENDING,
+    ...VALID_STATUSES,
+    INSPECTION_COMPLETED,
+    QUOTE_SUBMITTED,
+    QUOTE_APPROVED,
+    QUOTE_REJECTED,
+    PAYMENT_COMPLETED,
+    REPAIR_IN_PROGRESS,
+    REPAIR_COMPLETED,
+    'cancelled',
+])];
 
 // Sanitized, technician-safe earning view (Phase 8.11). Prefers the persisted
 // technicianEarning; otherwise derives a DISPLAY-ONLY fallback from the approved

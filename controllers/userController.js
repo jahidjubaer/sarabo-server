@@ -1,6 +1,11 @@
 const { ObjectId } = require('mongodb');
 const { client } = require('../config/database');
 const { normalize } = require('../services/paymentProcessor');
+const { sanitizeSearchText } = require('../utils/searchSanitize');
+
+const USER_LIST_DEFAULT_LIMIT = 20;
+const USER_LIST_MAX_LIMIT = 50;
+const USER_LIST_MAX_SEARCH_LENGTH = 100;
 
 class UserController {
     constructor(models, collections) {
@@ -9,11 +14,44 @@ class UserController {
         this.collections = collections;
     }
 
+    // GET /users (admin only).
+    //
+    // With `page` in the query: one page of accounts plus pagination, in the
+    // same { data, pagination } shape as GET /admin/repair-requests, with an
+    // optional exact `role` filter. Without `page`: the original response,
+    // unchanged - a bare array of the 5 newest matches - so a client that
+    // predates paging keeps working whichever side is deployed first.
+    // The search text is trimmed, length-capped and regex-escaped either way.
     async getAllUsers(req, res) {
         try {
-            const searchText = req.query.searchText;
-            const users = await this.User.findAll(searchText);
-            res.send(users);
+            const searchText = sanitizeSearchText(req.query.searchText, USER_LIST_MAX_SEARCH_LENGTH);
+
+            if (req.query.page === undefined) {
+                const users = await this.User.findAll(searchText);
+                return res.send(users);
+            }
+
+            let page = parseInt(req.query.page, 10);
+            if (!Number.isInteger(page) || page < 1) page = 1;
+            let limit = parseInt(req.query.limit, 10);
+            if (!Number.isInteger(limit) || limit < 1) limit = USER_LIST_DEFAULT_LIMIT;
+            if (limit > USER_LIST_MAX_LIMIT) limit = USER_LIST_MAX_LIMIT;
+            // Only a real role narrows the list; anything else is ignored.
+            const role = this.User.constructor.VALID_ROLES.includes(req.query.role) ? req.query.role : undefined;
+
+            const { data, totalItems } = await this.User.findPaginated({ searchText, role, page, limit });
+            const totalPages = Math.max(Math.ceil(totalItems / limit), 1);
+            res.send({
+                data,
+                pagination: {
+                    page,
+                    limit,
+                    totalItems,
+                    totalPages,
+                    hasNextPage: page < totalPages,
+                    hasPreviousPage: page > 1,
+                },
+            });
         } catch (error) {
             res.status(500).send({ message: 'Error fetching users', error: error.message });
         }

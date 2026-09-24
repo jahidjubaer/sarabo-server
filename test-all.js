@@ -3148,6 +3148,48 @@ async function testP0AuthorizationFixes() {
             Array.isArray(searchRes.body) && searchRes.body.some(u => u.email === CUSTOMER_EMAIL)
         );
 
+        // --- 14a-14g. Paging (opt-in with `page`), role filter, escaped search.
+        // Without `page` the response is still the original bare array, so a
+        // client that predates paging keeps working.
+        const legacyRes = await callGetAllUsers(ADMIN_EMAIL, {});
+        logTest('GET /users without page still returns the legacy bare array (max 5)',
+            Array.isArray(legacyRes.body) && legacyRes.body.length <= 5);
+
+        const allUserCount = await collections.users.countDocuments({});
+        const pagedRes = await callGetAllUsers(ADMIN_EMAIL, { page: '1', limit: '2' });
+        logTest('GET /users?page returns { data, pagination } with the true total',
+            Array.isArray(pagedRes.body?.data) && pagedRes.body.data.length <= 2
+            && pagedRes.body.pagination?.totalItems === allUserCount
+            && pagedRes.body.pagination.totalPages === Math.max(Math.ceil(allUserCount / 2), 1),
+            `total=${pagedRes.body?.pagination?.totalItems} expected=${allUserCount}`);
+
+        const page2Res = await callGetAllUsers(ADMIN_EMAIL, { page: '2', limit: '2' });
+        const page1Ids = new Set((pagedRes.body?.data || []).map(u => String(u._id)));
+        logTest('GET /users page 2 does not repeat page 1',
+            Array.isArray(page2Res.body?.data) && page2Res.body.data.every(u => !page1Ids.has(String(u._id))));
+
+        const cappedRes = await callGetAllUsers(ADMIN_EMAIL, { page: '1', limit: '1000' });
+        logTest('GET /users caps the page size at 50', cappedRes.body?.pagination?.limit === 50);
+
+        const adminRoleRes = await callGetAllUsers(ADMIN_EMAIL, { page: '1', role: 'admin', limit: '50' });
+        logTest('GET /users role filter returns only that role',
+            Array.isArray(adminRoleRes.body?.data) && adminRoleRes.body.data.length > 0
+            && adminRoleRes.body.data.every(u => u.role === 'admin')
+            && adminRoleRes.body.pagination.totalItems === await collections.users.countDocuments({ role: 'admin' }));
+
+        const badRoleRes = await callGetAllUsers(ADMIN_EMAIL, { page: '1', role: 'superuser' });
+        logTest('GET /users ignores an unknown role instead of filtering on it',
+            badRoleRes.body?.pagination?.totalItems === allUserCount);
+
+        const regexPagedRes = await callGetAllUsers(ADMIN_EMAIL, { page: '1', searchText: '.*' });
+        const regexLegacyRes = await callGetAllUsers(ADMIN_EMAIL, { searchText: '.*' });
+        logTest('GET /users search is regex-escaped (".*" matches literally, not everything)',
+            regexPagedRes.body?.pagination?.totalItems === 0 && Array.isArray(regexLegacyRes.body) && regexLegacyRes.body.length === 0);
+
+        const pagedSearchRes = await callGetAllUsers(ADMIN_EMAIL, { page: '1', searchText: CUSTOMER_EMAIL.toUpperCase() });
+        logTest('GET /users paged search is case-insensitive and finds the account',
+            Array.isArray(pagedSearchRes.body?.data) && pagedSearchRes.body.data.some(u => u.email === CUSTOMER_EMAIL));
+
         // --- 15. No alternate list-user route exists (confirmed structurally -
         // routes/users.js defines exactly one GET /users route). ---
         logTest(
@@ -4382,6 +4424,15 @@ async function testAdminParcelsList() {
         // --- 19, 24. Cancelled and completed requests are both reachable. ---
         res = await callGetAdminParcels({ search: marker, status: 'parcel_delivered' });
         logTest('Completed (parcel_delivered) request is included when requested', res.body.data.some(p => p._id.toString() === f3.id));
+
+        // --- 19a, 19b. v2 statuses are filterable too (the filter used to accept
+        // only the six legacy values, so these were silently ignored). ---
+        res = await callGetAdminParcels({ search: marker, status: 'repair_completed' });
+        logTest('v2 status filter (repair_completed) returns only matching requests',
+            res.body.data.length === 1 && res.body.data[0]._id.toString() === f7.id);
+        res = await callGetAdminParcels({ search: marker, status: 'repair_in_progress' });
+        logTest('v2 status filter (repair_in_progress) returns only matching requests',
+            res.body.data.length === 1 && res.body.data[0]._id.toString() === f8.id);
 
         // ===== Payment filter =====
 
