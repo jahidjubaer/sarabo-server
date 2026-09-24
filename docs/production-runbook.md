@@ -70,6 +70,28 @@ After an admin edits a standard service, `seed:service-definitions` reports
 that row as a conflict and never overwrites it, and the BDT migration refuses
 to run; both are expected.
 
+## Pickup scheduling
+
+Customers choose a 2-hour pickup window when they create a request:
+10:00-12:00, 12:00-14:00, 14:00-16:00 or 16:00-18:00 Bangladesh time,
+Saturday to Thursday (closed Friday), up to 7 days ahead and at least 1 hour
+from now. They can change it until the device is picked up.
+
+- `PICKUP_SLOT_CAPACITY` (default `3`) - pickups per region per slot. A full
+  slot returns `409 PICKUP_SLOT_FULL`.
+- The count is checked before saving, not locked, so two customers booking
+  the last place in the same second can both get it. Admins can see every
+  request's pickup time on Assign technicians.
+- Requests created before this release have no pickup time and show
+  "Not scheduled"; the customer can choose one from the request page.
+
+## Technician matching
+
+A technician can only be assigned to a request in **their own region**
+(`OUTSIDE_SERVICE_REGION`). Same district ranks highest; a different district
+in the same region is still allowed. Assign technicians lists everyone else
+as "Not available" with the reason.
+
 ## Database
 
 - Production database: `sarabo_production` (same Atlas cluster as development)

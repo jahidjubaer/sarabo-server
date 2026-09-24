@@ -25,6 +25,7 @@ const {
     buildServiceLocationSnapshot, validateClientPricingAbsence
 } = require('../utils/repairRequestV2');
 const { getPricingEstimate } = require('../services/pricingService');
+const PickupSlotController = require('./pickupSlotController');
 const { SETTLEMENT_PENDING, SETTLEMENT_AVAILABLE, buildSettlementView } = require('../utils/settlement');
 const { isRepairRequestPaid, buildPaymentStateMatch } = require('../utils/paymentState');
 const {
@@ -104,6 +105,8 @@ class RepairRequestController {
         // - see services/checkoutSessionManager.js.
         this.checkoutSessions = createCheckoutSessionManager(collections);
         this.notifications = createNotificationService(models);
+        // Slot rules and per-region capacity, shared with the pickup-slot routes.
+        this.pickupSlots = new PickupSlotController(models, collections);
         // Generic storage adapter (services/damageStorageService.js is generic
         // over any storageKey) - used by safe deletion to purge a request's
         // damage/evidence objects. Injectable so tests exercise the cleanup
@@ -452,6 +455,17 @@ class RepairRequestController {
                 return res.status(400).send({ message: locationValidation.message, code: locationValidation.code });
             }
 
+            // Pickup slot (pickup-scheduling phase). Optional in the API so an
+            // older client keeps working; the current client always sends one.
+            let pickupSlot = null;
+            if (body.pickupSlot !== undefined) {
+                const slotCheck = await this.pickupSlots.checkSlot(body.pickupSlot, body.serviceLocation.region.trim());
+                if (!slotCheck.valid) {
+                    return res.status(slotCheck.status).send({ message: slotCheck.message, code: slotCheck.code });
+                }
+                pickupSlot = slotCheck.pickupSlot;
+            }
+
             // Server-owned pricing snapshot - never the client's. No current
             // service definition has an exact fixed price (every seeded row
             // is a baseMin/baseMax range), so quotedAmount/finalAmount are
@@ -470,6 +484,7 @@ class RepairRequestController {
                 service: { definitionId: definition._id.toString(), repairCategorySlug: definition.repairCategorySlug },
                 damage: buildDamageSnapshot({ description: damageDescriptionInput, images: damageImagesInput }),
                 serviceLocation: buildServiceLocationSnapshot(body.serviceLocation),
+                ...(pickupSlot ? { pickupSlot } : {}),
                 pricing: {
                     currency: estimate.currency,
                     estimateMin: estimate.estimateMin,
@@ -1150,9 +1165,9 @@ class RepairRequestController {
                     // is never missed), and reuses
                     // services/technicianEligibilityService.js's own
                     // evaluateTechnician rather than re-deriving the rules.
-                    // Service area is intentionally not part of this
-                    // evaluation - it is ranking-only and must never block
-                    // assignment. Skipped for the redundant
+                    // This includes the service-region rule: a technician
+                    // outside the request's region is refused here too, not
+                    // just hidden from the recommendations. Skipped for the redundant
                     // reassign-to-same-technician case above so that its
                     // existing, more specific REQUEST_ALREADY_ASSIGNED
                     // outcome (via the repair request update guard below) is never

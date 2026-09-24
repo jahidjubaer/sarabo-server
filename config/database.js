@@ -275,6 +275,13 @@ async function connectDatabase() {
                     { technicianEmail: 1, 'technicianSettlement.status': 1 },
                     { name: 'repairRequests_technicianEmail_settlementStatus' }
                 );
+                // Pickup-slot capacity counts (controllers/pickupSlotController.js).
+                // Same case-insensitive collation as the query, or MongoDB
+                // would not use it.
+                await collections.repairRequests.createIndex(
+                    { 'serviceLocation.region': 1, 'pickupSlot.startsAt': 1 },
+                    { name: 'repairRequests_region_pickupStartsAt', collation: { locale: 'en', strength: 2 } }
+                );
                 return { db, collections };
             })
             .catch((error) => {

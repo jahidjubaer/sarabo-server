@@ -40,6 +40,7 @@ const { runFeedbackTests } = require('./tests/feedbackTests');
 const { runProductionMigrationTests } = require('./tests/productionMigrationTests');
 const { runTechnicianAvailabilityTests } = require('./tests/technicianAvailabilityTests');
 const { runAdminServiceDefinitionTests } = require('./tests/adminServiceDefinitionTests');
+const { runPickupSlotTests } = require('./tests/pickupSlotTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -8915,7 +8916,7 @@ async function testRepairRequestV2() {
         // charging-port, requiredExpertiseLevel 'intermediate') to still be
         // assignable, exactly like any other genuine v2-eligible technician.
         const raceTechDoc = {
-            name: `TEST-REQUEST-V2-TECH-${runId}`, email: raceTechEmail, region: 'Dhaka', district: 'Mirpur',
+            name: `TEST-REQUEST-V2-TECH-${runId}`, email: raceTechEmail, region: 'Test Region', district: 'Test District', // same region as validLocation()
             status: 'approved', workStatus: 'available',
             expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['charging-port'], level: 'advanced', experienceYears: 5 }],
             createdAt: new Date()
@@ -9085,7 +9086,9 @@ async function testEligibleTechnicianAPI() {
     logTest('24. Linked user with wrong role excluded', evalRider(makeRider(), { technicianRole: 'user' }).reasonCodes.includes('TECHNICIAN_ROLE_INCONSISTENT'));
     logTest('25. Incomplete region/district excluded', evalRider(makeRider({ district: undefined })).reasonCodes.includes('INCOMPLETE_TECHNICIAN_PROFILE'));
     logTest('26. Different district remains eligible', evalRider(makeRider({ district: 'Gulshan' })).eligible === true);
-    logTest('27. Different region remains eligible', evalRider(makeRider({ region: 'Chittagong', district: 'Pahartali' })).eligible === true);
+    const otherRegionEval = evalRider(makeRider({ region: 'Chittagong', district: 'Pahartali' }));
+    logTest('27. Different region is not eligible (OUTSIDE_SERVICE_REGION)', otherRegionEval.eligible === false && otherRegionEval.reasonCodes.includes('OUTSIDE_SERVICE_REGION'));
+    logTest('27b. Region match ignores case and surrounding spaces', evalRider(makeRider({ region: '  dhaka ' })).eligible === true);
 
     // ---- Ranking (28-36) ----
     const scoreExpert = es.scoreTechnician({ matchedExpertiseEntry: { level: 'expert', experienceYears: 5 }, serviceAreaMatch: { matchLevel: 'exact-district' }, completedRepairCount: 0 });
@@ -9412,7 +9415,7 @@ async function testEligibleTechnicianAPI() {
 
         logTest(
             '52. Diagnostic entries remain privacy-safe',
-            diagnosticRes.body.ineligibleTechnicians.every((t) => t.email === undefined && t.address === undefined && Object.keys(t).sort().join(',') === 'displayName,reasonCodes,technicianId')
+            diagnosticRes.body.ineligibleTechnicians.every((t) => t.email === undefined && t.address === undefined && Object.keys(t).sort().join(',') === 'displayName,district,reasonCodes,region,technicianId')
         );
         logTest('53. Diagnostic list capped and totalIneligible present', typeof diagnosticRes.body.totalIneligible === 'number' && diagnosticRes.body.ineligibleTechnicians.length <= 50);
 
@@ -9769,11 +9772,13 @@ async function testAssignmentExpertiseRevalidation() {
         const higherLevelRes = await callAssign(higherLevelParcelId, higherLevelRider.id, adminEmail);
         logTest('17. Expertise level higher than required still succeeds', higherLevelRes.statusCode === 200);
 
-        // ---- Service area is ranking-only, never a hard gate (18-19) ----
+        // ---- Service area: region is a hard rule, district is ranking-only (18-19) ----
         const differentRegionParcelId = await createV2Parcel();
         const differentRegionRider = await createTestTechnician('DIFF-REGION', { region: 'Chittagong', district: 'Pahartali' });
         const differentRegionRes = await callAssign(differentRegionParcelId, differentRegionRider.id, adminEmail);
-        logTest('18. Technician in a completely different region/district is still assignable', differentRegionRes.statusCode === 200);
+        logTest('18. Technician in a different region is refused at assignment (TECHNICIAN_NOT_ELIGIBLE)',
+            differentRegionRes.statusCode === 409 && differentRegionRes.body.code === 'TECHNICIAN_NOT_ELIGIBLE'
+            && Array.isArray(differentRegionRes.body.reasonCodes) && differentRegionRes.body.reasonCodes.includes('OUTSIDE_SERVICE_REGION'));
 
         const differentDistrictParcelId = await createV2Parcel();
         const differentDistrictRider = await createTestTechnician('DIFF-DISTRICT', { district: 'Gulshan' });
@@ -13480,6 +13485,7 @@ async function runAllTests() {
     await runProductionMigrationTests({ logTest });
     await runTechnicianAvailabilityTests({ logTest });
     await runAdminServiceDefinitionTests({ logTest });
+    await runPickupSlotTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing
@@ -14273,9 +14279,9 @@ async function testTechnicianMatchingProfileFlow() {
         const mismatchIds = (mismatchRes.body.technicians || []).map((t) => t.technicianId);
         logTest('18. Non-matching expertise excludes the technician from recommendations', !mismatchIds.includes(applyId));
 
-        // Service area is a RANKING factor, never a hard gate: a complete-profile
-        // technician in a different region is still eligible (Phase 8.7A does not
-        // change assignment semantics - it only fixes onboarding -> matching).
+        // Region is a hard rule (pickup-scheduling phase): a complete-profile
+        // technician in a different region is not eligible, and diagnostic mode
+        // says why. Within the region, district only affects ranking.
         const otherRegionEmail = `tmp-otherregion-${runId}@test.local`;
         createdUserEmails.push(otherRegionEmail);
         await collections.users.insertOne({ email: otherRegionEmail, role: 'rider', createdAt: new Date() });
@@ -14283,7 +14289,11 @@ async function testTechnicianMatchingProfileFlow() {
         createdRiderIds.push(otherRegionInsert.insertedId.toString());
         const areaRes = await callGetEligible(matchParcelId, adminEmail);
         const areaIds = (areaRes.body.technicians || []).map((t) => t.technicianId);
-        logTest('19. Service area affects ranking only - a different-region complete profile stays eligible', areaIds.includes(otherRegionInsert.insertedId.toString()));
+        const areaDiag = fakeRes();
+        await parcelController.getEligibleTechnicians({ params: { id: matchParcelId }, query: { diagnostic: 'true' }, decoded_email: adminEmail }, areaDiag);
+        const areaEntry = (areaDiag.body.ineligibleTechnicians || []).find((t) => t.technicianId === otherRegionInsert.insertedId.toString());
+        logTest('19. A different-region technician is not eligible and is reported as outside the service region',
+            !areaIds.includes(otherRegionInsert.insertedId.toString()) && !!areaEntry && areaEntry.reasonCodes.includes('OUTSIDE_SERVICE_REGION') && areaEntry.region === 'Chittagong');
 
         // Busy technician (workStatus in_delivery) is excluded.
         await collections.technicians.updateOne({ _id: new ObjectId(applyId) }, { $set: { workStatus: 'in_delivery' } });

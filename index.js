@@ -27,6 +27,7 @@ const repairRoutes = require('./routes/repairs');
 const walletRoutes = require('./routes/wallet');
 const supportRoutes = require('./routes/support');
 const feedbackRoutes = require('./routes/feedback');
+const pickupSlotRoutes = require('./routes/pickupSlots');
 
 const app = express();
 // Vercel's edge network is the sole reverse proxy in front of this function,
@@ -91,6 +92,7 @@ app.get('/', (req, res) => {
 // unregistered 404.
 userRoutes(app, controllers);
 feedbackRoutes(app, controllers);
+pickupSlotRoutes(app, controllers);
 repairRequestRoutes(app, controllers);
 paymentRoutes(app, controllers);
 technicianRoutes(app, controllers);

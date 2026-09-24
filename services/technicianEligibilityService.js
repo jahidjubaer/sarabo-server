@@ -17,8 +17,9 @@ const { isV2RepairRequest } = require('../utils/repairRequestSchema');
 
 // Changes only when eligibility rules or score semantics change - distinct
 // from service-definition pricing version, repair-request schemaVersion, and
-// technician expertise data itself.
-const ELIGIBILITY_VERSION = 1;
+// technician expertise data itself. 2: a technician outside the request's
+// service region is no longer eligible (pickup-scheduling phase).
+const ELIGIBILITY_VERSION = 2;
 
 const PAGINATION_DEFAULT_PAGE = 1;
 const PAGINATION_DEFAULT_LIMIT = 20;
@@ -41,7 +42,8 @@ const REASON_CODE_ORDER = [
     'INCOMPLETE_TECHNICIAN_PROFILE',
     'PRODUCT_EXPERTISE_MISMATCH',
     'REPAIR_EXPERTISE_MISMATCH',
-    'INSUFFICIENT_EXPERTISE_LEVEL'
+    'INSUFFICIENT_EXPERTISE_LEVEL',
+    'OUTSIDE_SERVICE_REGION'
 ];
 
 function orderReasonCodes(codes) {
@@ -129,7 +131,10 @@ function validateCurrentServiceDefinition(definition, requestTaxonomy) {
     return { valid: true };
 }
 
-// ---- Service-area ranking (never a hard eligibility gate) ----
+// ---- Service area ----
+// Region is a hard rule: a technician in another region cannot pick up the
+// device (see evaluateTechnician). Within the region, the exact district only
+// affects ranking.
 
 function normalizeForAreaComparison(value) {
     return typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -177,6 +182,10 @@ function evaluateTechnician(technician, { requestTaxonomy, serviceDefinition, ac
 
     let matchedExpertiseEntry = null;
     const profileComplete = hasCompleteProfile(technician);
+    // An incomplete profile (no region) is already its own reason.
+    if (profileComplete && !deriveServiceAreaMatch(requestTaxonomy, technician).regionMatch) {
+        reasonCodes.push('OUTSIDE_SERVICE_REGION');
+    }
     const expertiseValidation = Array.isArray(technician.expertise) ? validateTechnicianExpertise(technician.expertise) : { valid: false };
 
     if (!profileComplete || !expertiseValidation.valid || technician.expertise.length === 0) {
@@ -266,10 +275,14 @@ function buildEligibleTechnicianEntry(technician, evaluationResult, scoreResult,
     };
 }
 
+// Admin-only (diagnostic mode). Region/district let the admin screen say
+// where an out-of-area technician is based; still never the raw document.
 function buildIneligibleTechnicianEntry(technician, evaluationResult) {
     return {
         technicianId: technician._id.toString(),
         displayName: technician.name,
+        region: typeof technician.region === 'string' ? technician.region : null,
+        district: typeof technician.district === 'string' ? technician.district : null,
         reasonCodes: evaluationResult.reasonCodes
     };
 }

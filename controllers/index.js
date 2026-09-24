@@ -14,6 +14,7 @@ const RepairController = require('./repairController');
 const WalletController = require('./walletController');
 const SupportController = require('./supportController');
 const FeedbackController = require('./feedbackController');
+const PickupSlotController = require('./pickupSlotController');
 const { connectDatabase } = require('../config/database');
 const { loadAiSupportConfig } = require('../config/aiSupport');
 const { createAiSupportService } = require('../services/aiSupportService');
@@ -54,6 +55,7 @@ function initializeControllers(models, collections, dependencies = {}) {
         repair: new RepairController(models, collections),
         wallet: new WalletController(models, collections),
         feedback: new FeedbackController(models, collections),
+        pickupSlot: new PickupSlotController(models, collections),
         support: new SupportController({
             aiSupportService,
             supportKnowledgeService,
