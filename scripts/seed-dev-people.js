@@ -208,13 +208,21 @@ function chooseStage(random, ageDays) {
     return pickWeighted(random, { 'pending-pickup': 30, driver_assigned: 14, parcel_picked_up: 10, inspection_completed: 8, quote_submitted: 10, repair_in_progress: 8, repair_completed: 12, cancelled: 8 });
 }
 
-// A real slot (never a Friday) checked by the app's own rules: the first open
-// one from now for a waiting request, otherwise 1-3 days after it was made.
+// A real slot (never a Friday) checked by the app's own rules: within the
+// coming week for a recent waiting request, otherwise 1-3 days after it was made.
 function choosePickupSlot(random, createdAt, now, upcoming) {
     const slotId = pick(random, PICKUP_SLOTS).slotId;
-    const start = upcoming ? now : new Date(createdAt.getTime() + (1 + Math.floor(random() * 3)) * DAY_MS);
+    // Upcoming pickups are spread over the coming week, not piled onto today.
+    const start = upcoming
+        ? new Date(now.getTime() + Math.floor(random() * 7) * DAY_MS)
+        : new Date(createdAt.getTime() + (1 + Math.floor(random() * 3)) * DAY_MS);
+    // A Friday (closed) moves to Thursday or Saturday at random, so neither
+    // neighbour collects all of Friday's share.
+    const fridayShift = random() < 0.5 ? -1 : 1;
     for (let offset = 0; offset < 8; offset += 1) {
-        const date = dhakaDateString(new Date(start.getTime() + offset * DAY_MS));
+        let when = new Date(start.getTime() + offset * DAY_MS);
+        if (new Date(`${dhakaDateString(when)}T00:00:00Z`).getUTCDay() === 5) when = new Date(when.getTime() + fridayShift * DAY_MS);
+        const date = dhakaDateString(when);
         // Checked as if booked the day before, so past slots validate too.
         const bookedAt = upcoming ? now : new Date(Date.parse(`${date}T00:00:00Z`) - DAY_MS);
         const check = validatePickupSlotInput({ date, slotId }, bookedAt);
