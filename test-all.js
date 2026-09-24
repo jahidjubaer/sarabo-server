@@ -26,13 +26,18 @@ process.env.AI_SUPPORT_ENABLED = 'false';
 const http = require('http');
 require('dotenv').config();
 
-const BASE_URL = 'http://localhost:3000';
+// Port of the harness's own API server process (startTestServer below),
+// chosen by the OS and assigned before any test runs. Real-HTTP tests always
+// reach THIS code and the isolated test database - never whatever else
+// happens to be listening on 3000 (e.g. a normal `npm run dev`).
+let TEST_PORT = null;
 let testsPassed = 0;
 let testsFailed = 0;
 const results = [];
 const { runSupportFoundationTests } = require('./tests/supportFoundationTests');
 const { runGeminiSupportProviderTests } = require('./tests/geminiSupportProviderTests');
 const { runFeedbackTests } = require('./tests/feedbackTests');
+const { runProductionMigrationTests } = require('./tests/productionMigrationTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -469,7 +474,7 @@ async function testSecureCheckoutSession() {
     // HTTP-level: confirm the route itself now requires authentication.
     await makeRequest(
         {
-            hostname: 'localhost', port: 3000, path: '/payment-checkout-session', method: 'POST',
+            hostname: 'localhost', port: TEST_PORT, path: '/payment-checkout-session', method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ requestId: '000000000000000000000000' })
         },
@@ -478,7 +483,7 @@ async function testSecureCheckoutSession() {
     );
     await makeRequest(
         {
-            hostname: 'localhost', port: 3000, path: '/payment-checkout-session', method: 'POST',
+            hostname: 'localhost', port: TEST_PORT, path: '/payment-checkout-session', method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer invalid_token_12345' },
             body: JSON.stringify({ requestId: '000000000000000000000000' })
         },
@@ -616,7 +621,7 @@ async function testSecurePaymentSuccess() {
     // HTTP-level: confirm the route itself now requires authentication.
     await makeRequest(
         {
-            hostname: 'localhost', port: 3000, path: '/payment-success', method: 'PATCH',
+            hostname: 'localhost', port: TEST_PORT, path: '/payment-success', method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ sessionId: 'cs_test_does_not_matter' })
         },
@@ -625,7 +630,7 @@ async function testSecurePaymentSuccess() {
     );
     await makeRequest(
         {
-            hostname: 'localhost', port: 3000, path: '/payment-success', method: 'PATCH',
+            hostname: 'localhost', port: TEST_PORT, path: '/payment-success', method: 'PATCH',
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer invalid_token_12345' },
             body: JSON.stringify({ sessionId: 'cs_test_does_not_matter' })
         },
@@ -941,7 +946,7 @@ async function testStripeWebhook() {
     // wiring against the live server's genuine (unmocked) Stripe SDK. ---
     await makeRequest(
         {
-            hostname: 'localhost', port: 3000, path: '/stripe-webhook', method: 'POST',
+            hostname: 'localhost', port: TEST_PORT, path: '/stripe-webhook', method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id: 'evt_test', type: 'checkout.session.completed' })
         },
@@ -950,7 +955,7 @@ async function testStripeWebhook() {
     );
     await makeRequest(
         {
-            hostname: 'localhost', port: 3000, path: '/stripe-webhook', method: 'POST',
+            hostname: 'localhost', port: TEST_PORT, path: '/stripe-webhook', method: 'POST',
             headers: { 'Content-Type': 'application/json', 'stripe-signature': 't=1,v1=deadbeef' },
             body: JSON.stringify({ id: 'evt_test', type: 'checkout.session.completed' })
         },
@@ -958,7 +963,7 @@ async function testStripeWebhook() {
         'POST /stripe-webhook (invalid signature, real Stripe SDK on live server)'
     );
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/repair-requests', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/repair-requests', method: 'GET' },
         401,
         'GET /repair-requests still parses/behaves normally after webhook route registration'
     );
@@ -1620,7 +1625,7 @@ async function testDuplicateCheckoutPrevention() {
 
         // --- 15. Existing non-payment routes remain unaffected. ---
         await makeRequest(
-            { hostname: 'localhost', port: 3000, path: '/', method: 'GET' },
+            { hostname: 'localhost', port: TEST_PORT, path: '/', method: 'GET' },
             200,
             'GET / still responds normally (non-payment routes unaffected)'
         );
@@ -1913,7 +1918,7 @@ async function testPublicTracking() {
     // rate-limit assertions below.
     function rawRequest(path) {
         return new Promise(resolve => {
-            const req = http.request({ hostname: 'localhost', port: 3000, path, method: 'GET' }, res => {
+            const req = http.request({ hostname: 'localhost', port: TEST_PORT, path, method: 'GET' }, res => {
                 let data = '';
                 res.on('data', chunk => { data += chunk; });
                 res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, data }));
@@ -2170,7 +2175,7 @@ async function testRequestCancellation() {
     // HTTP-level: confirm the route itself requires authentication.
     await makeRequest(
         {
-            hostname: 'localhost', port: 3000, path: '/repair-requests/000000000000000000000000/cancel', method: 'PATCH',
+            hostname: 'localhost', port: TEST_PORT, path: '/repair-requests/000000000000000000000000/cancel', method: 'PATCH',
             headers: { 'Content-Type': 'application/json' }
         },
         401,
@@ -2178,7 +2183,7 @@ async function testRequestCancellation() {
     );
     await makeRequest(
         {
-            hostname: 'localhost', port: 3000, path: '/repair-requests/000000000000000000000000/cancel', method: 'PATCH',
+            hostname: 'localhost', port: TEST_PORT, path: '/repair-requests/000000000000000000000000/cancel', method: 'PATCH',
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer invalid_token_12345' }
         },
         401,
@@ -3061,7 +3066,7 @@ async function testP0AuthorizationFixes() {
         // --- 1. Anonymous POST rejected (real HTTP, real middleware chain). ---
         await makeRequest(
             {
-                hostname: 'localhost', port: 3000, path: '/users', method: 'POST',
+                hostname: 'localhost', port: TEST_PORT, path: '/users', method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email: 'anon-test@example.com', role: 'admin' })
             },
@@ -3126,7 +3131,7 @@ async function testP0AuthorizationFixes() {
 
         // --- 10. Anonymous rejected (real HTTP). ---
         await makeRequest(
-            { hostname: 'localhost', port: 3000, path: '/users', method: 'GET' },
+            { hostname: 'localhost', port: TEST_PORT, path: '/users', method: 'GET' },
             401,
             'GET /users (no auth) rejected'
         );
@@ -3202,7 +3207,7 @@ async function testP0AuthorizationFixes() {
 
         // --- 16, 17, 18, 19. Anonymous/customer/technician/admin. ---
         await makeRequest(
-            { hostname: 'localhost', port: 3000, path: '/technicians', method: 'GET' },
+            { hostname: 'localhost', port: TEST_PORT, path: '/technicians', method: 'GET' },
             401,
             'GET /technicians (no auth) rejected'
         );
@@ -3235,7 +3240,7 @@ async function testP0AuthorizationFixes() {
 
         // --- 24. Anonymous rejected (real HTTP). ---
         await makeRequest(
-            { hostname: 'localhost', port: 3000, path: '/payments', method: 'GET' },
+            { hostname: 'localhost', port: TEST_PORT, path: '/payments', method: 'GET' },
             401,
             'GET /payments (no auth) rejected'
         );
@@ -3416,7 +3421,7 @@ async function testTechnicianApprovalTransaction() {
         // --- 1. Anonymous PATCH rejected (real HTTP, real middleware chain). ---
         await makeRequest(
             {
-                hostname: 'localhost', port: 3000, path: '/technicians/000000000000000000000000', method: 'PATCH',
+                hostname: 'localhost', port: TEST_PORT, path: '/technicians/000000000000000000000000', method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ status: 'approved' })
             },
@@ -3895,7 +3900,7 @@ async function testRepairCompletionTransaction() {
         // --- 1. Anonymous PATCH rejected (real HTTP, real middleware chain). ---
         await makeRequest(
             {
-                hostname: 'localhost', port: 3000, path: '/repair-requests/000000000000000000000000/status', method: 'PATCH',
+                hostname: 'localhost', port: TEST_PORT, path: '/repair-requests/000000000000000000000000/status', method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ deliveryStatus: 'parcel_delivered' })
             },
@@ -4328,7 +4333,7 @@ async function testAdminParcelsList() {
 
         // --- 1. Anonymous rejected (real HTTP, real middleware chain). ---
         await makeRequest(
-            { hostname: 'localhost', port: 3000, path: '/admin/repair-requests', method: 'GET' },
+            { hostname: 'localhost', port: TEST_PORT, path: '/admin/repair-requests', method: 'GET' },
             401,
             'GET /admin/repair-requests (no auth) rejected'
         );
@@ -5057,13 +5062,13 @@ async function testNotificationReadAPIs() {
     console.log('16. Testing Notification Read APIs (Phase 5.2 Unit 2)');
     console.log('-'.repeat(60));
 
-    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications', method: 'GET' }, 401, '1. GET /notifications without token');
-    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications/unread-count', method: 'GET' }, 401, '2. GET /notifications/unread-count without token');
-    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications/read-all', method: 'PATCH' }, 401, '3. PATCH /notifications/read-all without token');
-    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications/507f1f77bcf86cd799439011/read', method: 'PATCH' }, 401, '4. PATCH /notifications/:id/read without token');
-    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications', method: 'POST' }, 404, '61. POST /notifications is unavailable');
-    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications/507f1f77bcf86cd799439011', method: 'DELETE' }, 404, '62. DELETE /notifications/:id is unavailable');
-    await makeRequest({ hostname: 'localhost', port: 3000, path: '/notifications/507f1f77bcf86cd799439011', method: 'GET' }, 404, '63. GET /notifications/:id is unavailable in V1');
+    await makeRequest({ hostname: 'localhost', port: TEST_PORT, path: '/notifications', method: 'GET' }, 401, '1. GET /notifications without token');
+    await makeRequest({ hostname: 'localhost', port: TEST_PORT, path: '/notifications/unread-count', method: 'GET' }, 401, '2. GET /notifications/unread-count without token');
+    await makeRequest({ hostname: 'localhost', port: TEST_PORT, path: '/notifications/read-all', method: 'PATCH' }, 401, '3. PATCH /notifications/read-all without token');
+    await makeRequest({ hostname: 'localhost', port: TEST_PORT, path: '/notifications/507f1f77bcf86cd799439011/read', method: 'PATCH' }, 401, '4. PATCH /notifications/:id/read without token');
+    await makeRequest({ hostname: 'localhost', port: TEST_PORT, path: '/notifications', method: 'POST' }, 404, '61. POST /notifications is unavailable');
+    await makeRequest({ hostname: 'localhost', port: TEST_PORT, path: '/notifications/507f1f77bcf86cd799439011', method: 'DELETE' }, 404, '62. DELETE /notifications/:id is unavailable');
+    await makeRequest({ hostname: 'localhost', port: TEST_PORT, path: '/notifications/507f1f77bcf86cd799439011', method: 'GET' }, 404, '63. GET /notifications/:id is unavailable in V1');
     console.log('');
 
     const { ObjectId } = require('mongodb');
@@ -6728,8 +6733,8 @@ async function testPaymentNotificationIntegration() {
 // Exercises config/cors.js and config/siteOrigin.js directly, in-process,
 // under manufactured env combinations - these are load-time/module-level
 // behaviors (production detection, SITE_DOMAIN validation, the allowlist
-// itself) that the live external server under test at localhost:3000 already
-// has baked in from whatever env it booted with, so they cannot be observed
+// itself) that the harness's API server process (startTestServer) already has
+// baked in from the env it booted with, so they cannot be observed
 // through the HTTP-level Test 10 above. Every env var this touches is
 // restored exactly, and the require cache is reset back to a build of the
 // real environment before returning, so no other test section is affected.
@@ -6983,10 +6988,10 @@ async function testDatabaseNameValidation() {
 
 // Phase 5.9: Production Stabilization and Observability.
 //
-// The live dev server under test (localhost:3000) runs as a SEPARATE OS
-// process from this test script - they only communicate over HTTP. Any
-// monkey-patch this script makes to its own require-cache or console.error
-// is invisible to that other process. So: checks that only need a real
+// The API server under test (startTestServer) runs as a SEPARATE OS process
+// from this test script - they only communicate over HTTP. Any monkey-patch
+// this script makes to its own require-cache or console.error is invisible to
+// that other process. So: checks that only need a real
 // end-to-end round trip (status codes, response headers/bodies as actually
 // observed by a client) go over real HTTP; checks that need to simulate a
 // failure or intercept a log line run in-process instead, the same pattern
@@ -7012,7 +7017,7 @@ async function testHealthAndObservability() {
 
     // 1. GET / remains 200 (real HTTP).
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/', method: 'GET' },
         200,
         '1. GET / remains 200'
     );
@@ -7020,7 +7025,7 @@ async function testHealthAndObservability() {
     // 2. GET /health returns 200 when DB is connected (real HTTP - genuine
     // end-to-end check against the live dev server and real database).
     const healthyResult = await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/health', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/health', method: 'GET' },
         200,
         '2. GET /health returns 200 when DB is connected'
     );
@@ -7076,7 +7081,7 @@ async function testHealthAndObservability() {
     await healthController.getHealth({ method: 'GET', path: '/health', requestId: 'test-req-id-health-2' }, healthyAgainRes);
     logTest('5b(i). Health recovers to 200 in-process after restoring the real DB check', healthyAgainRes.statusCode === 200);
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/health', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/health', method: 'GET' },
         200,
         '5b(ii). Health recovers to 200 over HTTP after restoring the real DB check'
     );
@@ -7084,7 +7089,7 @@ async function testHealthAndObservability() {
     // 7. Request ID response header exists (real HTTP - genuine check of the
     // requestId middleware running in the live dev server process).
     const rootResult = await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/', method: 'GET' },
         200,
         '7pre. Baseline request for header check'
     );
@@ -7093,7 +7098,7 @@ async function testHealthAndObservability() {
     // 8. Existing (Vercel-style) request ID is reused safely where supported.
     const incomingId = 'test-vercel-id-abc123';
     const reusedResult = await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/', method: 'GET', headers: { 'x-vercel-id': incomingId } },
+        { hostname: 'localhost', port: TEST_PORT, path: '/', method: 'GET', headers: { 'x-vercel-id': incomingId } },
         200,
         '8pre. Request carrying an existing x-vercel-id'
     );
@@ -7138,7 +7143,7 @@ async function testHealthAndObservability() {
     // against the exact same logSafeError call site index.js uses).
     await makeRequest(
         {
-            hostname: 'localhost', port: 3000, path: '/', method: 'GET',
+            hostname: 'localhost', port: TEST_PORT, path: '/', method: 'GET',
             headers: { Origin: 'http://evil-not-allowed.example', Authorization: 'Bearer super-secret-canary-token' }
         },
         403,
@@ -7164,7 +7169,7 @@ async function testHealthAndObservability() {
     // Confirm the real webhook route still behaves correctly over HTTP too.
     await makeRequest(
         {
-            hostname: 'localhost', port: 3000, path: '/stripe-webhook', method: 'POST',
+            hostname: 'localhost', port: TEST_PORT, path: '/stripe-webhook', method: 'POST',
             headers: { 'Content-Type': 'application/json', 'stripe-signature': 'invalid_signature_for_test' },
             body: JSON.stringify({ canary: 'RAW_BODY_SHOULD_NEVER_BE_LOGGED_998877' })
         },
@@ -7175,7 +7180,7 @@ async function testHealthAndObservability() {
     // 12. Existing API behavior remains unchanged - representative spot check
     // (broader coverage already provided by every other section in this suite).
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/repair-requests', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/repair-requests', method: 'GET' },
         401,
         '12. Existing API behavior unchanged (GET /repair-requests still 401 without auth)'
     );
@@ -7199,7 +7204,7 @@ async function testRequestIdAndLoggingHardening() {
     // 1. Valid x-vercel-id reused (real HTTP, exercises the live middleware).
     const validId = 'iad1::abc12-1700000000000-abcdef123456';
     const validIdResult = await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/', method: 'GET', headers: { 'x-vercel-id': validId } },
+        { hostname: 'localhost', port: TEST_PORT, path: '/', method: 'GET', headers: { 'x-vercel-id': validId } },
         200,
         '1pre. Request carrying a valid x-vercel-id'
     );
@@ -7207,7 +7212,7 @@ async function testRequestIdAndLoggingHardening() {
 
     // 2. Missing x-vercel-id generates a UUID (real HTTP).
     const noIdResult = await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/', method: 'GET' },
         200,
         '2pre. Request with no x-vercel-id'
     );
@@ -7244,7 +7249,7 @@ async function testRequestIdAndLoggingHardening() {
     // rejection path is already unit-tested directly above (4b/4c).
     const REQUEST_ID_HEADER_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
     const maliciousIdResult = await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/', method: 'GET', headers: { 'x-vercel-id': 'bad id with spaces <script>alert(1)</script>' } },
+        { hostname: 'localhost', port: TEST_PORT, path: '/', method: 'GET', headers: { 'x-vercel-id': 'bad id with spaces <script>alert(1)</script>' } },
         200,
         '7pre. Request carrying a malformed/malicious x-vercel-id'
     );
@@ -7329,7 +7334,7 @@ async function testRequestIdAndLoggingHardening() {
 
     // 12. Health response remains secret-free (real HTTP, re-confirmed after hardening).
     const healthResult = await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/health', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/health', method: 'GET' },
         200,
         '12pre. GET /health after hardening'
     );
@@ -7374,7 +7379,7 @@ async function testUserRolePrivacyHardening() {
     // 1. GET /users/me/role without token returns 401 (real HTTP - genuine
     // end-to-end check of the live dev server's verifyFBToken gate).
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/users/me/role', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/users/me/role', method: 'GET' },
         401,
         '1. GET /users/me/role without token returns 401'
     );
@@ -7442,7 +7447,7 @@ async function testUserRolePrivacyHardening() {
     // 11. Old /users/:email/role route is absent - any path matching that
     // old shape now falls through to the real 404 handler.
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/users/some-other-user@example.com/role', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/users/some-other-user@example.com/role', method: 'GET' },
         404,
         '11. Old email-bearing /users/:email/role route is absent (404)'
     );
@@ -8111,7 +8116,7 @@ async function testServiceDefinitions() {
         const idB = insertB.insertedId.toString();
 
         const listResult = await makeRequest(
-            { hostname: 'localhost', port: 3000, path: '/service-definitions', method: 'GET' },
+            { hostname: 'localhost', port: TEST_PORT, path: '/service-definitions', method: 'GET' },
             200,
             '25. GET list returns active definitions'
         );
@@ -8123,7 +8128,7 @@ async function testServiceDefinitions() {
         logTest('25b. Returned list contains both freshly-inserted active definitions', listContainsBoth);
 
         const productFilterResult = await makeRequest(
-            { hostname: 'localhost', port: 3000, path: '/service-definitions?productCategorySlug=laptop-computer', method: 'GET' },
+            { hostname: 'localhost', port: TEST_PORT, path: '/service-definitions?productCategorySlug=laptop-computer', method: 'GET' },
             200,
             '26. GET list filters by product'
         );
@@ -8136,7 +8141,7 @@ async function testServiceDefinitions() {
         logTest('26b. Product filter returns only matching, includes both test rows', productFilterCorrect);
 
         const repairFilterResult = await makeRequest(
-            { hostname: 'localhost', port: 3000, path: '/service-definitions?repairCategorySlug=motherboard', method: 'GET' },
+            { hostname: 'localhost', port: TEST_PORT, path: '/service-definitions?repairCategorySlug=motherboard', method: 'GET' },
             200,
             '27. GET list filters by repair category'
         );
@@ -8149,7 +8154,7 @@ async function testServiceDefinitions() {
         logTest('27b. Repair-category filter returns only matching, excludes non-matching test row', repairFilterCorrect);
 
         const invalidFilterResult = await makeRequest(
-            { hostname: 'localhost', port: 3000, path: '/service-definitions?productCategorySlug=not-a-real-product', method: 'GET' },
+            { hostname: 'localhost', port: TEST_PORT, path: '/service-definitions?productCategorySlug=not-a-real-product', method: 'GET' },
             400,
             '28. Invalid filter returns controlled 400'
         );
@@ -8158,7 +8163,7 @@ async function testServiceDefinitions() {
         logTest('28b. Invalid filter response has controlled code', invalidFilterParsed.code === 'INVALID_PRODUCT_CATEGORY');
 
         const byIdResult = await makeRequest(
-            { hostname: 'localhost', port: 3000, path: `/service-definitions/${idA}`, method: 'GET' },
+            { hostname: 'localhost', port: TEST_PORT, path: `/service-definitions/${idA}`, method: 'GET' },
             200,
             '29. GET by ID succeeds'
         );
@@ -8174,14 +8179,14 @@ async function testServiceDefinitions() {
         );
 
         await makeRequest(
-            { hostname: 'localhost', port: 3000, path: '/service-definitions/not-a-valid-object-id', method: 'GET' },
+            { hostname: 'localhost', port: TEST_PORT, path: '/service-definitions/not-a-valid-object-id', method: 'GET' },
             400,
             '30. Invalid ID returns 400'
         );
 
         const nonexistentId = new ObjectId().toString();
         await makeRequest(
-            { hostname: 'localhost', port: 3000, path: `/service-definitions/${nonexistentId}`, method: 'GET' },
+            { hostname: 'localhost', port: TEST_PORT, path: `/service-definitions/${nonexistentId}`, method: 'GET' },
             404,
             '31. Missing ID returns 404'
         );
@@ -11253,7 +11258,7 @@ async function testBdtPricingMigration() {
         logTest('39. No Stripe call occurs for a V2 payment attempt', capturedStripeSessionParams.length === stripeCallsBefore);
 
         // ================= Public API returns BDT (40-42, Phase J) =================
-        const listResult = await makeRequest({ hostname: 'localhost', port: 3000, path: '/service-definitions', method: 'GET' }, 200, '40. GET /service-definitions responds 200');
+        const listResult = await makeRequest({ hostname: 'localhost', port: TEST_PORT, path: '/service-definitions', method: 'GET' }, 200, '40. GET /service-definitions responds 200');
         let listParsed = { serviceDefinitions: [] };
         try { listParsed = JSON.parse(listResult.data); } catch { /* asserted below */ }
         const canonicalLabels = new Set(SERVICE_DEFINITION_SEED.map((r) => r.label));
@@ -11715,7 +11720,7 @@ async function testQuoteWorkflow() {
         async function submittedParcel() { const p = await createRepairRequest(); await submit(p.id, techEmail, validQuote()); return p; }
 
         // ================= Submit authorization (1-10) =================
-        await makeRequest({ hostname: 'localhost', port: 3000, path: '/repair-requests/507f1f77bcf86cd799439011/quote', method: 'POST' }, 401, '1. Unauthenticated quote submit rejected (401)');
+        await makeRequest({ hostname: 'localhost', port: TEST_PORT, path: '/repair-requests/507f1f77bcf86cd799439011/quote', method: 'POST' }, 401, '1. Unauthenticated quote submit rejected (401)');
         {
             const p = await createRepairRequest();
             logTest('2. Customer cannot submit quote', (await submit(p.id, ownerEmail, validQuote())).body.code === 'TECHNICIAN_ROLE_REQUIRED');
@@ -12332,7 +12337,7 @@ async function testRepairWorkflow() {
         async function completeWithEvidence(pid) { const eid = await uploadEvidence(pid); return complete(pid, techEmail, { summary: validSummary, evidenceImageIds: [eid] }); }
 
         // ================= Start (1-9) =================
-        await makeRequest({ hostname: 'localhost', port: 3000, path: '/repair-requests/507f1f77bcf86cd799439011/repair/start', method: 'POST' }, 401, '1. Unauthenticated start rejected (401)');
+        await makeRequest({ hostname: 'localhost', port: TEST_PORT, path: '/repair-requests/507f1f77bcf86cd799439011/repair/start', method: 'POST' }, 401, '1. Unauthenticated start rejected (401)');
         {
             const p = await createRepairRequest();
             logTest('2. Customer cannot start repair', (await start(p.id, ownerEmail)).body.code === 'TECHNICIAN_ROLE_REQUIRED');
@@ -12575,7 +12580,7 @@ async function testRepairWorkflow() {
             const rrController = new RepairRequestController(models, collections, fakeStorage);
             const confirmReceipt = (pid, email) => { const res = fakeRes(); return rrController.confirmReceipt({ params: { id: pid }, body: {}, decoded_email: email }, res).then(() => res); };
 
-            await makeRequest({ hostname: 'localhost', port: 3000, path: '/repair-requests/000000000000000000000000/confirm-receipt', method: 'POST' }, 401, '65. Unauthenticated receipt confirmation rejected (401)');
+            await makeRequest({ hostname: 'localhost', port: TEST_PORT, path: '/repair-requests/000000000000000000000000/confirm-receipt', method: 'POST' }, 401, '65. Unauthenticated receipt confirmation rejected (401)');
 
             {
                 // Completion initializes the confirmation object to pending and
@@ -12750,11 +12755,11 @@ async function testSafeRepairDeletion() {
 
     // --- 1, 2. Route auth: no token / invalid token are rejected at the edge. ---
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/repair-requests/000000000000000000000000', method: 'DELETE', headers: { 'Content-Type': 'application/json' } },
+        { hostname: 'localhost', port: TEST_PORT, path: '/repair-requests/000000000000000000000000', method: 'DELETE', headers: { 'Content-Type': 'application/json' } },
         401, 'DELETE /repair-requests/:id (no auth)'
     );
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/repair-requests/000000000000000000000000', method: 'DELETE', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer invalid_token_12345' } },
+        { hostname: 'localhost', port: TEST_PORT, path: '/repair-requests/000000000000000000000000', method: 'DELETE', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer invalid_token_12345' } },
         401, 'DELETE /repair-requests/:id (invalid token)'
     );
 
@@ -13164,11 +13169,61 @@ async function seedTestBaseline() {
     await runSeed({ model, seedRows: SERVICE_DEFINITION_SEED, dryRun: false });
 }
 
+// Starts the real API as a SEPARATE child process (as the suite has always
+// assumed - several sections reset the require-cache and must not share module
+// state with the server) on an OS-assigned free port (PORT=0), and returns once
+// it reports the port it bound. The child is pinned to NODE_ENV=test and this
+// run's own test database; config/databaseName.js then refuses anything whose
+// name lacks "test", and the check below refuses the dev/production names too.
+// Nothing else on the machine (e.g. a normal `npm run dev` on 3000) is touched.
+async function startTestServer() {
+    const { spawn } = require('child_process');
+    const { resolveDatabaseName, DEV_DB_NAME } = require('./config/databaseName');
+    const dbName = resolveDatabaseName();
+    const lower = dbName.toLowerCase();
+    if (!lower.includes('test') || dbName === DEV_DB_NAME || lower.includes('production')) {
+        throw new Error(`Refusing to start the test API server against "${dbName}" - it must be an isolated test database.`);
+    }
+    const child = spawn(process.execPath, ['index.js'], {
+        cwd: __dirname,
+        env: { ...process.env, NODE_ENV: 'test', MONGO_DB_NAME: dbName, PORT: '0', AI_SUPPORT_ENABLED: 'false' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    process.on('exit', () => { if (child.exitCode === null) child.kill(); });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-4000); });
+    const port = await new Promise((resolve, reject) => {
+        let stdout = '';
+        const timer = setTimeout(() => reject(new Error(`test API server did not start within 30s: ${stderr.trim()}`)), 30000);
+        child.stdout.on('data', (chunk) => {
+            stdout += chunk;
+            const match = stdout.match(/Server listening on port (\d+)/);
+            if (match) { clearTimeout(timer); resolve(Number(match[1])); }
+        });
+        child.on('exit', (code) => { clearTimeout(timer); reject(new Error(`test API server exited early (code ${code}): ${stderr.trim()}`)); });
+    });
+    // Keep draining output so the child never blocks on a full pipe.
+    child.stdout.resume();
+    TEST_PORT = port;
+    console.log(`Test API server (child process) listening on port ${TEST_PORT} (database "${dbName}")`);
+    return child;
+}
+
+async function stopTestServer(child) {
+    if (child.exitCode !== null) return;
+    await new Promise((resolve) => {
+        child.once('exit', resolve);
+        child.kill();
+    });
+}
+
 async function runAllTests() {
     console.log('='.repeat(60));
     console.log('Starting Comprehensive API Tests');
     console.log('='.repeat(60));
     console.log('');
+
+    const testServer = await startTestServer();
 
     // Phase 8.7B: create the isolated test database's baseline before any test.
     await seedTestBaseline();
@@ -13178,7 +13233,7 @@ async function runAllTests() {
     console.log('1. Testing Root Endpoint');
     console.log('-'.repeat(60));
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/', method: 'GET' },
         200,
         'Root endpoint (/)'
     );
@@ -13199,7 +13254,7 @@ async function runAllTests() {
 
     for (const endpoint of protectedEndpoints) {
         await makeRequest(
-            { hostname: 'localhost', port: 3000, path: endpoint.path, method: 'GET' },
+            { hostname: 'localhost', port: TEST_PORT, path: endpoint.path, method: 'GET' },
             401,
             endpoint.name + ' (no auth)'
         );
@@ -13213,7 +13268,7 @@ async function runAllTests() {
         await makeRequest(
             {
                 hostname: 'localhost',
-                port: 3000,
+                port: TEST_PORT,
                 path: endpoint.path,
                 method: 'GET',
                 headers: { 'Authorization': 'Bearer invalid_token_12345' }
@@ -13228,12 +13283,12 @@ async function runAllTests() {
     console.log('4. Testing User-Specific Endpoints');
     console.log('-'.repeat(60));
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/users/507f1f77bcf86cd799439011', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/users/507f1f77bcf86cd799439011', method: 'GET' },
         401,
         'GET /users/:id (no auth)'
     );
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/users/me/role', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/users/me/role', method: 'GET' },
         401,
         'GET /users/me/role (no auth)'
     );
@@ -13243,19 +13298,19 @@ async function runAllTests() {
     console.log('5. Testing Parcel-Specific Endpoints');
     console.log('-'.repeat(60));
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/repair-requests/507f1f77bcf86cd799439011', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/repair-requests/507f1f77bcf86cd799439011', method: 'GET' },
         401,
         'GET /repair-requests/:id (no auth)'
     );
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/repair-requests/technician', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/repair-requests/technician', method: 'GET' },
         401,
         'GET /repair-requests/technician (no auth)'
     );
     await makeRequest(
         {
             hostname: 'localhost',
-            port: 3000,
+            port: TEST_PORT,
             path: '/repair-requests',
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -13270,7 +13325,7 @@ async function runAllTests() {
     console.log('6. Testing Tracking Endpoints');
     console.log('-'.repeat(60));
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/trackings/PRCL-20250101-ABC123/logs', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/trackings/PRCL-20250101-ABC123/logs', method: 'GET' },
         401,
         'GET /trackings/:trackingId/logs (no auth)'
     );
@@ -13283,7 +13338,7 @@ async function runAllTests() {
     await makeRequest(
         {
             hostname: 'localhost',
-            port: 3000,
+            port: TEST_PORT,
             path: '/payment-checkout-session',
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -13298,7 +13353,7 @@ async function runAllTests() {
     console.log('8. Testing Route Ordering');
     console.log('-'.repeat(60));
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/repair-requests/123/status', method: 'PATCH' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/repair-requests/123/status', method: 'PATCH' },
         401,
         'PATCH /repair-requests/:id/status (should match specific route, not generic)'
     );
@@ -13311,7 +13366,7 @@ async function runAllTests() {
     console.log('9. Testing Unknown Route Handling');
     console.log('-'.repeat(60));
     await makeRequest(
-        { hostname: 'localhost', port: 3000, path: '/this-route-does-not-exist', method: 'GET' },
+        { hostname: 'localhost', port: TEST_PORT, path: '/this-route-does-not-exist', method: 'GET' },
         404,
         'GET /this-route-does-not-exist (unknown route)'
     );
@@ -13325,7 +13380,7 @@ async function runAllTests() {
     await makeRequest(
         {
             hostname: 'localhost',
-            port: 3000,
+            port: TEST_PORT,
             path: '/',
             method: 'GET',
             headers: { Origin: 'http://localhost:5173' }
@@ -13336,7 +13391,7 @@ async function runAllTests() {
     await makeRequest(
         {
             hostname: 'localhost',
-            port: 3000,
+            port: TEST_PORT,
             path: '/',
             method: 'GET',
             headers: { Origin: 'http://evil-not-allowed.example' }
@@ -13399,10 +13454,12 @@ async function runAllTests() {
     await runSupportFoundationTests({ logTest });
     await runGeminiSupportProviderTests({ logTest });
     await runFeedbackTests({ logTest });
+    await runProductionMigrationTests({ logTest });
 
-    // Both database-backed sections above share one cached Mongo connection
-    // (config/database.js's connectDatabase()); close it once, here, now that
-    // every test needing it has finished.
+    // Stop the harness's own API server, then the shared Mongo connection
+    // (config/database.js's connectDatabase()), now that every test needing
+    // them has finished.
+    await stopTestServer(testServer);
     const { client } = require('./config/database');
     await client.close();
 
@@ -13462,7 +13519,7 @@ async function testCP4RouteContract() {
     ];
     for (const r of oldRoutes) {
         await makeRequest(
-            { hostname: 'localhost', port: 3000, path: r.path, method: r.method },
+            { hostname: 'localhost', port: TEST_PORT, path: r.path, method: r.method },
             404,
             `CP4 old route unmounted: ${r.method} ${r.path} -> 404`
         );
@@ -13494,7 +13551,7 @@ async function testCP4RouteContract() {
     ];
     for (const r of canonicalAuthGated) {
         await makeRequest(
-            { hostname: 'localhost', port: 3000, path: r.path, method: r.method },
+            { hostname: 'localhost', port: TEST_PORT, path: r.path, method: r.method },
             401,
             `CP4 canonical route mounted (auth-gated): ${r.method} ${r.path} -> 401`
         );
@@ -13503,7 +13560,7 @@ async function testCP4RouteContract() {
     // never 404.
     await makeRequest(
         {
-            hostname: 'localhost', port: 3000, path: '/technicians', method: 'POST',
+            hostname: 'localhost', port: TEST_PORT, path: '/technicians', method: 'POST',
             headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
         },
         400,

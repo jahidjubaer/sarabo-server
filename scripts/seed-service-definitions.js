@@ -19,11 +19,18 @@
 // the standard Node.js dual CLI/library pattern.
 //
 // Safety design (belt-and-suspenders, two independent checks, see
-// isSafeToSeed): refuses to run if isProductionEnvironment() is true (the
-// same authoritative check the rest of the codebase already trusts - see
-// config/databaseName.js), AND independently refuses if the resolved
-// database name contains "production", since no fixed production database
-// name exists anywhere in this codebase.
+// isSafeToSeed): a production target - isProductionEnvironment() is true, OR
+// the resolved database name contains "production" - is refused by default.
+// It is allowed only through one narrow, explicit path: BOTH
+// ALLOW_PROD_SERVICE_SEED=true AND --expect-db=<exact resolved database name>
+// (scripts/lib/productionGuard.js). Writing still needs --confirm-seed, and
+// the seed only ever inserts missing standard rows - an existing row that
+// differs is reported as a conflict and never overwritten, so a production
+// customisation is always preserved.
+//
+// Production usage (see docs/production-data-migration.md):
+//   ALLOW_PROD_SERVICE_SEED=true node scripts/seed-service-definitions.js --expect-db=<name>                 (dry-run)
+//   ALLOW_PROD_SERVICE_SEED=true node scripts/seed-service-definitions.js --expect-db=<name> --confirm-seed  (write)
 //
 // Never prints MONGO_URI or any other secret - only the resolved,
 // already-validated database name and computed counts/labels ever reach
@@ -31,6 +38,9 @@
 // the serviceDefinitions collection.
 
 const { ServiceDefinitionModel, validateServiceDefinitionInput, buildDocumentFromInput, WRITABLE_TOP_LEVEL_FIELDS } = require('../models/ServiceDefinition');
+const { evaluateProductionGuard, readExpectedDbArg } = require('./lib/productionGuard');
+
+const PRODUCTION_OVERRIDE_VAR = 'ALLOW_PROD_SERVICE_SEED';
 
 function deepEqualPlain(a, b) {
     if (a === b) return true;
@@ -50,15 +60,18 @@ function rowMatchesExisting(existingDoc, desiredRow) {
 
 // Pure decision function - takes explicit values rather than reading
 // process.env itself, so it is directly unit-testable without mutating real
-// environment state mid-process.
-function isSafeToSeed({ isProduction, resolvedDbName }) {
-    if (isProduction) {
-        return { safe: false, reason: 'production environment (isProductionEnvironment() === true)' };
-    }
-    if (typeof resolvedDbName === 'string' && resolvedDbName.toLowerCase().includes('production')) {
-        return { safe: false, reason: `resolved database name "${resolvedDbName}" looks like a production database` };
-    }
-    return { safe: true, reason: null };
+// environment state mid-process. Called with only { isProduction,
+// resolvedDbName } (as before) a production target is always refused; the
+// two extra values open the one explicit production path.
+function isSafeToSeed({ isProduction, resolvedDbName, expectedDbName = null, productionOverride = undefined }) {
+    const guard = evaluateProductionGuard({
+        isProduction,
+        resolvedDbName,
+        expectedDbName,
+        overrideVarName: PRODUCTION_OVERRIDE_VAR,
+        overrideValue: productionOverride,
+    });
+    return { safe: guard.safe, reason: guard.reason, productionTarget: guard.productionTarget };
 }
 
 // Processes `seedRows` against `model` (a ServiceDefinitionModel instance).
@@ -112,26 +125,33 @@ if (require.main === module) {
     const { isProductionEnvironment } = require('../config/siteOrigin');
     const { resolveDatabaseName } = require('../config/databaseName');
 
+    const args = process.argv.slice(2);
     const resolvedDbName = resolveDatabaseName();
-    const safety = isSafeToSeed({ isProduction: isProductionEnvironment(), resolvedDbName });
+    const safety = isSafeToSeed({
+        isProduction: isProductionEnvironment(),
+        resolvedDbName,
+        expectedDbName: readExpectedDbArg(args),
+        productionOverride: process.env[PRODUCTION_OVERRIDE_VAR],
+    });
     if (!safety.safe) {
         console.error(`Refusing to run: ${safety.reason}.`);
         process.exit(1);
     }
 
-    const { connectDatabase, collections, client } = require('../config/database');
+    const { collections, client } = require('../config/database');
     const { SERVICE_DEFINITION_SEED } = require('../data/serviceDefinitionSeed');
 
-    const args = process.argv.slice(2);
     const confirmSeed = args.includes('--confirm-seed');
     const explicitDryRun = args.includes('--dry-run');
     const isDryRun = explicitDryRun || !confirmSeed;
 
     (async () => {
-        console.log(`Service-definition seed - database: "${resolvedDbName}", mode: ${isDryRun ? 'DRY RUN (no writes)' : 'WRITE (--confirm-seed)'}`);
+        console.log(`Service-definition seed - database: "${resolvedDbName}"${safety.productionTarget ? ' (PRODUCTION)' : ''}, mode: ${isDryRun ? 'DRY RUN (no writes)' : 'WRITE (--confirm-seed)'}`);
         console.log('');
 
-        await connectDatabase();
+        // A plain connect, not connectDatabase(): that one also builds the
+        // server's indexes on first use, and a dry run must write nothing.
+        await client.connect();
         const model = new ServiceDefinitionModel(collections.serviceDefinitions);
         const result = await runSeed({ model, seedRows: SERVICE_DEFINITION_SEED, dryRun: isDryRun });
 
@@ -165,4 +185,4 @@ if (require.main === module) {
         });
 }
 
-module.exports = { runSeed, isSafeToSeed, rowMatchesExisting, deepEqualPlain };
+module.exports = { runSeed, isSafeToSeed, rowMatchesExisting, deepEqualPlain, PRODUCTION_OVERRIDE_VAR };

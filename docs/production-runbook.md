@@ -28,6 +28,19 @@ Verify presence and Production-only scope with `vercel env ls production` /
 `vercel env ls preview` / `vercel env ls development` - these list names and
 scopes only, never values.
 
+## Release data preparation (pre-rename → Sarabo schema)
+
+Before the first deploy of the renamed server, production data must be copied
+into the canonical collections and the service catalogue seeded. Exact,
+dry-run-first commands, the full old → new mapping and the seed/BDT decision
+table are in `docs/production-data-migration.md`.
+
+The three operator-only overrides - `ALLOW_PROD_SCHEMA_MIGRATION`,
+`ALLOW_PROD_SERVICE_SEED`, `ALLOW_PROD_BDT_MIGRATION` - are set on the
+command line of a single script run, together with `--expect-db=<name>`.
+**Never add them to Vercel**: the server never reads them, and a standing
+value would only weaken the next accidental script run.
+
 ## Database
 
 - Production database: `sarabo_production` (same Atlas cluster as development)

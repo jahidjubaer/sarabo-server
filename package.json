@@ -7,6 +7,8 @@
     "test": "node test-all.js",
     "test:support": "node test-support.js",
     "test:feedback": "node test-feedback.js",
+    "test:migrations": "node test-migrations.js",
+    "migrate:legacy-schema": "node scripts/migrate-legacy-schema.js",
     "start": "node index.js",
     "dev": "node index.js",
     "seed:service-definitions": "node scripts/seed-service-definitions.js",

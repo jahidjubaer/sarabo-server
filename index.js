@@ -109,8 +109,10 @@ supportRoutes(app, controllers);
 // Start server (only for local/traditional hosting - Vercel invokes the
 // exported app directly per request and does not use a listening port)
 if (!isServerless) {
-    app.listen(port, () => {
-        console.log(`Server listening on port ${port}`)
+    // Reports the port actually bound, so PORT=0 (an OS-assigned free port -
+    // the test harness's own server uses that) is visible to the caller.
+    const server = app.listen(port, () => {
+        console.log(`Server listening on port ${server.address().port}`)
     });
 }
 
