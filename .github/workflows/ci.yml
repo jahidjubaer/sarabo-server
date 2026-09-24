@@ -31,11 +31,11 @@ jobs:
       # Required at load time; the dev client origin.
       SITE_DOMAIN: http://localhost:5173
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # the whitespace check diffs against the PR base branch
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24 # matches the Vercel project (Node.js 24.x)
           cache: npm
