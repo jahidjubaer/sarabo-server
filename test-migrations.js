@@ -5,6 +5,8 @@ process.env.NODE_ENV = process.env.NODE_ENV || 'test';
 if (process.env.NODE_ENV !== 'test') throw new Error('Migration tests require NODE_ENV=test');
 process.env.MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'sarabo-test-db';
 process.env.AI_SUPPORT_ENABLED = 'false';
+// Tests never send real email (they use a fake transport where needed).
+process.env.EMAIL_ENABLED = 'false';
 require('dotenv').config();
 const { client } = require('./config/database');
 const { runProductionMigrationTests } = require('./tests/productionMigrationTests');

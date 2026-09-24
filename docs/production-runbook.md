@@ -85,6 +85,27 @@ from now. They can change it until the device is picked up.
 - Requests created before this release have no pickup time and show
   "Not scheduled"; the customer can choose one from the request page.
 
+## Email updates
+
+Free, sent through a Gmail account (about 500 emails a day). Three emails:
+request received (and again when the pickup time changes), a pickup reminder
+the evening before, and a new job offer to the technician. Email never blocks
+or fails a request - a failed send is logged and recorded in `email_log`
+(records delete themselves after 90 days).
+
+Turning it on (Vercel, Production):
+1. On the Gmail account: Google Account -> Security -> turn on 2-Step
+   Verification -> App passwords -> create one for "Sarabo".
+2. Set `EMAIL_ENABLED=true`, `GMAIL_USER=<the gmail address>`,
+   `GMAIL_APP_PASSWORD=<the 16-letter app password>`; optionally
+   `EMAIL_FROM_NAME` (default `Sarabo`). `SITE_DOMAIN` gives the links.
+3. Set `CRON_SECRET` to a long random string. Vercel Cron then calls
+   `GET /cron/pickup-reminders` daily at 12:00 UTC (18:00 in Dhaka, see
+   `vercel.json`) with it; without `CRON_SECRET` the job refuses to run.
+
+Check it: `email_log` shows each email with status `sent` or `failed` and a
+short reason (e.g. `EAUTH` = wrong app password). Tests never send email.
+
 ## Technician matching
 
 A technician can only be assigned to a request in **their own region**

@@ -15,6 +15,9 @@ const WalletController = require('./walletController');
 const SupportController = require('./supportController');
 const FeedbackController = require('./feedbackController');
 const PickupSlotController = require('./pickupSlotController');
+const PickupReminderController = require('./pickupReminderController');
+const { loadEmailConfig } = require('../config/email');
+const { createEmailService } = require('../services/emailService');
 const { connectDatabase } = require('../config/database');
 const { loadAiSupportConfig } = require('../config/aiSupport');
 const { createAiSupportService } = require('../services/aiSupportService');
@@ -39,9 +42,12 @@ function initializeControllers(models, collections, dependencies = {}) {
         connectDatabase: dependencies.connectDatabase || connectDatabase,
     });
 
+    // One email service for the whole app (a no-op unless EMAIL_ENABLED=true).
+    const emailService = dependencies.emailService || createEmailService({ config: loadEmailConfig(), collections });
+
     return {
         user: new UserController(models, collections),
-        repairRequest: new RepairRequestController(models, collections),
+        repairRequest: new RepairRequestController(models, collections, undefined, { emailService }),
         technician: new TechnicianController(models, collections),
         payment: new PaymentController(models, collections),
         tracking: new TrackingController(models, collections),
@@ -55,7 +61,8 @@ function initializeControllers(models, collections, dependencies = {}) {
         repair: new RepairController(models, collections),
         wallet: new WalletController(models, collections),
         feedback: new FeedbackController(models, collections),
-        pickupSlot: new PickupSlotController(models, collections),
+        pickupSlot: new PickupSlotController(models, collections, { emailService }),
+        pickupReminder: new PickupReminderController(models, collections, { emailService }),
         support: new SupportController({
             aiSupportService,
             supportKnowledgeService,

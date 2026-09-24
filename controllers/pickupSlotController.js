@@ -3,7 +3,8 @@ const {
     TIMEZONE, SLOT_HOLDING_STATUSES, resolveSlotCapacity, validatePickupSlotInput, buildSlotCalendar,
 } = require('../utils/pickupSlots');
 const { isV2RepairRequest } = require('../utils/repairRequestSchema');
-const { logTracking } = require('../middleware/logging');
+const { logTrackingSafely } = require('../middleware/logging');
+const { createDisabledEmailService } = require('../services/emailService');
 
 // Region names come from a fixed list, but compare them case-insensitively
 // anyway so "dhaka" and "Dhaka" can never be counted as two regions.
@@ -20,8 +21,9 @@ function normalize(value) {
 // the last place in the same second can both succeed - an occasional
 // one-over booking is acceptable here and an admin can reschedule it.
 class PickupSlotController {
-    constructor(models, collections, { now = () => new Date(), env = process.env } = {}) {
+    constructor(models, collections, { now = () => new Date(), env = process.env, emailService } = {}) {
         this.collections = collections;
+        this.emailService = emailService || createDisabledEmailService();
         this.now = now;
         this.capacity = resolveSlotCapacity(env);
     }
@@ -104,14 +106,16 @@ class PickupSlotController {
                 return res.status(check.status).send({ message: check.message, code: check.code });
             }
 
+            const changedAt = new Date();
             const result = await this.collections.repairRequests.updateOne(
                 { _id, senderEmail: request.senderEmail, deliveryStatus: { $in: SLOT_HOLDING_STATUSES } },
-                { $set: { pickupSlot: check.pickupSlot, updatedAt: new Date() } }
+                { $set: { pickupSlot: check.pickupSlot, updatedAt: changedAt } }
             );
             if (result.matchedCount === 0) {
                 return res.status(409).send({ message: 'the pickup time can no longer be changed', code: 'PICKUP_NOT_RESCHEDULABLE' });
             }
-            await logTracking(this.collections.trackingEvents, request.trackingId, 'pickup_rescheduled');
+            await logTrackingSafely(this.collections.trackingEvents, request.trackingId, 'pickup_rescheduled');
+            await this.emailService.sendPickupChanged({ ...request, pickupSlot: check.pickupSlot }, _id.toString(), changedAt);
             res.send({ pickupSlot: check.pickupSlot });
         } catch (error) {
             res.status(500).send({ message: 'Error changing the pickup time', code: 'INTERNAL_ERROR' });

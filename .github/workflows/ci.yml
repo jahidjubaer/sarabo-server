@@ -24,6 +24,7 @@ jobs:
       MONGO_DB_NAME: sarabo-test-db
       NODE_ENV: test
       AI_SUPPORT_ENABLED: 'false'
+      EMAIL_ENABLED: 'false'
       # Placeholders, not secrets: the Stripe library needs a non-empty key
       # at load time, and every Stripe call in the tests is faked.
       STRIPE_SECRET: sk_test_ci_placeholder

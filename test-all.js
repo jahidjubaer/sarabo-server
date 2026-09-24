@@ -22,6 +22,8 @@ process.env.MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'sarabo-test-db';
 // Automated tests use only injected fake/mocked support providers and must
 // never inherit a local shell setting that enables paid external AI traffic.
 process.env.AI_SUPPORT_ENABLED = 'false';
+// Tests never send real email (they use a fake transport where needed).
+process.env.EMAIL_ENABLED = 'false';
 
 const http = require('http');
 require('dotenv').config();
@@ -41,6 +43,7 @@ const { runProductionMigrationTests } = require('./tests/productionMigrationTest
 const { runTechnicianAvailabilityTests } = require('./tests/technicianAvailabilityTests');
 const { runAdminServiceDefinitionTests } = require('./tests/adminServiceDefinitionTests');
 const { runPickupSlotTests } = require('./tests/pickupSlotTests');
+const { runEmailTests } = require('./tests/emailTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -13232,7 +13235,7 @@ async function startTestServer() {
     }
     const child = spawn(process.execPath, ['index.js'], {
         cwd: __dirname,
-        env: { ...process.env, NODE_ENV: 'test', MONGO_DB_NAME: dbName, PORT: '0', AI_SUPPORT_ENABLED: 'false' },
+        env: { ...process.env, NODE_ENV: 'test', MONGO_DB_NAME: dbName, PORT: '0', AI_SUPPORT_ENABLED: 'false', EMAIL_ENABLED: 'false' },
         stdio: ['ignore', 'pipe', 'pipe'],
     });
     process.on('exit', () => { if (child.exitCode === null) child.kill(); });
@@ -13504,6 +13507,7 @@ async function runAllTests() {
     await runTechnicianAvailabilityTests({ logTest });
     await runAdminServiceDefinitionTests({ logTest });
     await runPickupSlotTests({ logTest });
+    await runEmailTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing

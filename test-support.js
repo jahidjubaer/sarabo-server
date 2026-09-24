@@ -1,5 +1,7 @@
 // Focused support tests must never inherit a shell setting that enables paid AI.
 process.env.AI_SUPPORT_ENABLED = 'false';
+// Tests never send real email (they use a fake transport where needed).
+process.env.EMAIL_ENABLED = 'false';
 // The support rate limiter keeps its counters in MongoDB, so this runner is
 // pinned to the isolated test database like test-feedback.js.
 process.env.NODE_ENV = process.env.NODE_ENV || 'test';

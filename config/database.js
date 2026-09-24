@@ -46,6 +46,7 @@ const collections = {
     technicianReports: db.collection("technician_reports"),
     // Shared AI-support rate-limit counters (middleware/mongoRateLimitStore.js).
     supportRateLimits: db.collection("support_rate_limits"),
+    emailLog: db.collection("email_log"),
 };
 
 let connectionPromise = null;
@@ -274,6 +275,12 @@ async function connectDatabase() {
                 await collections.repairRequests.createIndex(
                     { technicianEmail: 1, 'technicianSettlement.status': 1 },
                     { name: 'repairRequests_technicianEmail_settlementStatus' }
+                );
+                // Sent-email records (services/emailService.js) delete themselves
+                // after 90 days.
+                await collections.emailLog.createIndex(
+                    { expiresAt: 1 },
+                    { name: 'emailLog_expiresAt_ttl', expireAfterSeconds: 0 }
                 );
                 // Pickup-slot capacity counts (controllers/pickupSlotController.js).
                 // Same case-insensitive collation as the query, or MongoDB

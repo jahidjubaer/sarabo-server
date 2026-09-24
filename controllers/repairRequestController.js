@@ -26,6 +26,7 @@ const {
 } = require('../utils/repairRequestV2');
 const { getPricingEstimate } = require('../services/pricingService');
 const PickupSlotController = require('./pickupSlotController');
+const { createDisabledEmailService } = require('../services/emailService');
 const { SETTLEMENT_PENDING, SETTLEMENT_AVAILABLE, buildSettlementView } = require('../utils/settlement');
 const { isRepairRequestPaid, buildPaymentStateMatch } = require('../utils/paymentState');
 const {
@@ -93,7 +94,7 @@ function technicianEarningView(rawRepairRequest) {
 }
 
 class RepairRequestController {
-    constructor(models, collections, storageService = damageStorageService) {
+    constructor(models, collections, storageService = damageStorageService, { emailService } = {}) {
         this.RepairRequest = models.RepairRequest;
         this.Technician = models.Technician;
         this.User = models.User;
@@ -107,6 +108,8 @@ class RepairRequestController {
         this.notifications = createNotificationService(models);
         // Slot rules and per-region capacity, shared with the pickup-slot routes.
         this.pickupSlots = new PickupSlotController(models, collections);
+        // Customer and technician emails (a no-op unless configured).
+        this.emails = emailService || createDisabledEmailService();
         // Generic storage adapter (services/damageStorageService.js is generic
         // over any storageKey) - used by safe deletion to purge a request's
         // damage/evidence objects. Injectable so tests exercise the cleanup
@@ -523,6 +526,9 @@ class RepairRequestController {
             // already committed, and a notification/lookup failure must not
             // turn a successful creation into an error for the customer.
             await this.notifyAdminsOfNewRepairRequest(document, result.insertedId);
+            // Confirmation email to the customer, with the pickup time. Never
+            // fails the request (see services/emailService.js).
+            await this.emails.sendRequestReceived(document, result.insertedId.toString());
 
             res.send(result);
         } catch (error) {
@@ -1363,6 +1369,10 @@ class RepairRequestController {
                 }
                 return res.status(409).send({ message: 'this request can no longer be assigned', code: 'ASSIGNMENT_NOT_ALLOWED' });
             }
+
+            // Only after the offer is committed: a rolled-back assignment
+            // never emails anyone. Never fails the assignment.
+            await this.emails.sendJobOffer(repairRequest, requestId, technician, new Date());
 
             res.send({ acknowledged: true, matchedCount: 1, modifiedCount: 1, deliveryStatus: isV2RepairRequest(repairRequest) ? ASSIGNMENT_PENDING : 'driver_assigned' });
         } catch (error) {
