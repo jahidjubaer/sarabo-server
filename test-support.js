@@ -2,6 +2,8 @@
 process.env.AI_SUPPORT_ENABLED = 'false';
 // Tests never send real email (they use a fake transport where needed).
 process.env.EMAIL_ENABLED = 'false';
+// Email verification is always enforced in tests, whatever a local .env says.
+process.env.SKIP_EMAIL_VERIFICATION = 'false';
 // The support rate limiter keeps its counters in MongoDB, so this runner is
 // pinned to the isolated test database like test-feedback.js.
 process.env.NODE_ENV = process.env.NODE_ENV || 'test';

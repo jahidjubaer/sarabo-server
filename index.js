@@ -28,6 +28,7 @@ const walletRoutes = require('./routes/wallet');
 const supportRoutes = require('./routes/support');
 const feedbackRoutes = require('./routes/feedback');
 const pickupSlotRoutes = require('./routes/pickupSlots');
+const { isEmailVerificationSkipped } = require('./middleware/auth');
 
 const app = express();
 // Vercel's edge network is the sole reverse proxy in front of this function,
@@ -115,6 +116,9 @@ if (!isServerless) {
     // the test harness's own server uses that) is visible to the caller.
     const server = app.listen(port, () => {
         console.log(`Server listening on port ${server.address().port}`)
+        if (isEmailVerificationSkipped()) {
+            console.warn('WARNING: email verification is OFF (SKIP_EMAIL_VERIFICATION=true). Local development only.');
+        }
     });
 }
 

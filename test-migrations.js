@@ -7,6 +7,8 @@ process.env.MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'sarabo-test-db';
 process.env.AI_SUPPORT_ENABLED = 'false';
 // Tests never send real email (they use a fake transport where needed).
 process.env.EMAIL_ENABLED = 'false';
+// Email verification is always enforced in tests, whatever a local .env says.
+process.env.SKIP_EMAIL_VERIFICATION = 'false';
 require('dotenv').config();
 const { client } = require('./config/database');
 const { runProductionMigrationTests } = require('./tests/productionMigrationTests');

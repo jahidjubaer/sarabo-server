@@ -24,6 +24,8 @@ process.env.MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'sarabo-test-db';
 process.env.AI_SUPPORT_ENABLED = 'false';
 // Tests never send real email (they use a fake transport where needed).
 process.env.EMAIL_ENABLED = 'false';
+// Email verification is always enforced in tests, whatever a local .env says.
+process.env.SKIP_EMAIL_VERIFICATION = 'false';
 
 const http = require('http');
 require('dotenv').config();
@@ -44,6 +46,7 @@ const { runTechnicianAvailabilityTests } = require('./tests/technicianAvailabili
 const { runAdminServiceDefinitionTests } = require('./tests/adminServiceDefinitionTests');
 const { runPickupSlotTests } = require('./tests/pickupSlotTests');
 const { runEmailTests } = require('./tests/emailTests');
+const { runSeedDevPeopleTests } = require('./tests/seedDevPeopleTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -13235,7 +13238,7 @@ async function startTestServer() {
     }
     const child = spawn(process.execPath, ['index.js'], {
         cwd: __dirname,
-        env: { ...process.env, NODE_ENV: 'test', MONGO_DB_NAME: dbName, PORT: '0', AI_SUPPORT_ENABLED: 'false', EMAIL_ENABLED: 'false' },
+        env: { ...process.env, NODE_ENV: 'test', MONGO_DB_NAME: dbName, PORT: '0', AI_SUPPORT_ENABLED: 'false', EMAIL_ENABLED: 'false', SKIP_EMAIL_VERIFICATION: 'false' },
         stdio: ['ignore', 'pipe', 'pipe'],
     });
     process.on('exit', () => { if (child.exitCode === null) child.kill(); });
@@ -13508,6 +13511,7 @@ async function runAllTests() {
     await runAdminServiceDefinitionTests({ logTest });
     await runPickupSlotTests({ logTest });
     await runEmailTests({ logTest });
+    await runSeedDevPeopleTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing
@@ -14608,7 +14612,7 @@ async function testTechnicianAssignmentDecisions() {
 // ---------------------------------------------------------------------------
 async function testEmailVerificationMiddleware() {
     console.log('\n=== Email Verification Middleware (Phase 8.1) ===');
-    const { verifyEmailVerified } = require('./middleware/auth');
+    const { verifyEmailVerified, isEmailVerificationSkipped } = require('./middleware/auth');
 
     function fakeRes() {
         return {
@@ -14617,6 +14621,30 @@ async function testEmailVerificationMiddleware() {
             status(code) { this.statusCode = code; return this; },
             send(payload) { this.body = payload; return this; },
         };
+    }
+
+    // Local-only pause (SKIP_EMAIL_VERIFICATION): honoured on a local machine,
+    // ignored on any Vercel deployment and with NODE_ENV=production.
+    logTest('Email-verification pause is honoured only locally',
+        isEmailVerificationSkipped({ SKIP_EMAIL_VERIFICATION: 'true', NODE_ENV: 'development' }) === true
+        && isEmailVerificationSkipped({ SKIP_EMAIL_VERIFICATION: 'true' }) === true
+        && isEmailVerificationSkipped({ SKIP_EMAIL_VERIFICATION: 'true', NODE_ENV: 'production' }) === false
+        && isEmailVerificationSkipped({ SKIP_EMAIL_VERIFICATION: 'true', VERCEL: '1', VERCEL_ENV: 'preview' }) === false
+        && isEmailVerificationSkipped({ SKIP_EMAIL_VERIFICATION: 'true', VERCEL: '1', VERCEL_ENV: 'production' }) === false
+        && isEmailVerificationSkipped({ SKIP_EMAIL_VERIFICATION: 'TRUE' }) === false
+        && isEmailVerificationSkipped({}) === false);
+    {
+        const saved = process.env.SKIP_EMAIL_VERIFICATION;
+        process.env.SKIP_EMAIL_VERIFICATION = 'true';
+        const res = fakeRes();
+        let nextCalled = false;
+        try {
+            verifyEmailVerified({ decoded_email: 'unverified@test.local', decoded_email_verified: false }, res, () => { nextCalled = true; });
+        } finally {
+            process.env.SKIP_EMAIL_VERIFICATION = saved;
+        }
+        logTest('verifyEmailVerified lets an unverified user through only while the local pause is on',
+            nextCalled === true && res.body === undefined);
     }
 
     // 1. Authenticated + email_verified true -> allowed (next called, no response).
