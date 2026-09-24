@@ -1,0 +1,71 @@
+name: CI
+
+# Checks only - this workflow never deploys. Production deploys stay manual.
+on:
+  push:
+  pull_request:
+    branches: [main, development]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # A throwaway MongoDB inside this run - CI is never given a credential
+      # for the Atlas cluster (it also holds sarabo_production).
+      MONGO_URI: mongodb://localhost:27017/?replicaSet=rs0&directConnection=true
+      MONGO_DB_NAME: sarabo-test-db
+      NODE_ENV: test
+      AI_SUPPORT_ENABLED: 'false'
+      # Placeholders, not secrets: the Stripe library needs a non-empty key
+      # at load time, and every Stripe call in the tests is faked.
+      STRIPE_SECRET: sk_test_ci_placeholder
+      STRIPE_WEBHOOK_SECRET: whsec_ci_placeholder
+      # Required at load time; the dev client origin.
+      SITE_DOMAIN: http://localhost:5173
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the whitespace check diffs against the PR base branch
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # matches the Vercel project (Node.js 24.x)
+          cache: npm
+
+      - run: npm ci
+
+      # Single-node replica set: the server uses multi-document transactions.
+      - name: Start MongoDB
+        run: |
+          docker run -d --name mongo -p 27017:27017 mongo:8 --replSet rs0 --bind_ip_all
+          for i in $(seq 1 30); do
+            docker exec mongo mongosh --quiet --eval "db.adminCommand('ping').ok" >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec mongo mongosh --quiet --eval "rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'localhost:27017' }] })"
+          for i in $(seq 1 30); do
+            [ "$(docker exec mongo mongosh --quiet --eval 'db.hello().isWritablePrimary')" = "true" ] && exit 0
+            sleep 1
+          done
+          echo "MongoDB replica set did not become primary" >&2
+          exit 1
+
+      - name: Throwaway Firebase key
+        run: echo "FB_SERVICE_KEY=$(node .github/ci/fake-firebase-service-key.js)" >> "$GITHUB_ENV"
+
+      - run: npm test
+      - run: npm run test:support
+      - run: npm run test:migrations
+      - run: npm run test:feedback
+
+      - name: Whitespace check
+        if: github.event_name == 'pull_request'
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"
