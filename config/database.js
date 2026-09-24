@@ -44,6 +44,8 @@ const collections = {
     technicianWithdrawals: db.collection("technician_withdrawals"),
     technicianReviews: db.collection("technician_reviews"),
     technicianReports: db.collection("technician_reports"),
+    // Shared AI-support rate-limit counters (middleware/mongoRateLimitStore.js).
+    supportRateLimits: db.collection("support_rate_limits"),
 };
 
 let connectionPromise = null;
@@ -123,6 +125,12 @@ async function connectDatabase() {
                 // database, not just in application code" pattern already
                 // used above for payments.sessionId, checkoutSessions.requestId,
                 // and repair requests.trackingId.
+                // AI-support rate-limit counters expire as soon as their window
+                // ends (expiresAt is the window's reset time).
+                await collections.supportRateLimits.createIndex(
+                    { expiresAt: 1 },
+                    { expireAfterSeconds: 0, name: 'supportRateLimits_expiresAt_ttl' }
+                );
                 await collections.serviceDefinitions.createIndex(
                     { productCategorySlug: 1, repairCategorySlug: 1 },
                     { unique: true, name: 'serviceDefinitions_product_repair_unique' }

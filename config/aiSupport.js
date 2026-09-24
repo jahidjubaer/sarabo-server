@@ -19,6 +19,9 @@ const DEFAULTS = Object.freeze({
     authenticatedDailyLimit: 100,
     authenticatedIpShortWindowLimit: 60,
     authenticatedIpDailyLimit: 300,
+    // Site-wide: every AI support question, from anyone, counts against this
+    // one daily budget - a spending backstop independent of per-user limits.
+    globalDailyLimit: 300,
 });
 
 const TEN_MINUTES_MS = 10 * 60 * 1000;
@@ -81,6 +84,7 @@ function loadAiSupportConfig(env = process.env) {
         authenticatedDailyLimit: readPositiveInteger(env.AI_SUPPORT_AUTH_DAILY_LIMIT, DEFAULTS.authenticatedDailyLimit),
         authenticatedIpShortWindowLimit: readPositiveInteger(env.AI_SUPPORT_AUTH_IP_10M_LIMIT, DEFAULTS.authenticatedIpShortWindowLimit),
         authenticatedIpDailyLimit: readPositiveInteger(env.AI_SUPPORT_AUTH_IP_DAILY_LIMIT, DEFAULTS.authenticatedIpDailyLimit),
+        globalDailyLimit: readPositiveInteger(env.AI_SUPPORT_GLOBAL_DAILY_LIMIT, DEFAULTS.globalDailyLimit),
     });
 }
 

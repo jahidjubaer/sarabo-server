@@ -5,6 +5,8 @@ const supportRoutes = require('../routes/support');
 const { requestId } = require('../middleware/requestId');
 const { createOptionalAuth } = require('../middleware/optionalAuth');
 const { createSupportRateLimit } = require('../middleware/supportRateLimit');
+const { MongoRateLimitStore } = require('../middleware/mongoRateLimitStore');
+const { connectDatabase, collections } = require('../config/database');
 const { loadAiSupportConfig } = require('../config/aiSupport');
 const {
     createAiSupportService,
@@ -433,7 +435,7 @@ async function runSupportFoundationTests({ logTest }) {
     const rateController = createController({ provider: createFakeProvider(), config: rateConfig });
     await withSupportServer({
         controller: rateController,
-        rateLimitMiddleware: createSupportRateLimit(rateConfig),
+        rateLimitMiddleware: createSupportRateLimit(rateConfig, { keyPrefix: `test-rate-${Date.now()}-${Math.random().toString(36).slice(2)}` }),
     }, async (port) => {
         const first = await requestJson(port, validBody);
         const second = await requestJson(port, validBody);
@@ -447,6 +449,74 @@ async function runSupportFoundationTests({ logTest }) {
         logTest('Rate-limit logs contain operational metadata but no support message content',
             !limited.entries.join('\n').includes(validBody.message));
     });
+
+    // ---- Shared (MongoDB-backed) limits: one counter set for every instance ----
+    const sharedPrefix = `test-shared-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    try {
+        const sharedConfig = createTestConfig({ anonymousShortWindowLimit: 2, anonymousDailyLimit: 20, globalDailyLimit: 100 });
+        // Two separately built limiters = two serverless instances.
+        const instanceA = createSupportRateLimit(sharedConfig, { keyPrefix: sharedPrefix });
+        const instanceB = createSupportRateLimit(sharedConfig, { keyPrefix: sharedPrefix });
+        const sharedController = createController({ provider: createFakeProvider(), config: sharedConfig });
+        let aFirst; let bSecond; let aThird;
+        await withSupportServer({ controller: sharedController, rateLimitMiddleware: instanceA }, async (portA) => {
+            await withSupportServer({ controller: sharedController, rateLimitMiddleware: instanceB }, async (portB) => {
+                aFirst = await requestJson(portA, validBody);
+                bSecond = await requestJson(portB, validBody);
+                aThird = (await withCapturedErrors(() => requestJson(portA, validBody))).result;
+            });
+        });
+        logTest('Shared limits: hits on two separate instances count against one limit',
+            aFirst.status === 200 && bSecond.status === 200 && aThird.status === 429 && aThird.body.code === 'SUPPORT_RATE_LIMITED');
+
+        const globalConfig = createTestConfig({ anonymousShortWindowLimit: 50, anonymousDailyLimit: 50, globalDailyLimit: 2 });
+        const globalController = createController({ provider: createFakeProvider(), config: globalConfig });
+        await withSupportServer({
+            controller: globalController,
+            rateLimitMiddleware: createSupportRateLimit(globalConfig, { keyPrefix: `${sharedPrefix}-global` }),
+        }, async (port) => {
+            const one = await requestJson(port, validBody);
+            const two = await requestJson(port, validBody, { 'X-Forwarded-For': '203.0.113.9' });
+            const capped = (await withCapturedErrors(() => requestJson(port, validBody))).result;
+            logTest('Site-wide daily cap: every visitor shares one daily budget',
+                one.status === 200 && two.status === 200 && capped.status === 429 && capped.body.code === 'SUPPORT_DAILY_CAPACITY_REACHED');
+        });
+
+        let providerCalled = false;
+        const failingStoreFactory = () => ({
+            localKeys: false,
+            init() {},
+            async increment() { throw new Error('store unavailable'); },
+            async decrement() {},
+            async resetKey() {},
+        });
+        const failController = createController({ provider: createFakeProvider({ onCall: () => { providerCalled = true; } }), config: sharedConfig });
+        await withSupportServer({
+            controller: failController,
+            rateLimitMiddleware: createSupportRateLimit(sharedConfig, { storeFactory: failingStoreFactory }),
+        }, async (port) => {
+            const refused = (await withCapturedErrors(() => requestJson(port, validBody))).result;
+            logTest('Fail closed: an unreachable limit store refuses the request with 503 SUPPORT_UNAVAILABLE',
+                refused.status === 503 && refused.body.code === 'SUPPORT_UNAVAILABLE');
+            logTest('Fail closed: the AI provider is never called when limits cannot be counted', providerCalled === false);
+        });
+
+        const store = new MongoRateLimitStore({ prefix: `${sharedPrefix}-unit` });
+        store.init({ windowMs: 60000 });
+        const hit1 = await store.increment('k');
+        const hit2 = await store.increment('k');
+        const counterDoc = await collections.supportRateLimits.findOne({ _id: store.documentId('k', store.windowFor().start) });
+        logTest('Store: counts atomically and ends at the window boundary',
+            hit1.totalHits === 1 && hit2.totalHits === 2 && hit2.resetTime.getTime() % 60000 === 0
+            && counterDoc && counterDoc.expiresAt.getTime() === hit2.resetTime.getTime());
+        await store.decrement('k');
+        logTest('Store: decrement and get reflect the shared counter', (await store.get('k')).totalHits === 1);
+        const ttl = (await collections.supportRateLimits.indexes()).find((index) => index.name === 'supportRateLimits_expiresAt_ttl');
+        logTest('Store: counters expire automatically (TTL index on expiresAt)', !!ttl && ttl.expireAfterSeconds === 0);
+    } finally {
+        await connectDatabase();
+        await collections.supportRateLimits.deleteMany({ _id: { $regex: `^test-` } });
+    }
 
     const registrations = [];
     const fakeApp = {

@@ -1,5 +1,11 @@
 // Focused support tests must never inherit a shell setting that enables paid AI.
 process.env.AI_SUPPORT_ENABLED = 'false';
+// The support rate limiter keeps its counters in MongoDB, so this runner is
+// pinned to the isolated test database like test-feedback.js.
+process.env.NODE_ENV = process.env.NODE_ENV || 'test';
+if (process.env.NODE_ENV !== 'test') throw new Error('Support tests require NODE_ENV=test');
+process.env.MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'sarabo-test-db';
+require('dotenv').config();
 
 const { runSupportFoundationTests } = require('./tests/supportFoundationTests');
 const { runGeminiSupportProviderTests } = require('./tests/geminiSupportProviderTests');

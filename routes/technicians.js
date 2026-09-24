@@ -23,6 +23,8 @@ function technicianRoutes(app, controllers) {
 
     // Update technician status (admin only)
     app.patch('/technicians/:id', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => technicianController.updateTechnicianStatus(req, res));
+    // Admin: recheck a technician's availability against their real assignments.
+    app.post('/technicians/:id/recheck-availability', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => technicianController.recheckTechnicianAvailability(req, res));
 
     // Replace a technician's expertise (self or admin only - see
     // controllers/technicianController.js#updateTechnicianExpertise for the

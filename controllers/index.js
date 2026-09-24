@@ -6,6 +6,7 @@ const TrackingController = require('./trackingController');
 const NotificationController = require('./NotificationController');
 const HealthController = require('./healthController');
 const ServiceDefinitionController = require('./serviceDefinitionController');
+const AdminServiceDefinitionController = require('./adminServiceDefinitionController');
 const DamageUploadController = require('./damageUploadController');
 const InspectionController = require('./inspectionController');
 const QuoteController = require('./quoteController');
@@ -46,6 +47,7 @@ function initializeControllers(models, collections, dependencies = {}) {
         notification: new NotificationController(models),
         health: new HealthController(),
         serviceDefinition: new ServiceDefinitionController(models),
+        adminServiceDefinition: new AdminServiceDefinitionController(models, collections),
         damageUpload: new DamageUploadController(models, collections),
         inspection: new InspectionController(models, collections),
         quote: new QuoteController(models, collections),

@@ -41,6 +41,35 @@ command line of a single script run, together with `--expect-db=<name>`.
 **Never add them to Vercel**: the server never reads them, and a standing
 value would only weaken the next accidental script run.
 
+## AI support limits
+
+The AI support chat is rate limited per visitor, per signed-in user, per IP
+and site-wide. The counters live in MongoDB (`support_rate_limits`, expired
+by a TTL index on `expiresAt`), so every Vercel instance shares them.
+
+- `AI_SUPPORT_GLOBAL_DAILY_LIMIT` (default `300`) - AI questions answered
+  per UTC day across the whole site. Once reached, chat returns
+  `429 SUPPORT_DAILY_CAPACITY_REACHED` until the next day.
+- The per-visitor limits (`AI_SUPPORT_ANON_*`, `AI_SUPPORT_AUTH_*`) are
+  listed in `.env.example`.
+- If the database cannot be reached, chat is refused with
+  `503 SUPPORT_UNAVAILABLE` (fail closed) - the provider is never called
+  without a counted limit.
+- These limits cap requests, not money. Set a budget alert and a spending
+  cap on the Gemini API key's Google Cloud project as the final backstop.
+
+## Service catalogue
+
+Admins edit services and prices at **Dashboard → Services & prices**. A price
+change raises `pricingRule.version`; existing requests keep their price
+snapshot. Switching a service off with requests waiting for a technician
+needs a confirmation - those requests cannot be assigned until it is back on.
+There is no delete.
+
+After an admin edits a standard service, `seed:service-definitions` reports
+that row as a conflict and never overwrites it, and the BDT migration refuses
+to run; both are expected.
+
 ## Database
 
 - Production database: `sarabo_production` (same Atlas cluster as development)
@@ -90,6 +119,8 @@ value would only weaken the next accidental script run.
 | Every request `500 FUNCTION_INVOCATION_FAILED` | Missing/invalid `MONGO_DB_NAME`, malformed `SITE_DOMAIN`, or malformed `FB_SERVICE_KEY` - all three throw synchronously at module load | Vercel function logs (`vercel logs <url>`) for the exact startup error message (never a secret value) |
 | `GET /health` returns `503`, `GET /` returns `200` | Database reachable at process start but the cluster/network is now unavailable | `vercel logs`; MongoDB Atlas cluster status |
 | `403 Origin not allowed` from the real client | `SITE_DOMAIN` misconfigured, or the client is calling from an unexpected origin | Confirm `SITE_DOMAIN` matches the client's actual origin exactly |
+| AI chat returns `503 SUPPORT_UNAVAILABLE` | The limiter could not reach MongoDB (the chat fails closed) | `GET /health`; Atlas status |
+| AI chat returns `429 SUPPORT_DAILY_CAPACITY_REACHED` | The site-wide daily cap was reached | Raise `AI_SUPPORT_GLOBAL_DAILY_LIMIT` only if the Gemini budget allows |
 | Stripe webhook returns `500 webhook not configured` | `STRIPE_WEBHOOK_SECRET` missing | Vercel env vars |
 | Stripe webhook returns `400 invalid signature` repeatedly | `STRIPE_WEBHOOK_SECRET` doesn't match the active endpoint in the Stripe dashboard (commonly after a secret rotation) | Stripe Dashboard -> Webhooks -> endpoint -> signing secret |
 

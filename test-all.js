@@ -38,6 +38,8 @@ const { runSupportFoundationTests } = require('./tests/supportFoundationTests');
 const { runGeminiSupportProviderTests } = require('./tests/geminiSupportProviderTests');
 const { runFeedbackTests } = require('./tests/feedbackTests');
 const { runProductionMigrationTests } = require('./tests/productionMigrationTests');
+const { runTechnicianAvailabilityTests } = require('./tests/technicianAvailabilityTests');
+const { runAdminServiceDefinitionTests } = require('./tests/adminServiceDefinitionTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -3195,6 +3197,24 @@ async function testP0AuthorizationFixes() {
         logTest('GET /users paged search is case-insensitive and finds the account',
             Array.isArray(pagedSearchRes.body?.data) && pagedSearchRes.body.data.some(u => u.email === CUSTOMER_EMAIL));
 
+        // --- 14h, 14i. Only the admin-list fields ever leave the server, even
+        // when a user document carries something else.
+        const projectionEmail = `projection-${Date.now()}@example.test`;
+        const projectionInsert = await collections.users.insertOne({ email: projectionEmail, displayName: 'Projection Test', role: 'user', createdAt: new Date(), internalNote: 'must-not-leak', uid: 'firebase-uid-must-not-leak' });
+        try {
+            const allowed = ['_id', 'email', 'displayName', 'photoURL', 'role', 'createdAt'];
+            const pagedProjection = await callGetAllUsers(ADMIN_EMAIL, { page: '1', searchText: projectionEmail });
+            const pagedRow = pagedProjection.body?.data?.[0];
+            logTest('GET /users?page returns only the admin-list fields',
+                !!pagedRow && Object.keys(pagedRow).every((key) => allowed.includes(key)) && pagedRow.internalNote === undefined && pagedRow.uid === undefined);
+            const legacyProjection = await callGetAllUsers(ADMIN_EMAIL, { searchText: projectionEmail });
+            const legacyRow = Array.isArray(legacyProjection.body) ? legacyProjection.body[0] : null;
+            logTest('GET /users (legacy array) returns only the admin-list fields',
+                !!legacyRow && Object.keys(legacyRow).every((key) => allowed.includes(key)) && legacyRow.internalNote === undefined);
+        } finally {
+            await collections.users.deleteOne({ _id: projectionInsert.insertedId });
+        }
+
         // --- 15. No alternate list-user route exists (confirmed structurally -
         // routes/users.js defines exactly one GET /users route). ---
         logTest(
@@ -3228,7 +3248,10 @@ async function testP0AuthorizationFixes() {
             'license', 'nid', 'bike', 'status', 'workStatus', 'createdAt',
             // expertise is part of the Rider.findAll projection (Phase 6.3) and
             // is rendered by ApproveTechnicians; it is a first-class allowed field.
-            'expertise'
+            'expertise',
+            // Computed yes/no (an active repair names this technician), added
+            // so admins can spot a stuck "busy" status - not stored data.
+            'hasActiveAssignment'
         ]);
         const allFieldsAllowed = ridersRes.body.every(r => Object.keys(r).every(k => ALLOWED_RIDER_FIELDS.has(k)));
         logTest(
@@ -10532,7 +10555,7 @@ async function testDamageUploadFoundation() {
         // Comments explaining the deliberate absence of verifyAdmin/verifyTechnician
         // legitimately mention those identifiers in prose - strip //-style
         // comments first so test 63 checks actual usage, not word mentions.
-        const routesSourceCode = routesSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
+        const routesSourceCode = routesSource.split(/\r?\n/).map((line) => line.replace(/\/\/.*$/, '')).join('\n');
         logTest('62. Damage-upload routes are wired with verifyFBToken and ensureDatabaseReady', /verifyFBToken/.test(routesSourceCode) && /ensureDatabaseReady/.test(routesSourceCode));
         logTest('63. No admin-only bypass exists on damage-upload routes (ownership is the sole authorization boundary, by design)', !/verifyAdmin/.test(routesSourceCode) && !/verifyTechnician/.test(routesSourceCode));
 
@@ -10998,7 +11021,7 @@ async function testAuthorizedDamageImageAccess() {
 
         // ---- Route wiring (68) ----
         const routesSource = require('fs').readFileSync(require('path').join(__dirname, 'routes', 'damageUploads.js'), 'utf8');
-        const routesSourceCode = routesSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
+        const routesSourceCode = routesSource.split(/\r?\n/).map((line) => line.replace(/\/\/.*$/, '')).join('\n');
         logTest(
             '68. GET damage-images list route is wired with verifyFBToken/ensureDatabaseReady only (live role resolution, not route-level admin/rider gating)',
             /app\.get\(\s*\n?\s*'\/repair-requests\/:id\/damage-images'/.test(routesSourceCode) && !/verifyAdmin/.test(routesSourceCode) && !/verifyTechnician/.test(routesSourceCode)
@@ -13455,6 +13478,8 @@ async function runAllTests() {
     await runGeminiSupportProviderTests({ logTest });
     await runFeedbackTests({ logTest });
     await runProductionMigrationTests({ logTest });
+    await runTechnicianAvailabilityTests({ logTest });
+    await runAdminServiceDefinitionTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing

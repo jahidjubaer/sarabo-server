@@ -66,7 +66,16 @@ class TechnicianController {
             }
 
             const result = await this.Technician.findAll(query);
-            res.send(result);
+            // One query for the whole list: which technicians an active
+            // repair currently names, so the admin list can flag a technician
+            // marked busy with no active job (and vice versa).
+            // (An aggregation rather than distinct(): the client runs with the
+            // Stable API in strict mode, which does not include distinct.)
+            const busyIds = new Set((await this.collections.repairRequests.aggregate([
+                { $match: { deliveryStatus: { $in: ACTIVE_STATUSES }, technicianId: { $type: 'string' } } },
+                { $group: { _id: '$technicianId' } },
+            ]).toArray()).map((row) => String(row._id)));
+            res.send(result.map((technician) => ({ ...technician, hasActiveAssignment: busyIds.has(technician._id.toString()) })));
         } catch (error) {
             res.status(500).send({ message: 'Error fetching technicians', error: error.message });
         }
@@ -214,6 +223,9 @@ class TechnicianController {
             if (!technician) {
                 return res.status(404).send({ message: 'no technician profile found for this account', code: 'TECHNICIAN_PROFILE_NOT_FOUND' });
             }
+            // Opening their own dashboard clears a stale "busy" state, so a
+            // technician is never silently left out of matching.
+            const reconciled = await this.reconcileStaleWorkStatus(technician);
 
             // nid and any other sensitive vetting field are deliberately NOT
             // projected above: this is the technician's own profile view, not
@@ -229,7 +241,7 @@ class TechnicianController {
                 district: technician.district ?? null,
                 address: technician.address ?? null,
                 status: technician.status ?? null,
-                workStatus: technician.workStatus ?? null,
+                workStatus: reconciled.workStatus,
                 expertise: Array.isArray(technician.expertise) ? technician.expertise : [],
                 appliedAt: technician.createdAt ?? null,
             });
@@ -284,6 +296,55 @@ class TechnicianController {
             { session, projection: { _id: 1 } }
         );
         return !!activeRepairRequest;
+    }
+
+    // Clears a stale "busy" state: an APPROVED technician still marked
+    // in_delivery although no active repair names them (left behind by older
+    // data or an interrupted flow) can never be matched again, because matching
+    // only offers workStatus 'available'. Only that direction is corrected
+    // here, guarded on the value read, so a concurrent real change always
+    // wins. The opposite drift (available while holding an active job) is left
+    // to admin re-approval, which already recomputes it transactionally -
+    // correcting it here could race with a completion that is committing.
+    // Such a technician cannot be assigned concurrently (not 'available'), so
+    // the check-then-write cannot hide a new assignment.
+    async reconcileStaleWorkStatus(technician) {
+        const current = technician ? technician.workStatus ?? null : null;
+        if (!technician || technician.status !== 'approved' || current !== 'in_delivery') {
+            return { workStatus: current, changed: false };
+        }
+        if (await this.hasActiveAssignment(technician._id)) {
+            return { workStatus: current, changed: false };
+        }
+        const result = await this.collections.technicians.updateOne(
+            { _id: technician._id, status: 'approved', workStatus: 'in_delivery' },
+            { $set: { workStatus: 'available' } }
+        );
+        return result.modifiedCount === 1
+            ? { workStatus: 'available', changed: true }
+            : { workStatus: current, changed: false };
+    }
+
+    // Admin-only: recheck one technician's availability against their real
+    // assignments (POST /technicians/:id/recheck-availability).
+    async recheckTechnicianAvailability(req, res) {
+        try {
+            if (!ObjectId.isValid(req.params.id)) {
+                return res.status(400).send({ message: 'invalid technician id', code: 'INVALID_TECHNICIAN_ID' });
+            }
+            const technician = await this.collections.technicians.findOne(
+                { _id: new ObjectId(req.params.id) },
+                { projection: { status: 1, workStatus: 1 } }
+            );
+            if (!technician) {
+                return res.status(404).send({ message: 'technician not found', code: 'TECHNICIAN_NOT_FOUND' });
+            }
+            const outcome = await this.reconcileStaleWorkStatus(technician);
+            const hasActiveAssignment = await this.hasActiveAssignment(technician._id);
+            return res.send({ workStatus: outcome.workStatus, changed: outcome.changed, hasActiveAssignment });
+        } catch (error) {
+            return res.status(500).send({ message: 'Error checking technician availability', code: 'AVAILABILITY_CHECK_FAILED' });
+        }
     }
 
     // Admin-only technician approval/rejection. The application's status and
