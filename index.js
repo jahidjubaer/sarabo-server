@@ -28,6 +28,7 @@ const walletRoutes = require('./routes/wallet');
 const supportRoutes = require('./routes/support');
 const feedbackRoutes = require('./routes/feedback');
 const pickupSlotRoutes = require('./routes/pickupSlots');
+const adminReportRoutes = require('./routes/adminReports');
 const { isEmailVerificationSkipped } = require('./middleware/auth');
 
 const app = express();
@@ -94,6 +95,7 @@ app.get('/', (req, res) => {
 userRoutes(app, controllers);
 feedbackRoutes(app, controllers);
 pickupSlotRoutes(app, controllers);
+adminReportRoutes(app, controllers);
 repairRequestRoutes(app, controllers);
 paymentRoutes(app, controllers);
 technicianRoutes(app, controllers);

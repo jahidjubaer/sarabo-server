@@ -47,6 +47,7 @@ const { runAdminServiceDefinitionTests } = require('./tests/adminServiceDefiniti
 const { runPickupSlotTests } = require('./tests/pickupSlotTests');
 const { runEmailTests } = require('./tests/emailTests');
 const { runSeedDevPeopleTests } = require('./tests/seedDevPeopleTests');
+const { runAdminReportTests } = require('./tests/adminReportTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -13512,6 +13513,7 @@ async function runAllTests() {
     await runPickupSlotTests({ logTest });
     await runEmailTests({ logTest });
     await runSeedDevPeopleTests({ logTest });
+    await runAdminReportTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing
