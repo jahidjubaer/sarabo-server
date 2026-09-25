@@ -50,6 +50,7 @@ const { runSeedDevPeopleTests } = require('./tests/seedDevPeopleTests');
 const { runAdminReportTests } = require('./tests/adminReportTests');
 const { runAdminAttentionTests } = require('./tests/adminAttentionTests');
 const { runMissedPickupTests } = require('./tests/missedPickupTests');
+const { runInAppReminderTests } = require('./tests/inAppReminderTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -4614,10 +4615,12 @@ async function testNotificationFoundation() {
             'repair_request_created', 'quote_revision_started', 'repair_cancelled_by_technician',
             'withdrawal_paid', 'withdrawal_rejected', 'technician_report_submitted',
             // Missed-pickup actions.
-            'assignment_withdrawn', 'pickup_reschedule_requested'
+            'assignment_withdrawn', 'pickup_reschedule_requested',
+            // In-app pickup reminders.
+            'pickup_reminder', 'pickup_reminder_technician'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 27 event types exist', actualTypes.length === 27 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 29 event types exist', actualTypes.length === 29 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -5035,7 +5038,9 @@ async function testNotificationFoundation() {
 
         const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed', 'quote_submitted', 'payment_completed', 'repair_started', 'repair_finished', 'quote_revision_started', 'repair_cancelled_by_technician',
             // Missed-pickup phase: asks the request's owner for a new pickup time.
-            'pickup_reschedule_requested'];
+            'pickup_reschedule_requested',
+            // In-app pickup reminders: the customer's copy goes to the request's owner.
+            'pickup_reminder'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -13522,6 +13527,7 @@ async function runAllTests() {
     await runAdminReportTests({ logTest });
     await runAdminAttentionTests({ logTest });
     await runMissedPickupTests({ logTest });
+    await runInAppReminderTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing

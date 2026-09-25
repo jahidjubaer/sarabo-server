@@ -103,6 +103,13 @@ Turning it on (Vercel, Production):
    `GET /cron/pickup-reminders` daily at 12:00 UTC (18:00 in Dhaka, see
    `vercel.json`) with it; without `CRON_SECRET` the job refuses to run.
 
+**Pickup reminders do not need email.** The same daily job always posts an
+in-app notification to the customer ("Your pickup is tomorrow") and to the
+assigned technician ("Pickup tomorrow"); the email is sent in addition when
+email is on. Only `CRON_SECRET` is required for the in-app reminders. Each
+pickup slot is reminded once - re-running the job sends nothing new, and a
+moved pickup is reminded again.
+
 Check it: `email_log` shows each email with status `sent` or `failed` and a
 short reason (e.g. `EAUTH` = wrong app password). Tests never send email.
 

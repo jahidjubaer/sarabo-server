@@ -1,5 +1,7 @@
 const crypto = require('crypto');
 const { SLOT_HOLDING_STATUSES, dhakaDateString } = require('../utils/pickupSlots');
+const { formatPickupForEmail } = require('../utils/emailTemplates');
+const { createNotificationService } = require('../services/notificationService');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Gmail's free limit is about 500 a day; one run never sends more than this.
@@ -12,7 +14,9 @@ function secretMatches(provided, expected) {
     return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-// Day-before pickup reminders (email-updates phase). Vercel Cron calls
+// Day-before pickup reminders. Always posts an in-app notification to the
+// customer and the assigned technician (in-app-reminders phase); also emails
+// the customer when email is enabled (email-updates phase). Vercel Cron calls
 // GET /cron/pickup-reminders once a day (vercel.json, 12:00 UTC = 18:00 in
 // Dhaka) with "Authorization: Bearer <CRON_SECRET>". Without CRON_SECRET set,
 // the route refuses every call. Safe to run more than once: the email log
@@ -21,6 +25,8 @@ class PickupReminderController {
     constructor(models, collections, { emailService, now = () => new Date(), env = process.env } = {}) {
         this.collections = collections;
         this.emailService = emailService;
+        this.notifications = createNotificationService(models);
+        this.User = models.User;
         this.now = now;
         this.env = env;
     }
@@ -37,27 +43,68 @@ class PickupReminderController {
         }
 
         try {
-            if (!this.emailService.enabled) {
-                return res.send({ date: null, found: 0, sent: 0, skipped: 0, failed: 0, emailEnabled: false });
-            }
             const tomorrow = dhakaDateString(new Date(this.now().getTime() + DAY_MS));
             const requests = await this.collections.repairRequests.find(
                 { 'pickupSlot.date': tomorrow, deliveryStatus: { $in: SLOT_HOLDING_STATUSES } },
-                { projection: { senderEmail: 1, trackingId: 1, product: 1, serviceLocation: 1, pickupSlot: 1 } }
+                { projection: { senderEmail: 1, trackingId: 1, product: 1, serviceLocation: 1, pickupSlot: 1, technicianEmail: 1 } }
             ).sort({ 'pickupSlot.startsAt': 1 }).limit(MAX_REMINDERS_PER_RUN).toArray();
 
-            const counts = { sent: 0, skipped: 0, failed: 0 };
-            // One at a time: gentle on Gmail's rate limits.
-            for (const request of requests) {
-                const { status } = await this.emailService.sendPickupReminder(request, request._id.toString());
-                if (status === 'sent') counts.sent += 1;
-                else if (status === 'failed') counts.failed += 1;
-                else counts.skipped += 1;
+            const inApp = await this.remindInApp(requests);
+            const email = { sent: 0, skipped: 0, failed: 0 };
+            if (this.emailService.enabled) {
+                // One at a time: gentle on Gmail's rate limits.
+                for (const request of requests) {
+                    const { status } = await this.emailService.sendPickupReminder(request, request._id.toString());
+                    if (status === 'sent') email.sent += 1;
+                    else if (status === 'failed') email.failed += 1;
+                    else email.skipped += 1;
+                }
             }
-            res.send({ date: tomorrow, found: requests.length, ...counts, emailEnabled: true });
+            res.send({ date: tomorrow, found: requests.length, inApp, ...email, emailEnabled: this.emailService.enabled });
         } catch (error) {
             res.status(500).send({ message: 'Error sending reminders', code: 'INTERNAL_ERROR' });
         }
+    }
+
+    // In-app reminders for the customer and, when one is assigned, the technician.
+    // Duplicates (same request and slot) are skipped by the notification layer, so
+    // running the job twice is harmless. A failure for one request never stops
+    // the others.
+    async remindInApp(requests) {
+        const counts = { sent: 0, skipped: 0, failed: 0 };
+        const tally = (result) => {
+            if (result && result.created) counts.sent += 1;
+            else counts.skipped += 1;
+        };
+        for (const request of requests) {
+            const id = request._id.toString();
+            const metadata = {
+                trackingId: request.trackingId,
+                pickupWindow: formatPickupForEmail(request.pickupSlot),
+                occurrence: `${request.pickupSlot.date}|${request.pickupSlot.slotId}`,
+            };
+            try {
+                const ownerRole = await this.User.findRoleByEmail(request.senderEmail);
+                if (ownerRole) {
+                    tally(await this.notifications.createNotification({
+                        recipientEmail: request.senderEmail, recipientRole: ownerRole, type: 'pickup_reminder',
+                        entityType: 'repair_request', entityId: id, metadata,
+                    }));
+                } else {
+                    counts.skipped += 1;
+                }
+                if (request.technicianEmail) {
+                    tally(await this.notifications.createNotification({
+                        recipientEmail: request.technicianEmail, recipientRole: 'rider', type: 'pickup_reminder_technician',
+                        entityType: 'repair_request', entityId: id, metadata,
+                    }));
+                }
+            } catch (error) {
+                counts.failed += 1;
+                console.error('In-app pickup reminder failed (non-fatal):', error.message);
+            }
+        }
+        return counts;
     }
 }
 

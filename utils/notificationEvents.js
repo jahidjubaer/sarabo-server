@@ -234,6 +234,32 @@ const NOTIFICATION_EVENTS = {
         actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
         deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:pickup_reschedule_requested:${metadata.occurrence || 'once'}`,
     },
+    // Day-before pickup reminders (in-app-reminders phase), posted by the
+    // daily reminder job. `occurrence` is "<date>|<slotId>", so each pickup
+    // slot is reminded once and a moved pickup is reminded again.
+    pickup_reminder: {
+        entityType: 'repair_request',
+        // Owner-facing - same role reasoning as technician_assigned.
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'pickupWindow', 'occurrence'],
+        requiresMetadata: ['trackingId', 'pickupWindow', 'occurrence'],
+        title: () => 'Your pickup is tomorrow',
+        message: ({ metadata }) => `Reminder: your device for repair request ${metadata.trackingId} will be collected ${metadata.pickupWindow}. Please have it ready.`,
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:pickup_reminder:${metadata.occurrence || 'once'}`,
+    },
+    pickup_reminder_technician: {
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'pickupWindow', 'occurrence'],
+        requiresMetadata: ['trackingId', 'pickupWindow', 'occurrence'],
+        title: () => 'Pickup tomorrow',
+        message: ({ metadata }) => `Pickup tomorrow: collect the device for repair request ${metadata.trackingId}, ${metadata.pickupWindow}.`,
+        actionUrl: () => '/dashboard/assigned-jobs',
+        deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:pickup_reminder_technician:${metadata.occurrence || 'once'}`,
+    },
     technician_on_the_way: {
         entityType: 'repair_request',
         // Same reasoning as technician_assigned - POST /repair-requests only
