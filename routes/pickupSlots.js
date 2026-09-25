@@ -8,6 +8,10 @@ const { verifyFBToken, verifyEmailVerified } = require('../middleware/auth');
 function pickupSlotRoutes(app, controllers) {
     const controller = controllers.pickupSlot;
     app.get('/pickup-slots', verifyFBToken, ensureDatabaseReady, (req, res) => controller.listAvailability(req, res));
+    // Is there a technician for this repair here? (job-portal phase A)
+    if (controllers.serviceAvailability) {
+        app.get('/service-availability', verifyFBToken, ensureDatabaseReady, (req, res) => controllers.serviceAvailability.check(req, res));
+    }
     app.patch('/repair-requests/:id/pickup-slot', verifyFBToken, ensureDatabaseReady, verifyEmailVerified, (req, res) => controller.reschedule(req, res));
 
     // Day-before reminders, called once a day by Vercel Cron (vercel.json).

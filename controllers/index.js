@@ -19,6 +19,7 @@ const PickupReminderController = require('./pickupReminderController');
 const AdminReportController = require('./adminReportController');
 const AdminAttentionController = require('./adminAttentionController');
 const MissedPickupController = require('./missedPickupController');
+const ServiceAvailabilityController = require('./serviceAvailabilityController');
 const { loadEmailConfig } = require('../config/email');
 const { createEmailService } = require('../services/emailService');
 const { connectDatabase } = require('../config/database');
@@ -69,6 +70,7 @@ function initializeControllers(models, collections, dependencies = {}) {
         adminReport: new AdminReportController(models, collections),
         adminAttention: new AdminAttentionController(models, collections),
         missedPickup: new MissedPickupController(models, collections),
+        serviceAvailability: new ServiceAvailabilityController(models, collections),
         support: new SupportController({
             aiSupportService,
             supportKnowledgeService,

@@ -47,6 +47,7 @@ const collections = {
     // Shared AI-support rate-limit counters (middleware/mongoRateLimitStore.js).
     supportRateLimits: db.collection("support_rate_limits"),
     emailLog: db.collection("email_log"),
+    turnedAwayRequests: db.collection("turned_away_requests"),
 };
 
 let connectionPromise = null;
@@ -282,6 +283,13 @@ async function connectDatabase() {
                     { expiresAt: 1 },
                     { name: 'emailLog_expiresAt_ttl', expireAfterSeconds: 0 }
                 );
+                // Refused requests (services/technicianMatchGate.js) expire after
+                // 180 days; reports read them by day.
+                await collections.turnedAwayRequests.createIndex(
+                    { expiresAt: 1 },
+                    { name: 'turnedAwayRequests_expiresAt_ttl', expireAfterSeconds: 0 }
+                );
+                await collections.turnedAwayRequests.createIndex({ createdAt: 1 }, { name: 'turnedAwayRequests_createdAt' });
                 // Pickup-slot capacity counts (controllers/pickupSlotController.js).
                 // Same case-insensitive collation as the query, or MongoDB
                 // would not use it.

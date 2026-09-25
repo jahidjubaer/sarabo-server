@@ -12,6 +12,9 @@ const { PICKUP_SLOTS, TIMEZONE, dhakaDateString } = require('../utils/pickupSlot
 // - cancelled  requests cancelled in the period (their last update)
 // - success rate  completed / (completed + cancelled) in the period
 // - avg days   request made -> repair finished, for repairs finished in the period
+// - turned away  requests a customer could not submit because no technician
+//              in the region offers that repair (one per customer, service,
+//              region and day - services/technicianMatchGate.js)
 // Days are Bangladesh days (Asia/Dhaka).
 const ALLOWED_DAYS = [7, 30, 90];
 const DEFAULT_DAYS = 30;
@@ -36,13 +39,14 @@ class AdminReportController {
     // created / completed / cancelled / avg days for [from, to).
     async periodTotals(from, to) {
         const rr = this.collections.repairRequests;
-        const [created, cancelled, completion] = await Promise.all([
+        const [created, cancelled, completion, turnedAway] = await Promise.all([
             rr.countDocuments({ createdAt: { $gte: from, $lt: to } }),
             rr.countDocuments({ deliveryStatus: 'cancelled', updatedAt: { $gte: from, $lt: to } }),
             rr.aggregate([
                 { $match: { 'repair.completion.completedAt': { $gte: from, $lt: to } } },
                 { $group: { _id: null, count: { $sum: 1 }, totalMs: { $sum: { $subtract: ['$repair.completion.completedAt', '$createdAt'] } } } },
             ]).toArray(),
+            this.collections.turnedAwayRequests.countDocuments({ createdAt: { $gte: from, $lt: to } }),
         ]);
         const completed = completion[0] ? completion[0].count : 0;
         const finished = completed + cancelled;
@@ -52,6 +56,7 @@ class AdminReportController {
             cancelled,
             successRate: finished > 0 ? round1((completed / finished) * 100) : null,
             avgDaysToComplete: completed > 0 ? round1(completion[0].totalMs / completed / DAY_MS) : null,
+            turnedAway,
         };
     }
 
@@ -83,7 +88,7 @@ class AdminReportController {
     // repair and level) - the same rule assignment enforces.
     async regions(from, to, technicians) {
         const rr = this.collections.repairRequests;
-        const [requestRows, waiting, definitions] = await Promise.all([
+        const [requestRows, waiting, definitions, turnedAwayRows] = await Promise.all([
             rr.aggregate([
                 { $match: { createdAt: { $gte: from, $lt: to }, 'serviceLocation.region': { $type: 'string' } } },
                 { $group: { _id: '$serviceLocation.region', requests: { $sum: 1 } } },
@@ -93,14 +98,19 @@ class AdminReportController {
                 { projection: { serviceLocation: 1, product: 1, service: 1 } }
             ).limit(MAX_WAITING_FOR_MATCHING).toArray(),
             this.collections.serviceDefinitions.find({}, { projection: { requiredExpertiseLevel: 1 } }).toArray(),
+            this.collections.turnedAwayRequests.aggregate([
+                { $match: { createdAt: { $gte: from, $lt: to } } },
+                { $group: { _id: '$region', count: { $sum: 1 } } },
+            ]).toArray(),
         ]);
         const levelByDefinition = new Map(definitions.map((d) => [d._id.toString(), d.requiredExpertiseLevel]));
         const regions = new Map();
         const entry = (name) => {
-            if (!regions.has(name)) regions.set(name, { region: name, requests: 0, waiting: 0, unmatchedWaiting: 0, approvedTechnicians: 0, availableTechnicians: 0 });
+            if (!regions.has(name)) regions.set(name, { region: name, requests: 0, waiting: 0, unmatchedWaiting: 0, turnedAway: 0, approvedTechnicians: 0, availableTechnicians: 0 });
             return regions.get(name);
         };
         for (const row of requestRows) entry(row._id).requests = row.requests;
+        for (const row of turnedAwayRows) if (row._id) entry(row._id).turnedAway = row.count;
         const approved = technicians.filter((t) => t.status === 'approved');
         for (const t of approved) {
             if (typeof t.region !== 'string' || !t.region) continue;

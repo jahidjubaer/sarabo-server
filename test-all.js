@@ -26,6 +26,9 @@ process.env.AI_SUPPORT_ENABLED = 'false';
 process.env.EMAIL_ENABLED = 'false';
 // Email verification is always enforced in tests, whatever a local .env says.
 process.env.SKIP_EMAIL_VERIFICATION = 'false';
+// Fixtures create requests in made-up regions; tests that cover the
+// technician gate turn it on explicitly.
+process.env.SKIP_TECHNICIAN_MATCH_CHECK = 'true';
 
 const http = require('http');
 require('dotenv').config();
@@ -51,6 +54,7 @@ const { runAdminReportTests } = require('./tests/adminReportTests');
 const { runAdminAttentionTests } = require('./tests/adminAttentionTests');
 const { runMissedPickupTests } = require('./tests/missedPickupTests');
 const { runInAppReminderTests } = require('./tests/inAppReminderTests');
+const { runMatchGateTests } = require('./tests/matchGateTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -13250,7 +13254,7 @@ async function startTestServer() {
     }
     const child = spawn(process.execPath, ['index.js'], {
         cwd: __dirname,
-        env: { ...process.env, NODE_ENV: 'test', MONGO_DB_NAME: dbName, PORT: '0', AI_SUPPORT_ENABLED: 'false', EMAIL_ENABLED: 'false', SKIP_EMAIL_VERIFICATION: 'false' },
+        env: { ...process.env, NODE_ENV: 'test', MONGO_DB_NAME: dbName, PORT: '0', AI_SUPPORT_ENABLED: 'false', EMAIL_ENABLED: 'false', SKIP_EMAIL_VERIFICATION: 'false', SKIP_TECHNICIAN_MATCH_CHECK: 'true' },
         stdio: ['ignore', 'pipe', 'pipe'],
     });
     process.on('exit', () => { if (child.exitCode === null) child.kill(); });
@@ -13528,6 +13532,7 @@ async function runAllTests() {
     await runAdminAttentionTests({ logTest });
     await runMissedPickupTests({ logTest });
     await runInAppReminderTests({ logTest });
+    await runMatchGateTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing

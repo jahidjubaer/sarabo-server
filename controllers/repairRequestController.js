@@ -26,6 +26,7 @@ const {
 } = require('../utils/repairRequestV2');
 const { getPricingEstimate } = require('../services/pricingService');
 const PickupSlotController = require('./pickupSlotController');
+const { isMatchGateSkipped, hasTechnicianFor, recordTurnedAway } = require('../services/technicianMatchGate');
 const { createDisabledEmailService } = require('../services/emailService');
 const { SETTLEMENT_PENDING, SETTLEMENT_AVAILABLE, buildSettlementView } = require('../utils/settlement');
 const { isRepairRequestPaid, buildPaymentStateMatch } = require('../utils/paymentState');
@@ -94,7 +95,7 @@ function technicianEarningView(rawRepairRequest) {
 }
 
 class RepairRequestController {
-    constructor(models, collections, storageService = damageStorageService, { emailService } = {}) {
+    constructor(models, collections, storageService = damageStorageService, { emailService, skipMatchGate } = {}) {
         this.RepairRequest = models.RepairRequest;
         this.Technician = models.Technician;
         this.User = models.User;
@@ -110,6 +111,8 @@ class RepairRequestController {
         this.pickupSlots = new PickupSlotController(models, collections);
         // Customer and technician emails (a no-op unless configured).
         this.emails = emailService || createDisabledEmailService();
+        // The request-creation technician gate; a test can force it on or off.
+        this.skipMatchGate = typeof skipMatchGate === 'boolean' ? () => skipMatchGate : () => isMatchGateSkipped();
         // Generic storage adapter (services/damageStorageService.js is generic
         // over any storageKey) - used by safe deletion to purge a request's
         // damage/evidence objects. Injectable so tests exercise the cleanup
@@ -456,6 +459,21 @@ class RepairRequestController {
             const locationValidation = validateServiceLocation(body.serviceLocation);
             if (!locationValidation.valid) {
                 return res.status(400).send({ message: locationValidation.message, code: locationValidation.code });
+            }
+
+            // Only requests some approved technician in the region can take
+            // (job-portal phase A). A refusal is recorded as turned-away demand.
+            if (!this.skipMatchGate() && !(await hasTechnicianFor(this.collections, { region: body.serviceLocation.region.trim(), definition }))) {
+                await recordTurnedAway(this.collections, {
+                    customerEmail: req.decoded_email,
+                    region: body.serviceLocation.region,
+                    district: body.serviceLocation.district,
+                    definition,
+                });
+                return res.status(409).send({
+                    message: 'no technician in this region offers this repair yet',
+                    code: 'NO_TECHNICIAN_AVAILABLE',
+                });
             }
 
             // Pickup slot (pickup-scheduling phase). Optional in the API so an

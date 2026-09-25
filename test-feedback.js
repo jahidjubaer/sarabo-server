@@ -7,6 +7,9 @@ process.env.AI_SUPPORT_ENABLED = 'false';
 process.env.EMAIL_ENABLED = 'false';
 // Email verification is always enforced in tests, whatever a local .env says.
 process.env.SKIP_EMAIL_VERIFICATION = 'false';
+// Fixtures create requests in made-up regions; tests that cover the
+// technician gate turn it on explicitly.
+process.env.SKIP_TECHNICIAN_MATCH_CHECK = 'true';
 require('dotenv').config();
 const { client } = require('./config/database');
 const { runFeedbackTests } = require('./tests/feedbackTests');
