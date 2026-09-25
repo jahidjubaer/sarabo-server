@@ -12,6 +12,10 @@ const { PICKUP_SLOTS, TIMEZONE, dhakaDateString } = require('../utils/pickupSlot
 // - cancelled  requests cancelled in the period (their last update)
 // - success rate  completed / (completed + cancelled) in the period
 // - avg days   request made -> repair finished, for repairs finished in the period
+// - inspection fees (job-portal phases C/D), by when each thing happened:
+//              paid (payments rows), refunded (refund time), kept (the 90/10
+//              split's time; Sarabo's share is its 10%), and refunds still
+//              waiting on Stripe right now
 // - turned away  requests a customer could not submit because no technician
 //              in the region offers that repair (one per customer, service,
 //              region and day - services/technicianMatchGate.js)
@@ -58,6 +62,38 @@ class AdminReportController {
             avgDaysToComplete: completed > 0 ? round1(completion[0].totalMs / completed / DAY_MS) : null,
             turnedAway,
         };
+    }
+
+    // Inspection-fee money in [from, to), plus refunds waiting now.
+    async inspectionFees(from, to) {
+        const payments = this.collections.payments;
+        const sumOf = async (collection, match, amountField) => {
+            const rows = await collection.aggregate([
+                { $match: match },
+                { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: `$${amountField}` } } },
+            ]).toArray();
+            return rows[0] ? { count: rows[0].count, amount: rows[0].amount } : { count: 0, amount: 0 };
+        };
+        const [paid, refunded, refundPending, keptRows] = await Promise.all([
+            sumOf(payments, { purpose: 'inspection_fee', paidAt: { $gte: from, $lt: to } }, 'amount'),
+            sumOf(payments, { purpose: 'inspection_fee', refundStatus: 'refunded', refundedAt: { $gte: from, $lt: to } }, 'amount'),
+            sumOf(payments, { purpose: 'inspection_fee', refundStatus: 'pending' }, 'amount'),
+            this.collections.repairRequests.aggregate([
+                { $match: { 'inspectionFeeSettlement.settledAt': { $gte: from, $lt: to } } },
+                { $group: {
+                    _id: null,
+                    count: { $sum: 1 },
+                    amount: { $sum: '$inspectionFeeSettlement.feeAmount' },
+                    technicianShare: { $sum: '$inspectionFeeSettlement.technicianReceivable' },
+                    saraboShare: { $sum: '$inspectionFeeSettlement.platformCommission' },
+                    declined: { $sum: { $cond: [{ $eq: ['$inspectionFeeSettlement.reason', 'quote_declined'] }, 1, 0] } },
+                } },
+            ]).toArray(),
+        ]);
+        const kept = keptRows[0]
+            ? { count: keptRows[0].count, amount: keptRows[0].amount, technicianShare: keptRows[0].technicianShare, saraboShare: keptRows[0].saraboShare, quoteDeclined: keptRows[0].declined, lateCancellations: keptRows[0].count - keptRows[0].declined }
+            : { count: 0, amount: 0, technicianShare: 0, saraboShare: 0, quoteDeclined: 0, lateCancellations: 0 };
+        return { currency: 'BDT', paid, refunded, kept, refundPending };
     }
 
     // Requests made and repairs finished per Bangladesh day.
@@ -225,13 +261,14 @@ class AdminReportController {
                 { projection: { name: 1, region: 1, status: 1, workStatus: 1, expertise: 1 } }
             ).toArray();
 
-            const [current, previous, daily, regions, breakdowns, workload] = await Promise.all([
+            const [current, previous, daily, regions, breakdowns, workload, inspectionFees] = await Promise.all([
                 this.periodTotals(from, to),
                 this.periodTotals(previousFrom, from),
                 this.daily(from, to),
                 this.regions(from, to, technicians),
                 this.breakdowns(from, to),
                 this.workload(from, to, technicians),
+                this.inspectionFees(from, to),
             ]);
 
             res.send({
@@ -241,6 +278,7 @@ class AdminReportController {
                 regions,
                 ...breakdowns,
                 workload,
+                inspectionFees,
             });
         } catch (error) {
             res.status(500).send({ message: 'Error building the report', code: 'INTERNAL_ERROR' });

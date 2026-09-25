@@ -15,6 +15,10 @@ const { isOpenForApplications, publishedAt, CHOOSE_WITHIN_MS } = require('../uti
 //                   a new local technician, not just time.
 // - unchosen        open in the job portal (has a photo, nobody chosen) for
 //                   24 hours or more since it was published (job-portal phase B).
+// - feeRefunds      an inspection-fee refund Stripe has not completed yet
+//                   (job-portal phase D) - an admin retries it from the
+//                   request page. Read from the payments rows, which are what
+//                   gets refunded.
 // A request can be in more than one list; each list is independent.
 const WAITING = 'pending-pickup';
 const ASSIGNED_NOT_COLLECTED = ['assignment_pending', 'driver_assigned', 'rider_arriving'];
@@ -64,7 +68,8 @@ class AdminAttentionController {
                 'pickupSlot.endsAt': { $lte: now },
                 pickupRescheduleRequestedAt: { $exists: false },
             };
-            const [overdueWaiting, overdueWaitingTotal, missedPickups, missedPickupsTotal, waiting, technicians, definitions] = await Promise.all([
+            const refundFilter = { purpose: 'inspection_fee', refundStatus: 'pending' };
+            const [overdueWaiting, overdueWaitingTotal, missedPickups, missedPickupsTotal, waiting, technicians, definitions, feeRefunds, feeRefundsTotal] = await Promise.all([
                 // Longest overdue first.
                 rr.find({ deliveryStatus: WAITING, 'pickupSlot.startsAt': { $lte: now } }, { projection: SUMMARY_PROJECTION })
                     .sort({ 'pickupSlot.startsAt': 1 }).limit(LIST_LIMIT).toArray(),
@@ -76,6 +81,10 @@ class AdminAttentionController {
                     .sort({ createdAt: 1 }).limit(MAX_WAITING_SCANNED).toArray(),
                 this.collections.technicians.find({ status: 'approved' }, { projection: { status: 1, region: 1, expertise: 1 } }).toArray(),
                 this.collections.serviceDefinitions.find({}, { projection: { requiredExpertiseLevel: 1 } }).toArray(),
+                // Oldest first; never the customer's email or Stripe ids.
+                this.collections.payments.find(refundFilter, { projection: { requestId: 1, trackingId: 1, amount: 1, currency: 1, refundReason: 1, paidAt: 1, lastRefundAttemptAt: 1 } })
+                    .sort({ paidAt: 1 }).limit(LIST_LIMIT).toArray(),
+                this.collections.payments.countDocuments(refundFilter),
             ]);
 
             const levelByDefinition = new Map(definitions.map((d) => [d._id.toString(), d.requiredExpertiseLevel]));
@@ -105,6 +114,7 @@ class AdminAttentionController {
                     missedPickups: missedPickupsTotal,
                     unmatchable: unmatchable.length,
                     unchosen: unchosen.length,
+                    feeRefunds: feeRefundsTotal,
                 },
                 overdueWaiting: overdueWaiting.map(summarize),
                 missedPickups: missedPickups.map(summarize),
@@ -113,6 +123,15 @@ class AdminAttentionController {
                     ...summarize(doc),
                     publishedAt: publishedAt(doc),
                     pendingApplications: applicationsById.get(doc._id.toString()) || 0,
+                })),
+                feeRefunds: feeRefunds.map((row) => ({
+                    id: row.requestId,
+                    trackingId: row.trackingId || null,
+                    amount: row.amount,
+                    currency: row.currency || 'BDT',
+                    reason: row.refundReason || null,
+                    paidAt: row.paidAt || null,
+                    lastAttemptAt: row.lastRefundAttemptAt || null,
                 })),
             });
         } catch (error) {

@@ -10,7 +10,7 @@ const CHOOSE_WITHIN_MS = 24 * 60 * 60 * 1000;
 const MAX_ESTIMATE_BDT = 100000;
 const NOTE_MAX_LENGTH = 500;
 
-const APPLICATION_STATUSES = Object.freeze(['pending', 'accepted', 'not_chosen', 'withdrawn']);
+const APPLICATION_STATUSES = Object.freeze(['pending', 'accepted', 'not_chosen', 'withdrawn', 'no_show']);
 
 function photosOf(request) {
     return request && request.damage && Array.isArray(request.damage.images) ? request.damage.images : [];

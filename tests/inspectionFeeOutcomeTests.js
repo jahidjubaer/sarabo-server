@@ -28,6 +28,8 @@ async function runInspectionFeeOutcomeTests({ logTest }) {
     const MissedPickupController = require('../controllers/missedPickupController');
     const QuoteController = require('../controllers/quoteController');
     const WalletController = require('../controllers/walletController');
+    const AdminAttentionController = require('../controllers/adminAttentionController');
+    const AdminReportController = require('../controllers/adminReportController');
     const { bookingCancellationOutcome, inspectionFeeSplit, inspectionPaymentView } = require('../utils/inspectionFee');
     const { calculateWallet } = require('../utils/settlement');
     if (process.env.NODE_ENV !== 'test' || !c.repairRequests.dbName.includes('test') || c.repairRequests.dbName === 'sarabo-db') {
@@ -232,6 +234,13 @@ async function runInspectionFeeOutcomeTests({ logTest }) {
             failedCancel.statusCode === 200 && failedCancel.body.inspectionFee === 'refund_pending'
             && (await load(r.id)).deliveryStatus === 'cancelled' && (await load(r.id)).inspectionPayment.status === 'refund_pending'
             && pendingRow.refundStatus === 'pending' && pendingRow.lastRefundError === 'stripe is down');
+        const attentionRes = fakeRes();
+        await new AdminAttentionController(models, c).getAttention({ decoded_email: ADMIN, query: {} }, attentionRes);
+        const waitingRefund = attentionRes.body.feeRefunds.find((row) => row.id === r.id);
+        logTest('Fee outcomes: a refund waiting on Stripe is on the admin attention list - without the customer or Stripe ids',
+            attentionRes.statusCode === 200 && attentionRes.body.counts.feeRefunds >= 1 && waitingRefund
+            && waitingRefund.amount === FEE && waitingRefund.reason === 'customer_cancelled' && waitingRefund.lastAttemptAt
+            && !('customerEmail' in waitingRefund) && !('transactionId' in waitingRefund) && !('sessionId' in waitingRefund));
         const stillFailing = await call(fees, 'retryRefund', ADMIN, { params: { id: r.id } });
         refundsFail = false;
         const retried = await call(fees, 'retryRefund', ADMIN, { params: { id: r.id } });
@@ -243,6 +252,36 @@ async function runInspectionFeeOutcomeTests({ logTest }) {
         const nothingLeft = await call(fees, 'retryRefund', ADMIN, { params: { id: r.id } });
         logTest('Fee outcomes: with nothing pending, a retry refunds nothing',
             nothingLeft.statusCode === 409 && nothingLeft.body.code === 'NO_REFUND_PENDING' && refunds.length === 3);
+        const afterRetry = fakeRes();
+        await new AdminAttentionController(models, c).getAttention({ decoded_email: ADMIN, query: {} }, afterRetry);
+        logTest('Fee outcomes: once refunded, it leaves the attention list',
+            !afterRetry.body.feeRefunds.some((row) => row.id === r.id));
+
+        // ---- reports: fee money in the period (a far-future week of its own) ----
+        const at = (day) => new Date(`2098-06-${day}T06:00:00Z`);
+        const reportTech = await insertTech('report');
+        const paidIn = await insertBooked(reportTech, { startsAt: at('10') });
+        const refundedIn = await insertBooked(reportTech, { startsAt: at('10') });
+        const keptIn = await insertBooked(reportTech, { startsAt: at('10') });
+        const pendingNow = await insertBooked(reportTech, { startsAt: at('10') });
+        const before = await insertBooked(reportTech, { startsAt: at('01') });
+        for (const row of [paidIn, refundedIn, keptIn, pendingNow]) await c.payments.updateOne({ sessionId: row.sessionId }, { $set: { paidAt: at('10') } });
+        await c.payments.updateOne({ sessionId: before.sessionId }, { $set: { paidAt: at('01') } });
+        await c.payments.updateOne({ sessionId: refundedIn.sessionId }, { $set: { refundStatus: 'refunded', refundedAt: at('11') } });
+        await c.payments.updateOne({ sessionId: pendingNow.sessionId }, { $set: { refundStatus: 'pending' } });
+        await c.repairRequests.updateOne({ _id: new ObjectId(keptIn.id) }, { $set: { inspectionFeeSettlement: {
+            status: 'available', reason: 'quote_declined', feeAmount: FEE, platformCommission: 30, technicianReceivable: 270, settledAt: at('12'),
+        } } });
+        const reportRes = fakeRes();
+        await new AdminReportController(models, c, { now: () => at('14') }).getReport({ decoded_email: ADMIN, query: { days: '7' } }, reportRes);
+        const money = reportRes.body.inspectionFees;
+        logTest('Fee outcomes: the report counts fees paid, refunded and kept in the period, with the 90/10 split',
+            reportRes.statusCode === 200
+            && money.paid.count === 4 && money.paid.amount === 4 * FEE
+            && money.refunded.count === 1 && money.refunded.amount === FEE
+            && money.kept.count === 1 && money.kept.technicianShare === 270 && money.kept.saraboShare === 30
+            && money.kept.quoteDeclined === 1 && money.kept.lateCancellations === 0
+            && money.refundPending.count >= 1);
     } finally {
         const ids = requestIds.map(String);
         await c.payments.deleteMany({ requestId: { $in: ids } });
