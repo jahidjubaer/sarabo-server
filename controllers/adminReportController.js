@@ -1,5 +1,5 @@
 const { ACTIVE_STATUSES, REPAIR_COMPLETED } = require('../utils/repairRequestStatus');
-const { satisfiesRequiredExpertiseLevel } = require('../utils/technicianExpertise');
+const { canTechnicianEverTakeRequest } = require('../services/technicianEligibilityService');
 const { PICKUP_SLOTS, TIMEZONE, dhakaDateString } = require('../utils/pickupSlots');
 
 // Admin reports (reports phase): one read-only summary for the Reports page.
@@ -113,13 +113,13 @@ class AdminReportController {
             if (!region) continue;
             const r = entry(region);
             r.waiting += 1;
-            const product = request.product && request.product.categorySlug;
-            const repair = request.service && request.service.repairCategorySlug;
-            const level = levelByDefinition.get(request.service && request.service.definitionId);
-            const someoneCan = approved.some((t) => t.region === region && Array.isArray(t.expertise) && t.expertise.some((e) => e.productCategorySlug === product
-                && Array.isArray(e.repairCategorySlugs) && e.repairCategorySlugs.includes(repair)
-                && (!level || satisfiesRequiredExpertiseLevel(e.level, level))));
-            if (!someoneCan) r.unmatchedWaiting += 1;
+            const needs = {
+                region,
+                productCategorySlug: request.product && request.product.categorySlug,
+                repairCategorySlug: request.service && request.service.repairCategorySlug,
+                requiredExpertiseLevel: levelByDefinition.get(request.service && request.service.definitionId),
+            };
+            if (!approved.some((t) => canTechnicianEverTakeRequest(t, needs))) r.unmatchedWaiting += 1;
         }
         return [...regions.values()].sort((a, b) => b.requests - a.requests || b.waiting - a.waiting || a.region.localeCompare(b.region));
     }

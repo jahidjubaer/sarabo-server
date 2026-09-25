@@ -17,6 +17,7 @@ const FeedbackController = require('./feedbackController');
 const PickupSlotController = require('./pickupSlotController');
 const PickupReminderController = require('./pickupReminderController');
 const AdminReportController = require('./adminReportController');
+const AdminAttentionController = require('./adminAttentionController');
 const { loadEmailConfig } = require('../config/email');
 const { createEmailService } = require('../services/emailService');
 const { connectDatabase } = require('../config/database');
@@ -65,6 +66,7 @@ function initializeControllers(models, collections, dependencies = {}) {
         pickupSlot: new PickupSlotController(models, collections, { emailService }),
         pickupReminder: new PickupReminderController(models, collections, { emailService }),
         adminReport: new AdminReportController(models, collections),
+        adminAttention: new AdminAttentionController(models, collections),
         support: new SupportController({
             aiSupportService,
             supportKnowledgeService,

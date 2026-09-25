@@ -147,6 +147,21 @@ function deriveServiceAreaMatch(requestTaxonomy, technician) {
     return { regionMatch, districtMatch, matchLevel };
 }
 
+// Could this technician EVER take this request - ignoring whether they are
+// busy right now? Same region (compared like deriveServiceAreaMatch), and the
+// right device, repair and level. Used by the reports and the admin
+// "needs attention" list to find requests no local technician can take.
+// `requiredExpertiseLevel` may be missing (unknown service): then any level
+// counts.
+function canTechnicianEverTakeRequest(technician, { region, productCategorySlug, repairCategorySlug, requiredExpertiseLevel }) {
+    if (!technician || technician.status !== 'approved') return false;
+    if (normalizeForAreaComparison(technician.region) !== normalizeForAreaComparison(region) || !normalizeForAreaComparison(region)) return false;
+    if (!Array.isArray(technician.expertise)) return false;
+    return technician.expertise.some((entry) => entry && entry.productCategorySlug === productCategorySlug
+        && Array.isArray(entry.repairCategorySlugs) && entry.repairCategorySlugs.includes(repairCategorySlug)
+        && (!requiredExpertiseLevel || satisfiesRequiredExpertiseLevel(entry.level, requiredExpertiseLevel)));
+}
+
 // ---- Hard eligibility ----
 
 function hasCompleteProfile(technician) {
@@ -318,6 +333,7 @@ module.exports = {
     deriveRequestTaxonomy,
     validateCurrentServiceDefinition,
     deriveServiceAreaMatch,
+    canTechnicianEverTakeRequest,
     evaluateTechnician,
     scoreTechnician,
     sortTechnicians,
