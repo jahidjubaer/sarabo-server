@@ -55,6 +55,7 @@ const { runAdminAttentionTests } = require('./tests/adminAttentionTests');
 const { runMissedPickupTests } = require('./tests/missedPickupTests');
 const { runInAppReminderTests } = require('./tests/inAppReminderTests');
 const { runMatchGateTests } = require('./tests/matchGateTests');
+const { runJobPortalTests } = require('./tests/jobPortalTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -4621,10 +4622,12 @@ async function testNotificationFoundation() {
             // Missed-pickup actions.
             'assignment_withdrawn', 'pickup_reschedule_requested',
             // In-app pickup reminders.
-            'pickup_reminder', 'pickup_reminder_technician'
+            'pickup_reminder', 'pickup_reminder_technician',
+            // Job portal.
+            'job_invitation', 'application_received', 'application_accepted', 'application_not_chosen'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 29 event types exist', actualTypes.length === 29 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 33 event types exist', actualTypes.length === 33 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -5044,7 +5047,9 @@ async function testNotificationFoundation() {
             // Missed-pickup phase: asks the request's owner for a new pickup time.
             'pickup_reschedule_requested',
             // In-app pickup reminders: the customer's copy goes to the request's owner.
-            'pickup_reminder'];
+            'pickup_reminder',
+            // Job portal: tells the request's owner a technician applied.
+            'application_received'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -13533,6 +13538,7 @@ async function runAllTests() {
     await runMissedPickupTests({ logTest });
     await runInAppReminderTests({ logTest });
     await runMatchGateTests({ logTest });
+    await runJobPortalTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing

@@ -1,4 +1,5 @@
 const { canTechnicianEverTakeRequest } = require('../services/technicianEligibilityService');
+const { isOpenForApplications, publishedAt, CHOOSE_WITHIN_MS } = require('../utils/jobPortal');
 
 // Requests that need an admin now (overdue-alerts phase). Read-only.
 //
@@ -12,7 +13,9 @@ const { canTechnicianEverTakeRequest } = require('../services/technicianEligibil
 // - unmatchable     waiting, and no approved technician in its region can
 //                   ever take it (right device, repair and level) - it needs
 //                   a new local technician, not just time.
-// A request can be both overdue and unmatchable; each list is independent.
+// - unchosen        open in the job portal (has a photo, nobody chosen) for
+//                   24 hours or more since it was published (job-portal phase B).
+// A request can be in more than one list; each list is independent.
 const WAITING = 'pending-pickup';
 const ASSIGNED_NOT_COLLECTED = ['assignment_pending', 'driver_assigned', 'rider_arriving'];
 const LIST_LIMIT = 200;
@@ -24,6 +27,8 @@ const MAX_WAITING_SCANNED = 2000;
 const SUMMARY_PROJECTION = {
     trackingId: 1, product: 1, service: 1, serviceLocation: 1, pickupSlot: 1, deliveryStatus: 1,
     technicianId: 1, technicianName: 1, createdAt: 1,
+    // For the job-portal checks only (publish time); never returned as-is.
+    schemaVersion: 1, 'damage.images.uploadedAt': 1,
 };
 
 function summarize(doc) {
@@ -74,6 +79,18 @@ class AdminAttentionController {
             ]);
 
             const levelByDefinition = new Map(definitions.map((d) => [d._id.toString(), d.requiredExpertiseLevel]));
+            const chooseBy = now.getTime() - CHOOSE_WITHIN_MS;
+            const unchosen = waiting.filter((doc) => {
+                if (!isOpenForApplications(doc)) return false;
+                const published = publishedAt(doc);
+                return published !== null && published.getTime() <= chooseBy;
+            });
+            const unchosenIds = unchosen.map((doc) => doc._id.toString());
+            const applicationCounts = unchosenIds.length ? await this.collections.jobApplications.aggregate([
+                { $match: { requestId: { $in: unchosenIds }, status: 'pending' } },
+                { $group: { _id: '$requestId', count: { $sum: 1 } } },
+            ]).toArray() : [];
+            const applicationsById = new Map(applicationCounts.map((row) => [row._id, row.count]));
             const unmatchable = waiting.filter((doc) => !technicians.some((t) => canTechnicianEverTakeRequest(t, {
                 region: doc.serviceLocation && doc.serviceLocation.region,
                 productCategorySlug: doc.product && doc.product.categorySlug,
@@ -87,10 +104,16 @@ class AdminAttentionController {
                     overdueWaiting: overdueWaitingTotal,
                     missedPickups: missedPickupsTotal,
                     unmatchable: unmatchable.length,
+                    unchosen: unchosen.length,
                 },
                 overdueWaiting: overdueWaiting.map(summarize),
                 missedPickups: missedPickups.map(summarize),
                 unmatchable: unmatchable.slice(0, LIST_LIMIT).map(summarize),
+                unchosen: unchosen.slice(0, LIST_LIMIT).map((doc) => ({
+                    ...summarize(doc),
+                    publishedAt: publishedAt(doc),
+                    pendingApplications: applicationsById.get(doc._id.toString()) || 0,
+                })),
             });
         } catch (error) {
             res.status(500).send({ message: 'Error loading requests that need attention', code: 'INTERNAL_ERROR' });

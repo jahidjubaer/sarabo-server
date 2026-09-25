@@ -48,6 +48,7 @@ const collections = {
     supportRateLimits: db.collection("support_rate_limits"),
     emailLog: db.collection("email_log"),
     turnedAwayRequests: db.collection("turned_away_requests"),
+    jobApplications: db.collection("job_applications"),
 };
 
 let connectionPromise = null;
@@ -283,6 +284,12 @@ async function connectDatabase() {
                     { expiresAt: 1 },
                     { name: 'emailLog_expiresAt_ttl', expireAfterSeconds: 0 }
                 );
+                // Job portal applications: one per technician per request.
+                await collections.jobApplications.createIndex(
+                    { requestId: 1, technicianId: 1 },
+                    { name: 'jobApplications_request_technician_unique', unique: true }
+                );
+                await collections.jobApplications.createIndex({ technicianId: 1, status: 1 }, { name: 'jobApplications_technician_status' });
                 // Refused requests (services/technicianMatchGate.js) expire after
                 // 180 days; reports read them by day.
                 await collections.turnedAwayRequests.createIndex(

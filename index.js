@@ -30,6 +30,7 @@ const feedbackRoutes = require('./routes/feedback');
 const pickupSlotRoutes = require('./routes/pickupSlots');
 const adminReportRoutes = require('./routes/adminReports');
 const missedPickupRoutes = require('./routes/missedPickups');
+const jobPortalRoutes = require('./routes/jobPortal');
 const { isEmailVerificationSkipped } = require('./middleware/auth');
 
 const app = express();
@@ -98,6 +99,7 @@ feedbackRoutes(app, controllers);
 pickupSlotRoutes(app, controllers);
 adminReportRoutes(app, controllers);
 missedPickupRoutes(app, controllers);
+jobPortalRoutes(app, controllers);
 repairRequestRoutes(app, controllers);
 paymentRoutes(app, controllers);
 technicianRoutes(app, controllers);
