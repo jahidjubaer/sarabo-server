@@ -313,12 +313,36 @@ const NOTIFICATION_EVENTS = {
         // Owner-facing - same role reasoning as technician_assigned.
         recipientRoles: ['user', 'rider', 'admin'],
         priority: 'normal',
-        allowedMetadataKeys: ['trackingId', 'occurrence'],
+        // `reason` (phase D) picks the wording; absent = the booking failed.
+        allowedMetadataKeys: ['trackingId', 'occurrence', 'reason'],
         requiresMetadata: ['trackingId', 'occurrence'],
         title: () => 'Your inspection fee is being refunded',
-        message: ({ metadata }) => `The technician you chose for repair request ${metadata.trackingId} could not be booked, so your inspection fee is being refunded. Please choose another technician.`,
+        message: ({ metadata }) => {
+            if (metadata.reason === 'technician_no_show') {
+                return `The technician did not come to collect repair request ${metadata.trackingId}, so your inspection fee is being refunded in full. Please choose another technician.`;
+            }
+            if (metadata.reason === 'customer_cancelled') {
+                return `You cancelled repair request ${metadata.trackingId} at least 2 hours before the visit, so your inspection fee is being refunded in full.`;
+            }
+            return `The technician you chose for repair request ${metadata.trackingId} could not be booked, so your inspection fee is being refunded. Please choose another technician.`;
+        },
         actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
         deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:inspection_fee_refunded:${metadata.occurrence || 'once'}`,
+    },
+    // Job-portal phase D: the customer cancelled a booked visit. `feeOutcome`
+    // says whether the technician keeps their share of the inspection fee.
+    booking_cancelled_by_customer: {
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'feeOutcome'],
+        requiresMetadata: ['trackingId', 'feeOutcome'],
+        title: () => 'The customer cancelled a visit',
+        message: ({ metadata }) => (metadata.feeOutcome === 'kept'
+            ? `The customer cancelled repair request ${metadata.trackingId} less than 2 hours before the visit. Your share of the inspection fee is in your wallet.`
+            : `The customer cancelled repair request ${metadata.trackingId}. You are free for other jobs.`),
+        actionUrl: () => '/dashboard/assigned-jobs',
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:booking_cancelled_by_customer`,
     },
     technician_on_the_way: {
         entityType: 'repair_request',

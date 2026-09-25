@@ -7,6 +7,7 @@ const {
     calculateWallet, validateWithdrawalRequest, buildWithdrawalDocument,
     validateProcessingNote, buildSettlementView, buildWithdrawalView,
 } = require('../utils/settlement');
+const { inspectionFeeSettlementView } = require('../utils/inspectionFee');
 
 const WALLET_SETTLEMENT_LIMIT = 25;
 const WALLET_WITHDRAWAL_LIMIT = 25;
@@ -47,12 +48,18 @@ class WalletController {
         const [repairRequests, withdrawals] = await Promise.all([
             this.collections.repairRequests
                 .find(
-                    { technicianEmail, technicianSettlement: { $exists: true } },
+                    {
+                        $or: [
+                            { technicianEmail, technicianSettlement: { $exists: true } },
+                            // Kept inspection fees (job-portal phase D).
+                            { 'inspectionFeeSettlement.technicianEmail': technicianEmail },
+                        ],
+                    },
                     // Explicit projection - the wallet needs the settlement, the
                     // reference to show against it, and the legacy earning purely
                     // to exclude already-paid historical repairs. It never needs
                     // customer identity, address, damage or quote notes.
-                    { projection: { technicianSettlement: 1, technicianEarning: 1, trackingId: 1, updatedAt: 1 } }
+                    { projection: { technicianSettlement: 1, inspectionFeeSettlement: 1, technicianEarning: 1, trackingId: 1, updatedAt: 1 } }
                 )
                 .toArray(),
             this.TechnicianWithdrawal.findByTechnicianEmail(technicianEmail, { limit: 200 }),
@@ -67,7 +74,7 @@ class WalletController {
             const { repairRequests, withdrawals, wallet } = await this.loadWallet(technicianEmail);
 
             const settlements = repairRequests
-                .map((repairRequest) => buildSettlementView(repairRequest))
+                .flatMap((repairRequest) => [buildSettlementView(repairRequest), inspectionFeeSettlementView(repairRequest)])
                 .filter(Boolean)
                 .sort((a, b) => new Date(b.settledAt || 0) - new Date(a.settledAt || 0))
                 .slice(0, WALLET_SETTLEMENT_LIMIT);

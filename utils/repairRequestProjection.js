@@ -11,6 +11,7 @@
 //
 // Pure: does not mutate its input.
 const { isRepairRequestPaid } = require('./paymentState');
+const { inspectionPaymentView } = require('./inspectionFee');
 
 function stripDamageImages(repairRequest) {
     if (!repairRequest || !repairRequest.damage || typeof repairRequest.damage !== 'object') {
@@ -75,9 +76,11 @@ function projectSafeListRepairRequest(repairRequest) {
     // view re-attaches the safe wallet settlement projection in the controller;
     // admins can still read historical earning records on request details.
     // eslint-disable-next-line no-unused-vars
-    const { assignmentHistory, inspection, repair, quote, payment, technicianEarning, technicianSettlement, feedbackRevision, ...rest } = safe;
+    const { assignmentHistory, inspection, repair, quote, payment, technicianEarning, technicianSettlement, feedbackRevision, inspectionPayment, inspectionFeeSettlement, ...rest } = safe;
     const projected = {
         ...rest,
+        // Job-portal phases C/D: the fee without its Stripe ids.
+        inspectionPayment: inspectionPaymentView(safe),
         isPaid: isRepairRequestPaid(safe),
         hasInspection: Boolean(inspection),
         hasQuote: Boolean(quote),

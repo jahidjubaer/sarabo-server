@@ -57,6 +57,7 @@ const { runInAppReminderTests } = require('./tests/inAppReminderTests');
 const { runMatchGateTests } = require('./tests/matchGateTests');
 const { runJobPortalTests } = require('./tests/jobPortalTests');
 const { runInspectionFeeTests } = require('./tests/inspectionFeeTests');
+const { runInspectionFeeOutcomeTests } = require('./tests/inspectionFeeOutcomeTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -4631,10 +4632,12 @@ async function testNotificationFoundation() {
             // Job portal.
             'job_invitation', 'application_received', 'application_accepted', 'application_not_chosen',
             // Inspection fee.
-            'inspection_fee_refunded'
+            'inspection_fee_refunded',
+            // Inspection-fee outcomes.
+            'booking_cancelled_by_customer'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 34 event types exist', actualTypes.length === 34 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 35 event types exist', actualTypes.length === 35 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -13549,6 +13552,7 @@ async function runAllTests() {
     await runMatchGateTests({ logTest });
     await runJobPortalTests({ logTest });
     await runInspectionFeeTests({ logTest });
+    await runInspectionFeeOutcomeTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing

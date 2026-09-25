@@ -9,6 +9,7 @@ const { calculateSettlement, buildSettlementDocument } = require('../utils/settl
 const { isRepairRequestPaid } = require('../utils/paymentState');
 const { INSPECTION_FEE_PURPOSE, amountDueForQuote, inspectionCredit } = require('../utils/inspectionFee');
 const { bookApplication, notifyBooking } = require('./jobBooking');
+const { sendFeeRefund, notifyFeeRefunded } = require('./inspectionFeeRefunds');
 
 function normalize(value) {
     return (value || '').trim().toLowerCase();
@@ -253,34 +254,23 @@ function createPaymentProcessor(models, collections, notifications, { refundPaym
         } catch (error) {
             if (!(error && error.code === 11000)) throw error;
         }
+        // Shown on the request - unless it already holds another fee that is
+        // still live (paid, or itself waiting for its refund): that one must
+        // never be overwritten. The payments row above is what gets refunded.
         await collections.repairRequests.updateOne(
-            { _id: repairRequest._id, 'inspectionPayment.status': { $ne: 'refunded' } },
+            {
+                _id: repairRequest._id,
+                $or: [
+                    { inspectionPayment: { $exists: false } },
+                    { 'inspectionPayment.sessionId': paymentRecord.sessionId, 'inspectionPayment.status': { $ne: 'refunded' } },
+                    { 'inspectionPayment.status': { $nin: ['paid', 'refund_pending'] } },
+                ],
+            },
             {
                 $set: { inspectionPayment: { ...inspectionPayment, status: 'refund_pending', refundReason: reason } },
                 $unset: { feeCheckout: '' },
             }
         );
-    }
-
-    async function refundFee({ paymentRecord, repairRequest }) {
-        if (!refundPayment || !paymentRecord.transactionId) return null;
-        try {
-            const refundId = await refundPayment({
-                paymentIntentId: paymentRecord.transactionId,
-                idempotencyKey: `inspection-refund-${paymentRecord.sessionId}`,
-            });
-            const refundedAt = new Date();
-            await collections.payments.updateOne({ sessionId: paymentRecord.sessionId }, { $set: { refundStatus: 'refunded', refundId, refundedAt } });
-            await collections.repairRequests.updateOne(
-                { _id: repairRequest._id, 'inspectionPayment.sessionId': paymentRecord.sessionId },
-                { $set: { 'inspectionPayment.status': 'refunded', 'inspectionPayment.refundId': refundId, 'inspectionPayment.refundedAt': refundedAt } }
-            );
-            return refundId;
-        } catch (error) {
-            // Stays 'refund_pending' so it can be retried; never lost.
-            console.error('Inspection fee refund failed (will stay pending):', error.message);
-            return null;
-        }
     }
 
     async function completeInspectionFeeSession({ session, repairRequest, sessionId, source }) {
@@ -356,22 +346,11 @@ function createPaymentProcessor(models, collections, notifications, { refundPaym
             return { code: 'OK', booked: true, technicianName: technician.name, ...result };
         }
 
-        await recordFeeNeedingRefund({ paymentRecord, repairRequest, inspectionPayment, reason: outcome });
+        await recordFeeNeedingRefund({ paymentRecord, repairRequest, inspectionPayment, reason: 'booking_failed' });
         await checkoutSessionManager.completeByRequestId(requestId);
-        const refundId = await refundFee({ paymentRecord, repairRequest });
-        await logTrackingSafely(collections.trackingEvents, repairRequest.trackingId, 'inspection_fee_refunded');
-        try {
-            const ownerRole = await User.findRoleByEmail(repairRequest.senderEmail);
-            if (ownerRole) {
-                await notifications.createNotification({
-                    recipientEmail: repairRequest.senderEmail, recipientRole: ownerRole, type: 'inspection_fee_refunded',
-                    entityType: 'repair_request', entityId: requestId, metadata: { trackingId: repairRequest.trackingId, occurrence: sessionId },
-                });
-            }
-        } catch (error) {
-            console.error('Inspection fee refund notification failed (non-fatal):', error.message);
-        }
-        return { code: 'INSPECTION_FEE_REFUNDED', refunded: Boolean(refundId), reason: outcome, ...result };
+        const refund = await sendFeeRefund({ collections, refundPayment, sessionId });
+        await notifyFeeRefunded({ collections, notifications, User, request: repairRequest, reason: 'booking_failed', sessionId });
+        return { code: 'INSPECTION_FEE_REFUNDED', refunded: refund.refunded, reason: outcome, ...result };
     }
 
     return async function processVerifiedCheckoutSession({ session, source, callerEmail = null }) {

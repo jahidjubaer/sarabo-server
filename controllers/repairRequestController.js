@@ -29,6 +29,7 @@ const PickupSlotController = require('./pickupSlotController');
 const { isMatchGateSkipped, hasTechnicianFor, recordTurnedAway } = require('../services/technicianMatchGate');
 const { createDisabledEmailService } = require('../services/emailService');
 const { SETTLEMENT_PENDING, SETTLEMENT_AVAILABLE, buildSettlementView } = require('../utils/settlement');
+const { inspectionPaymentView, inspectionFeeSettlementView } = require('../utils/inspectionFee');
 const { isRepairRequestPaid, buildPaymentStateMatch } = require('../utils/paymentState');
 const {
     ELIGIBILITY_VERSION, DIAGNOSTIC_INELIGIBLE_CAP, validateDiagnosticFlag, validatePagination,
@@ -231,10 +232,14 @@ class RepairRequestController {
             // isPaid. The raw settlement is also stripped because it carries
             // technician identity; assigned Technician/Admin viewers get the
             // safe buildSettlementView projection below.
-            const { inspection, quote, repair, assignmentHistory, payment, technicianSettlement, feedbackRevision, ...safeRepairRequest } = repairRequest;
+            const { inspection, quote, repair, assignmentHistory, payment, technicianSettlement, feedbackRevision, inspectionPayment, inspectionFeeSettlement, ...safeRepairRequest } = repairRequest;
             safeRepairRequest.isPaid = isRepairRequestPaid(repairRequest);
+            // Job-portal phases C/D: the inspection fee without its Stripe ids;
+            // a kept fee's split only for its technician and admins.
+            safeRepairRequest.inspectionPayment = inspectionPaymentView(repairRequest);
             if (isAssignedTechnician || isAdmin) {
                 safeRepairRequest.technicianSettlement = buildSettlementView(repairRequest);
+                safeRepairRequest.inspectionFeeSettlement = inspectionFeeSettlementView(repairRequest);
             }
             // technicianEarning (Phase 8.11) is internal accounting - only an
             // admin reads it through this endpoint (for the settlement UI +
@@ -1812,7 +1817,9 @@ class RepairRequestController {
 
             // A completed payment record is authoritative even if
             // repair request.paymentStatus is somehow inconsistent with it.
-            const existingPayment = await this.collections.payments.findOne({ requestId: id });
+            // An inspection fee (job-portal phase C) is not a repair payment:
+            // a request whose fee was refunded can still be cancelled here.
+            const existingPayment = await this.collections.payments.findOne({ requestId: id, purpose: { $ne: 'inspection_fee' } });
             const eligibility = getCancellationEligibility(repairRequest, { hasCompletedPayment: !!existingPayment });
 
             if (!eligibility.eligible) {

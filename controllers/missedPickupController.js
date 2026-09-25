@@ -2,6 +2,7 @@ const { ObjectId } = require('mongodb');
 const { client } = require('../config/database');
 const { logTracking, logTrackingSafely } = require('../middleware/logging');
 const { createNotificationService } = require('../services/notificationService');
+const { createStripeRefunder, markFeeForRefund, sendFeeRefund, notifyFeeRefunded } = require('../services/inspectionFeeRefunds');
 
 // Admin actions on a missed pickup (missed-pickup phase). A pickup is missed
 // when a technician is assigned (offered, accepted or on the way) but the
@@ -14,6 +15,10 @@ const { createNotificationService } = require('../services/notificationService')
 // - askNewTime:  keep the technician; ask the customer to choose a new pickup
 //                time. Until they do, the request is off the missed list; their
 //                new time (PATCH /repair-requests/:id/pickup-slot) clears it.
+//
+// A withdrawal is a technician no-show (job-portal phase D): a paid inspection
+// fee is refunded in full, and the job portal opens again - the technician's
+// application is marked no_show and the other applicants can be chosen again.
 const ASSIGNED_NOT_COLLECTED = ['assignment_pending', 'driver_assigned', 'rider_arriving'];
 
 function normalize(value) {
@@ -21,8 +26,10 @@ function normalize(value) {
 }
 
 class MissedPickupController {
-    constructor(models, collections, { now = () => new Date(), mongoClient = client } = {}) {
+    constructor(models, collections, { now = () => new Date(), mongoClient = client, refundPayment = null } = {}) {
         this.collections = collections;
+        // Stripe test mode unless a test injects its own.
+        this.refundPayment = refundPayment || ((args) => createStripeRefunder(require('stripe')(process.env.STRIPE_SECRET))(args));
         this.User = models.User;
         this.notifications = createNotificationService(models);
         this.now = now;
@@ -52,6 +59,7 @@ class MissedPickupController {
             const adminEmail = normalize(req.decoded_email);
             const session = this.mongoClient.startSession();
             let changed = false;
+            let refundSessionId = null;
             try {
                 await session.withTransaction(async () => {
                     // Guarded on the exact state just read: a pickup or a
@@ -76,6 +84,25 @@ class MissedPickupController {
                     );
                     if (result.matchedCount === 0) return;
                     changed = true;
+                    refundSessionId = await markFeeForRefund({ collections: this.collections, request, reason: 'technician_no_show', now, session });
+                    await this.collections.repairRequests.updateOne(
+                        { _id: request._id },
+                        { $unset: { acceptedApplication: '', feeCheckout: '' } },
+                        { session }
+                    );
+                    const requestId = request._id.toString();
+                    if (request.technicianId) {
+                        await this.collections.jobApplications.updateOne(
+                            { requestId, technicianId: request.technicianId, status: 'accepted' },
+                            { $set: { status: 'no_show', updatedAt: now } },
+                            { session }
+                        );
+                    }
+                    await this.collections.jobApplications.updateMany(
+                        { requestId, status: 'not_chosen' },
+                        { $set: { status: 'pending', updatedAt: now } },
+                        { session }
+                    );
                     if (request.technicianId && ObjectId.isValid(request.technicianId)) {
                         await this.collections.technicians.updateOne(
                             { _id: new ObjectId(request.technicianId), workStatus: 'in_delivery' },
@@ -102,7 +129,13 @@ class MissedPickupController {
             if (!changed) {
                 return res.status(409).send({ message: 'this request changed meanwhile - reload it', code: 'REQUEST_CHANGED' });
             }
-            res.send({ success: true, deliveryStatus: 'pending-pickup' });
+            let inspectionFee = 'none';
+            if (refundSessionId) {
+                const refund = await sendFeeRefund({ collections: this.collections, refundPayment: this.refundPayment, sessionId: refundSessionId, now });
+                await notifyFeeRefunded({ collections: this.collections, notifications: this.notifications, User: this.User, request, reason: 'technician_no_show', sessionId: refundSessionId });
+                inspectionFee = refund.refunded ? 'refunded' : 'refund_pending';
+            }
+            res.send({ success: true, deliveryStatus: 'pending-pickup', inspectionFee });
         } catch (error) {
             res.status(500).send({ message: 'Error taking the job off the technician', code: 'INTERNAL_ERROR' });
         }

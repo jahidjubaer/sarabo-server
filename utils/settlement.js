@@ -207,6 +207,18 @@ function calculateWallet({ repairRequests = [], withdrawals = [] } = {}) {
         }
     }
 
+    // A kept inspection fee (job-portal phase D): the technician's 90% of a
+    // fee whose repair did not go ahead. Only ever on a request that never
+    // reached a repair settlement, so nothing is counted twice.
+    for (const repairRequest of repairRequests) {
+        const feeSettlement = repairRequest && repairRequest.inspectionFeeSettlement;
+        if (!feeSettlement || !isWholeTaka(feeSettlement.technicianReceivable)) continue;
+        settlementCount += 1;
+        lifetimeReceivable += feeSettlement.technicianReceivable;
+        if (feeSettlement.status === SETTLEMENT_AVAILABLE) grossAvailableBalance += feeSettlement.technicianReceivable;
+        else pendingBalance += feeSettlement.technicianReceivable;
+    }
+
     let reservedBalance = 0;
     let withdrawnBalance = 0;
     for (const withdrawal of withdrawals) {
@@ -331,6 +343,7 @@ function buildWithdrawalView(withdrawal) {
 
 module.exports = {
     PLATFORM_COMMISSION_RATE,
+    commissionFor,
     COMMISSION_NUMERATOR,
     COMMISSION_DENOMINATOR,
     COMMISSION_BASE_FIELDS,

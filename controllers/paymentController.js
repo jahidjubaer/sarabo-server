@@ -1,4 +1,5 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
+const { createStripeRefunder } = require('../services/inspectionFeeRefunds');
 const { ObjectId } = require('mongodb');
 const { createPaymentProcessor, normalize } = require('../services/paymentProcessor');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
@@ -35,10 +36,7 @@ class PaymentController {
         this.processCheckoutSession = createPaymentProcessor(models, collections, this.notifications, {
             // Job-portal phase C: returns an inspection fee that can no longer
             // book its technician (Stripe test mode).
-            refundPayment: async ({ paymentIntentId, idempotencyKey }) => {
-                const refund = await stripe.refunds.create({ payment_intent: paymentIntentId }, { idempotencyKey });
-                return refund.id;
-            },
+            refundPayment: createStripeRefunder(stripe),
         });
         // Guards against duplicate concurrent Stripe Checkout Sessions for
         // the same repair request - see services/checkoutSessionManager.js.
