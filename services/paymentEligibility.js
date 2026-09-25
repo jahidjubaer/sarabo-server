@@ -1,3 +1,4 @@
+const { amountDueForQuote, inspectionCredit } = require('../utils/inspectionFee');
 const { VALID_STATUSES, QUOTE_APPROVED } = require('../utils/repairRequestStatus');
 const { isValidStoredCost, isValidQuoteTotal, isBdtQuoteCurrency, V2_PAYMENT_CURRENCY } = require('../config/paymentConfig');
 const { isV2RepairRequest } = require('../utils/repairRequestSchema');
@@ -109,9 +110,13 @@ function getV2PaymentEligibility(repairRequest) {
     // amount is whole taka (display + Stripe-major-unit source); currency is the
     // uppercase code the quote stores. quoteVersion lets the client/Stripe
     // metadata pin exactly which immutable quote is being paid.
+    // The inspection fee already paid counts toward the quote (job-portal
+    // phase C): `amount` is what is left to pay.
     return {
         eligible: true,
-        amount: quote.totalAmount,
+        amount: amountDueForQuote(repairRequest),
+        quoteTotal: quote.totalAmount,
+        inspectionCredit: inspectionCredit(repairRequest),
         currency: quote.currency,
         quoteVersion: quote.version,
     };

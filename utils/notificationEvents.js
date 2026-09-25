@@ -306,6 +306,20 @@ const NOTIFICATION_EVENTS = {
         actionUrl: () => '/dashboard/job-portal',
         deduplicationKey: ({ entityId, recipientEmail }) => `repair:${entityId}:application_not_chosen:${recipientEmail || 'technician'}`,
     },
+    // Inspection fee (job-portal phase C): the chosen technician could no
+    // longer be booked after the customer paid, so the fee is refunded.
+    inspection_fee_refunded: {
+        entityType: 'repair_request',
+        // Owner-facing - same role reasoning as technician_assigned.
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'occurrence'],
+        requiresMetadata: ['trackingId', 'occurrence'],
+        title: () => 'Your inspection fee is being refunded',
+        message: ({ metadata }) => `The technician you chose for repair request ${metadata.trackingId} could not be booked, so your inspection fee is being refunded. Please choose another technician.`,
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:inspection_fee_refunded:${metadata.occurrence || 'once'}`,
+    },
     technician_on_the_way: {
         entityType: 'repair_request',
         // Same reasoning as technician_assigned - POST /repair-requests only

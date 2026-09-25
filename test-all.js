@@ -56,6 +56,7 @@ const { runMissedPickupTests } = require('./tests/missedPickupTests');
 const { runInAppReminderTests } = require('./tests/inAppReminderTests');
 const { runMatchGateTests } = require('./tests/matchGateTests');
 const { runJobPortalTests } = require('./tests/jobPortalTests');
+const { runInspectionFeeTests } = require('./tests/inspectionFeeTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -140,6 +141,10 @@ require.cache[stripeModulePath] = {
                         return { id: sessionId, ...expired };
                     }
                 }
+            },
+            // Inspection-fee refunds (job-portal phase C). Real Stripe is never called.
+            refunds: {
+                create: async (params) => ({ id: `re_test_${String(params && params.payment_intent)}`, status: 'succeeded' }),
             },
             webhooks: {
                 // A lightweight stand-in for real HMAC signature verification -
@@ -4624,10 +4629,12 @@ async function testNotificationFoundation() {
             // In-app pickup reminders.
             'pickup_reminder', 'pickup_reminder_technician',
             // Job portal.
-            'job_invitation', 'application_received', 'application_accepted', 'application_not_chosen'
+            'job_invitation', 'application_received', 'application_accepted', 'application_not_chosen',
+            // Inspection fee.
+            'inspection_fee_refunded'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 33 event types exist', actualTypes.length === 33 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 34 event types exist', actualTypes.length === 34 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -5049,7 +5056,9 @@ async function testNotificationFoundation() {
             // In-app pickup reminders: the customer's copy goes to the request's owner.
             'pickup_reminder',
             // Job portal: tells the request's owner a technician applied.
-            'application_received'];
+            'application_received',
+            // Inspection fee: tells the request's owner their fee is refunded.
+            'inspection_fee_refunded'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -13539,6 +13548,7 @@ async function runAllTests() {
     await runInAppReminderTests({ logTest });
     await runMatchGateTests({ logTest });
     await runJobPortalTests({ logTest });
+    await runInspectionFeeTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing

@@ -1,11 +1,13 @@
 const { ObjectId } = require('mongodb');
 const { client } = require('../config/database');
-const { logTracking } = require('../middleware/logging');
 const { createNotificationService } = require('../services/notificationService');
 const { canTechnicianEverTakeRequest } = require('../services/technicianEligibilityService');
-const { buildPendingAssignmentEntry } = require('../utils/assignmentDecision');
-const { ACTIVE_STATUSES } = require('../utils/repairRequestStatus');
 const { isOpenForApplications, publishedAt, maxInspectionFee, validateApplicationInput } = require('../utils/jobPortal');
+const { bookApplication, notifyBooking } = require('../services/jobBooking');
+const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
+const { INSPECTION_FEE_PURPOSE } = require('../utils/inspectionFee');
+const { V2_PAYMENT_CURRENCY, toSmallestUnit } = require('../config/paymentConfig');
+const { normalizeSiteOrigin } = require('../config/siteOrigin');
 
 // Job portal (job-portal phase B). Customers' waiting requests with a photo
 // are listed to every approved technician who could take them (same region,
@@ -14,6 +16,10 @@ const { isOpenForApplications, publishedAt, maxInspectionFee, validateApplicatio
 // one, which books that technician for the chosen pickup time - the same state
 // an admin assignment accepted by the technician reaches. The other
 // applications are closed. Admins can invite a technician to apply.
+//
+// Inspection fee (phase C): when the chosen technician charges a fee, choosing
+// opens a Stripe Checkout for it and the technician is booked only once that
+// payment is confirmed (services/paymentProcessor.js). A zero fee books at once.
 //
 // Before a technician is chosen they see the district, pickup time, problem
 // and photos - never the customer's name, email or street address.
@@ -29,14 +35,28 @@ function refuse(res, status, code, message) {
 }
 
 class JobPortalController {
-    constructor(models, collections, { now = () => new Date(), mongoClient = client } = {}) {
+    constructor(models, collections, { now = () => new Date(), mongoClient = client, stripeClient, siteOrigin } = {}) {
         this.collections = collections;
+        // Stripe (test mode) is created lazily so tests can inject a fake.
+        this.stripeClient = stripeClient || null;
+        this.siteOrigin = siteOrigin || null;
+        this.checkoutSessions = createCheckoutSessionManager(collections);
         this.Technician = models.Technician;
         this.User = models.User;
         this.TechnicianReview = models.TechnicianReview;
         this.notifications = createNotificationService(models);
         this.now = now;
         this.mongoClient = mongoClient;
+    }
+
+    stripe() {
+        if (!this.stripeClient) this.stripeClient = require('stripe')(process.env.STRIPE_SECRET);
+        return this.stripeClient;
+    }
+
+    origin() {
+        if (!this.siteOrigin) this.siteOrigin = normalizeSiteOrigin(process.env.SITE_DOMAIN);
+        return this.siteOrigin;
     }
 
     async levelsByDefinition() {
@@ -271,14 +291,15 @@ class JobPortalController {
     }
 
     // POST /repair-requests/:id/applications/:applicationId/accept  (the owner)
+    // Zero fee: books the technician now -> { success, booked: true }.
+    // Otherwise: opens (or reuses) the inspection-fee checkout -> { checkoutUrl }.
     async accept(req, res) {
         try {
             const request = await this.loadRequest(req.params.id);
             const caller = normalize(req.decoded_email);
             if (!request || normalize(request.senderEmail) !== caller) return refuse(res, 404, 'REQUEST_NOT_FOUND', 'repair request not found');
             if (!ObjectId.isValid(req.params.applicationId)) return refuse(res, 404, 'APPLICATION_NOT_FOUND', 'application not found');
-            const requestId = request._id.toString();
-            const application = await this.collections.jobApplications.findOne({ _id: new ObjectId(req.params.applicationId), requestId });
+            const application = await this.collections.jobApplications.findOne({ _id: new ObjectId(req.params.applicationId), requestId: request._id.toString() });
             if (!application) return refuse(res, 404, 'APPLICATION_NOT_FOUND', 'application not found');
             if (application.status !== 'pending') return refuse(res, 409, 'APPLICATION_NOT_PENDING', 'this application is no longer open');
             if (!isOpenForApplications(request)) return refuse(res, 409, 'JOB_NOT_OPEN', 'a technician has already been chosen for this request');
@@ -294,93 +315,113 @@ class JobPortalController {
                 return refuse(res, 409, 'TECHNICIAN_BUSY', 'this technician is on another job right now - choose another or try later');
             }
 
-            const now = this.now();
-            const session = this.mongoClient.startSession();
-            let conflict = null;
-            try {
-                await session.withTransaction(async () => {
-                    conflict = null;
-                    const busy = await this.collections.repairRequests.findOne(
-                        { technicianId: application.technicianId, deliveryStatus: { $in: ACTIVE_STATUSES }, _id: { $ne: request._id } },
-                        { session }
-                    );
-                    if (busy) { conflict = 'TECHNICIAN_BUSY'; return; }
-                    const requestUpdate = await this.collections.repairRequests.updateOne(
-                        { _id: request._id, deliveryStatus: 'pending-pickup', technicianId: { $exists: false } },
-                        {
-                            $set: {
-                                deliveryStatus: 'driver_assigned',
-                                technicianId: application.technicianId,
-                                technicianName: technician.name,
-                                technicianEmail: technician.email,
-                                acceptedApplication: {
-                                    applicationId: application._id.toString(),
-                                    estimateMin: application.estimateMin,
-                                    estimateMax: application.estimateMax,
-                                    inspectionFee: application.inspectionFee,
-                                    acceptedAt: now,
-                                },
-                                updatedAt: now,
-                            },
-                            // The technician offered and the customer accepted:
-                            // recorded as an accepted assignment.
-                            $push: {
-                                assignmentHistory: {
-                                    ...buildPendingAssignmentEntry({
-                                        assignmentId: application._id.toString(), technicianId: application.technicianId,
-                                        technicianEmail: technician.email, technicianName: technician.name,
-                                        assignedBy: caller, assignedAt: now,
-                                    }),
-                                    decision: 'accepted',
-                                    decidedAt: now,
-                                    source: 'job_portal',
-                                },
-                            },
-                        },
-                        { session }
-                    );
-                    if (requestUpdate.matchedCount === 0) { conflict = 'JOB_NOT_OPEN'; return; }
-                    const technicianUpdate = await this.collections.technicians.updateOne(
-                        { _id: technician._id, status: 'approved', workStatus: 'available' },
-                        { $set: { workStatus: 'in_delivery' } },
-                        { session }
-                    );
-                    if (technicianUpdate.matchedCount === 0) {
-                        throw Object.assign(new Error('technician became unavailable'), { code: 'TECHNICIAN_BUSY' });
-                    }
-                    await this.collections.jobApplications.updateOne({ _id: application._id, status: 'pending' }, { $set: { status: 'accepted', decidedAt: now } }, { session });
-                    await this.collections.jobApplications.updateMany(
-                        { requestId, _id: { $ne: application._id }, status: 'pending' },
-                        { $set: { status: 'not_chosen', decidedAt: now } },
-                        { session }
-                    );
-                    await logTracking(this.collections.trackingEvents, request.trackingId, 'driver_assigned', session);
-                });
-            } catch (error) {
-                if (error && error.code === 'TECHNICIAN_BUSY') conflict = 'TECHNICIAN_BUSY';
-                else throw error;
-            } finally {
-                await session.endSession();
-            }
-            if (conflict === 'TECHNICIAN_BUSY') return refuse(res, 409, 'TECHNICIAN_BUSY', 'this technician is on another job right now - choose another or try later');
-            if (conflict === 'JOB_NOT_OPEN') return refuse(res, 409, 'JOB_NOT_OPEN', 'a technician has already been chosen for this request');
+            if (application.inspectionFee > 0) return this.startFeeCheckout(req, res, { request, application, technician });
 
-            await this.notifySafely({
-                recipientEmail: technician.email, recipientRole: 'rider', type: 'application_accepted',
-                entityType: 'repair_request', entityId: requestId, actorEmail: caller, actorRole: 'user',
-                metadata: { trackingId: request.trackingId },
-            });
-            const others = await this.collections.jobApplications.find({ requestId, status: 'not_chosen', decidedAt: now }).toArray();
-            for (const other of others) {
-                await this.notifySafely({
-                    recipientEmail: other.technicianEmail, recipientRole: 'rider', type: 'application_not_chosen',
-                    entityType: 'repair_request', entityId: requestId, metadata: { trackingId: request.trackingId },
-                });
-            }
-            res.send({ success: true, deliveryStatus: 'driver_assigned', technicianName: technician.name });
+            const now = this.now();
+            const outcome = await this.bookInTransaction({ request, application, technician, customerEmail: caller, now });
+            if (outcome !== 'OK') return this.refuseBooking(res, outcome);
+            await notifyBooking({ collections: this.collections, notifications: this.notifications, request, technician, customerEmail: caller, now });
+            res.send({ success: true, booked: true, deliveryStatus: 'driver_assigned', technicianName: technician.name });
         } catch (error) {
             res.status(500).send({ message: 'Error accepting the application', code: 'INTERNAL_ERROR' });
         }
+    }
+
+    async bookInTransaction({ request, application, technician, customerEmail, now }) {
+        const session = this.mongoClient.startSession();
+        let outcome = 'OK';
+        try {
+            await session.withTransaction(async () => {
+                // A refusal returns before any write, so there is nothing to undo.
+                outcome = await bookApplication({ collections: this.collections, request, application, technician, customerEmail, now, session });
+            });
+        } catch (error) {
+            if (error && error.code === 'TECHNICIAN_BUSY') outcome = 'TECHNICIAN_BUSY';
+            else if (outcome === 'OK') throw error;
+        } finally {
+            await session.endSession();
+        }
+        return outcome;
+    }
+
+    refuseBooking(res, outcome) {
+        if (outcome === 'TECHNICIAN_BUSY') return refuse(res, 409, 'TECHNICIAN_BUSY', 'this technician is on another job right now - choose another or try later');
+        return refuse(res, 409, 'JOB_NOT_OPEN', 'a technician has already been chosen for this request');
+    }
+
+    // Opens a Stripe Checkout (test mode) for the chosen technician's
+    // inspection fee. One active checkout per request: choosing the same
+    // application again reuses it; choosing another replaces it.
+    async startFeeCheckout(req, res, { request, application, technician }) {
+        const requestId = request._id.toString();
+        const applicationId = application._id.toString();
+        const amount = application.inspectionFee;
+        const stripe = this.stripe();
+
+        const active = await this.checkoutSessions.findActive(requestId);
+        if (active) {
+            const sameChoice = active.purpose === INSPECTION_FEE_PURPOSE && active.applicationId === applicationId && active.status === 'open';
+            if (sameChoice) {
+                try {
+                    const existing = await stripe.checkout.sessions.retrieve(active.sessionId);
+                    if (existing && existing.status === 'open' && existing.url) {
+                        return res.send({ checkoutUrl: existing.url, reused: true });
+                    }
+                } catch (error) {
+                    // Fall through and replace it.
+                }
+            }
+            if (active.status === 'creating') {
+                return refuse(res, 409, 'CHECKOUT_CREATION_IN_PROGRESS', 'a payment is already being prepared - try again in a moment');
+            }
+            // A different choice (or an unusable session): close it first so an
+            // old checkout link can never be paid.
+            const cancelled = await this.checkoutSessions.cancelByRequestId(requestId);
+            if (cancelled && cancelled.sessionId) {
+                try { await stripe.checkout.sessions.expire(cancelled.sessionId); } catch (error) { /* already closed */ }
+            }
+        }
+
+        const claim = await this.checkoutSessions.claim({
+            requestId, ownerEmail: normalize(request.senderEmail), amount, currency: V2_PAYMENT_CURRENCY,
+            purpose: INSPECTION_FEE_PURPOSE, applicationId,
+        });
+        if (!claim.claimed) return refuse(res, 409, 'CHECKOUT_CREATION_IN_PROGRESS', 'a payment is already being prepared - try again in a moment');
+
+        let session;
+        try {
+            const device = [request.product && request.product.brand, request.product && request.product.model].filter(Boolean).join(' ') || 'your device';
+            session = await stripe.checkout.sessions.create({
+                mode: 'payment',
+                line_items: [{
+                    price_data: {
+                        currency: V2_PAYMENT_CURRENCY,
+                        unit_amount: toSmallestUnit(amount),
+                        product_data: { name: `Inspection visit: ${device}`, description: `${technician.name} - counts toward the final price if you go ahead` },
+                    },
+                    quantity: 1,
+                }],
+                customer_email: request.senderEmail,
+                metadata: {
+                    requestId, trackingId: request.trackingId, schemaVersion: '2',
+                    paymentType: INSPECTION_FEE_PURPOSE, applicationId,
+                },
+                success_url: `${this.origin()}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+                cancel_url: `${this.origin()}/dashboard/my-requests/${requestId}`,
+            }, { idempotencyKey: `inspection-checkout-${claim.id.toString()}` });
+        } catch (error) {
+            await this.checkoutSessions.markFailed(claim.id);
+            return res.status(502).send({ message: 'the payment page could not be opened - please try again', code: 'CHECKOUT_UNAVAILABLE' });
+        }
+        await this.checkoutSessions.markOpen(claim.id, {
+            sessionId: session.id,
+            expiresAt: session.expires_at ? new Date(session.expires_at * 1000) : null,
+        });
+        await this.collections.repairRequests.updateOne(
+            { _id: request._id },
+            { $set: { feeCheckout: { applicationId, technicianId: application.technicianId, amount, sessionId: session.id, startedAt: this.now() } } }
+        );
+        res.send({ checkoutUrl: session.url, reused: false });
     }
 
     // POST /admin/repair-requests/:id/invite  { technicianId }

@@ -69,14 +69,16 @@ async function runJobPortalTests({ logTest }) {
         requestIds.push(insertedId);
         return insertedId.toString();
     };
-    const good = { estimateMin: 1200, estimateMax: 2500, inspectionFee: cap, note: 'Screen connector, likely.' };
+    // A zero inspection fee books straight away; the paid-fee flow is covered
+    // in tests/inspectionFeeTests.js.
+    const good = { estimateMin: 1200, estimateMax: 2500, inspectionFee: 0, note: 'Screen connector, likely.' };
 
     try {
         await c.users.insertMany([{ email: CUSTOMER, role: 'user', createdAt: new Date() }, { email: ADMIN, role: 'admin', createdAt: new Date() }]);
 
         // ---- pure rules ----
         logTest('Job portal: an application needs a sensible estimate, a fee within the limit and a short note',
-            validateApplicationInput(good, { maxFee: cap }).valid
+            validateApplicationInput({ ...good, inspectionFee: cap }, { maxFee: cap }).valid
             && validateApplicationInput({ ...good, estimateMin: 3000 }, { maxFee: cap }).code === 'INVALID_ESTIMATE'
             && validateApplicationInput({ ...good, inspectionFee: cap + 1 }, { maxFee: cap }).code === 'INSPECTION_FEE_TOO_HIGH'
             && validateApplicationInput({ ...good, estimateMax: 1.5 }, { maxFee: cap }).code === 'INVALID_ESTIMATE'
@@ -154,7 +156,7 @@ async function runJobPortalTests({ logTest }) {
         const alphaTech = await c.technicians.findOne({ _id: new ObjectId(alpha.id) });
         logTest('Job portal: accepting books the technician for the request',
             accepted.statusCode === 200 && bookedRequest.deliveryStatus === 'driver_assigned' && bookedRequest.technicianId === alpha.id
-            && alphaTech.workStatus === 'in_delivery' && bookedRequest.acceptedApplication.inspectionFee === cap
+            && accepted.body.booked === true && alphaTech.workStatus === 'in_delivery' && bookedRequest.acceptedApplication.inspectionFee === 0
             && bookedRequest.assignmentHistory.slice(-1)[0].decision === 'accepted' && bookedRequest.assignmentHistory.slice(-1)[0].source === 'job_portal');
         const statuses = Object.fromEntries((await c.jobApplications.find({ requestId: open }).toArray()).map((a) => [a.technicianId, a.status]));
         logTest('Job portal: the chosen application is accepted and the other pending ones are closed',

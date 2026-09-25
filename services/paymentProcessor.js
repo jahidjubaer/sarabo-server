@@ -7,6 +7,8 @@ const { isV2RepairRequest } = require('../utils/repairRequestSchema');
 const { QUOTE_APPROVED, PAYMENT_COMPLETED } = require('../utils/repairRequestStatus');
 const { calculateSettlement, buildSettlementDocument } = require('../utils/settlement');
 const { isRepairRequestPaid } = require('../utils/paymentState');
+const { INSPECTION_FEE_PURPOSE, amountDueForQuote, inspectionCredit } = require('../utils/inspectionFee');
+const { bookApplication, notifyBooking } = require('./jobBooking');
 
 function normalize(value) {
     return (value || '').trim().toLowerCase();
@@ -32,7 +34,10 @@ function normalize(value) {
 // than required directly here - services/notificationService.js itself
 // requires this file for `normalize`, so requiring it back here would create
 // a module-load cycle between the two service files.
-function createPaymentProcessor(models, collections, notifications) {
+// `refundPayment({ paymentIntentId, idempotencyKey })` (job-portal phase C)
+// refunds a Stripe payment and resolves to the refund id; it is only used to
+// return an inspection fee that can no longer book the technician.
+function createPaymentProcessor(models, collections, notifications, { refundPayment } = {}) {
     const { RepairRequest, User } = models;
     const checkoutSessionManager = createCheckoutSessionManager(collections);
 
@@ -54,7 +59,10 @@ function createPaymentProcessor(models, collections, notifications) {
             return { code: 'INVALID_STORED_COST' };
         }
 
-        const expectedAmount = toSmallestUnit(quote.totalAmount);
+        // The inspection fee already paid counts toward the quote
+        // (job-portal phase C): what is charged now is the rest.
+        const amountDue = amountDueForQuote(repairRequest);
+        const expectedAmount = toSmallestUnit(amountDue);
         if (session.amount_total !== expectedAmount) {
             return { code: 'AMOUNT_MISMATCH' };
         }
@@ -84,9 +92,12 @@ function createPaymentProcessor(models, collections, notifications) {
             requestId: repairRequest._id.toString(),
             trackingId,
             customerEmail: ownerEmail,
-            amount: quote.totalAmount,
+            amount: amountDue,
             currency: quote.currency,
             paymentStatus: 'paid',
+            purpose: 'repair',
+            quoteTotal: quote.totalAmount,
+            inspectionCredit: inspectionCredit(repairRequest),
             // v2 provenance - never used for authorization; sessionId remains
             // the sole idempotency key (unique index on payments.sessionId).
             schemaVersion: 2,
@@ -138,7 +149,11 @@ function createPaymentProcessor(models, collections, notifications) {
                         status: 'completed',
                         provider: 'stripe',
                         paymentIntentId,
-                        amount: quote.totalAmount,
+                        // What was charged now; the inspection fee paid
+                        // earlier covers the rest of the quote total.
+                        amount: amountDue,
+                        quoteTotal: quote.totalAmount,
+                        inspectionCredit: inspectionCredit(repairRequest),
                         currency: quote.currency,
                         quoteVersion: quote.version,
                         completedAt: now,
@@ -228,6 +243,137 @@ function createPaymentProcessor(models, collections, notifications) {
         return { code: 'OK', alreadyProcessed: false, transactionId: committed.transactionId, trackingId: committed.trackingId };
     }
 
+    // ---- Inspection fee (job-portal phase C) ----------------------------
+    // Records the fee and books the chosen technician in one transaction. If
+    // booking is no longer possible (technician now busy, request cancelled or
+    // already given to someone), the payment is still recorded - then refunded.
+    async function recordFeeNeedingRefund({ paymentRecord, repairRequest, inspectionPayment, reason }) {
+        try {
+            await collections.payments.insertOne({ ...paymentRecord, refundStatus: 'pending', refundReason: reason });
+        } catch (error) {
+            if (!(error && error.code === 11000)) throw error;
+        }
+        await collections.repairRequests.updateOne(
+            { _id: repairRequest._id, 'inspectionPayment.status': { $ne: 'refunded' } },
+            {
+                $set: { inspectionPayment: { ...inspectionPayment, status: 'refund_pending', refundReason: reason } },
+                $unset: { feeCheckout: '' },
+            }
+        );
+    }
+
+    async function refundFee({ paymentRecord, repairRequest }) {
+        if (!refundPayment || !paymentRecord.transactionId) return null;
+        try {
+            const refundId = await refundPayment({
+                paymentIntentId: paymentRecord.transactionId,
+                idempotencyKey: `inspection-refund-${paymentRecord.sessionId}`,
+            });
+            const refundedAt = new Date();
+            await collections.payments.updateOne({ sessionId: paymentRecord.sessionId }, { $set: { refundStatus: 'refunded', refundId, refundedAt } });
+            await collections.repairRequests.updateOne(
+                { _id: repairRequest._id, 'inspectionPayment.sessionId': paymentRecord.sessionId },
+                { $set: { 'inspectionPayment.status': 'refunded', 'inspectionPayment.refundId': refundId, 'inspectionPayment.refundedAt': refundedAt } }
+            );
+            return refundId;
+        } catch (error) {
+            // Stays 'refund_pending' so it can be retried; never lost.
+            console.error('Inspection fee refund failed (will stay pending):', error.message);
+            return null;
+        }
+    }
+
+    async function completeInspectionFeeSession({ session, repairRequest, sessionId, source }) {
+        const applicationId = session.metadata && session.metadata.applicationId;
+        if (!applicationId || !ObjectId.isValid(applicationId)) return { code: 'MISSING_METADATA' };
+        const requestId = repairRequest._id.toString();
+        const application = await collections.jobApplications.findOne({ _id: new ObjectId(applicationId), requestId });
+        if (!application) return { code: 'MISSING_METADATA' };
+        if (session.amount_total !== toSmallestUnit(application.inspectionFee)) return { code: 'AMOUNT_MISMATCH' };
+        if (normalize(session.currency) !== V2_PAYMENT_CURRENCY) return { code: 'CURRENCY_MISMATCH' };
+
+        const technician = ObjectId.isValid(application.technicianId)
+            ? await collections.technicians.findOne({ _id: new ObjectId(application.technicianId) })
+            : null;
+        const ownerEmail = normalize(repairRequest.senderEmail);
+        const paymentIntentId = session.payment_intent || null;
+        const now = new Date();
+        const paymentRecord = {
+            sessionId,
+            transactionId: paymentIntentId,
+            requestId,
+            trackingId: repairRequest.trackingId,
+            customerEmail: ownerEmail,
+            amount: application.inspectionFee,
+            currency: 'BDT',
+            paymentStatus: 'paid',
+            purpose: INSPECTION_FEE_PURPOSE,
+            applicationId,
+            technicianId: application.technicianId,
+            schemaVersion: 2,
+            source,
+            paidAt: now,
+        };
+        const inspectionPayment = {
+            status: 'paid', amount: application.inspectionFee, currency: 'BDT', provider: 'stripe',
+            paymentIntentId, sessionId, applicationId, technicianId: application.technicianId, paidAt: now,
+        };
+        const result = { purpose: INSPECTION_FEE_PURPOSE, requestId, trackingId: repairRequest.trackingId, transactionId: paymentIntentId };
+
+        let outcome = application.status === 'pending' && technician ? 'OK' : 'JOB_NOT_OPEN';
+        if (outcome === 'OK') {
+            const mongoSession = client.startSession();
+            try {
+                await mongoSession.withTransaction(async () => {
+                    outcome = 'OK';
+                    await collections.payments.insertOne(paymentRecord, { session: mongoSession });
+                    outcome = await bookApplication({
+                        collections, request: repairRequest, application, technician, customerEmail: ownerEmail, now,
+                        session: mongoSession, extraSet: { inspectionPayment },
+                    });
+                    if (outcome !== 'OK') {
+                        // Undo the payment row; it is recorded again below as
+                        // needing a refund.
+                        throw Object.assign(new Error('not bookable'), { code: 'NOT_BOOKABLE' });
+                    }
+                    await checkoutSessionManager.completeByRequestId(requestId, mongoSession);
+                    await logTracking(collections.trackingEvents, repairRequest.trackingId, 'inspection_fee_paid', mongoSession);
+                });
+            } catch (error) {
+                if (error && error.code === 11000) {
+                    // Processed at the same moment by the other path (webhook vs browser).
+                    return { code: 'OK', alreadyProcessed: true, ...result };
+                }
+                if (error && error.code === 'TECHNICIAN_BUSY') outcome = 'TECHNICIAN_BUSY';
+                else if (!(error && error.code === 'NOT_BOOKABLE')) throw error;
+            } finally {
+                await mongoSession.endSession();
+            }
+        }
+
+        if (outcome === 'OK') {
+            await notifyBooking({ collections, notifications, request: repairRequest, technician, customerEmail: ownerEmail, now });
+            return { code: 'OK', booked: true, technicianName: technician.name, ...result };
+        }
+
+        await recordFeeNeedingRefund({ paymentRecord, repairRequest, inspectionPayment, reason: outcome });
+        await checkoutSessionManager.completeByRequestId(requestId);
+        const refundId = await refundFee({ paymentRecord, repairRequest });
+        await logTrackingSafely(collections.trackingEvents, repairRequest.trackingId, 'inspection_fee_refunded');
+        try {
+            const ownerRole = await User.findRoleByEmail(repairRequest.senderEmail);
+            if (ownerRole) {
+                await notifications.createNotification({
+                    recipientEmail: repairRequest.senderEmail, recipientRole: ownerRole, type: 'inspection_fee_refunded',
+                    entityType: 'repair_request', entityId: requestId, metadata: { trackingId: repairRequest.trackingId, occurrence: sessionId },
+                });
+            }
+        } catch (error) {
+            console.error('Inspection fee refund notification failed (non-fatal):', error.message);
+        }
+        return { code: 'INSPECTION_FEE_REFUNDED', refunded: Boolean(refundId), reason: outcome, ...result };
+    }
+
     return async function processVerifiedCheckoutSession({ session, source, callerEmail = null }) {
         const sessionId = session.id;
         const normalizedCaller = callerEmail ? normalize(callerEmail) : null;
@@ -249,10 +395,12 @@ function createPaymentProcessor(models, collections, notifications) {
             // calls safe even if that earlier reconciliation did not run.
             await checkoutSessionManager.completeByRequestId(existingPayment.requestId);
             return {
-                code: 'OK',
+                code: existingPayment.refundStatus ? 'INSPECTION_FEE_REFUNDED' : 'OK',
                 alreadyProcessed: true,
                 transactionId: existingPayment.transactionId,
-                trackingId: existingPayment.trackingId
+                trackingId: existingPayment.trackingId,
+                purpose: existingPayment.purpose || 'repair',
+                requestId: existingPayment.requestId,
             };
         }
 
@@ -297,6 +445,11 @@ function createPaymentProcessor(models, collections, notifications) {
         // reaches this branch (legacy checkout creation rejects every v2
         // request), and a v2 request never falls through to the legacy code
         // below.
+        // The inspection fee is its own payment - routed before the repair
+        // payment, which it must never be mistaken for.
+        if (isV2RepairRequest(repairRequest) && session.metadata && session.metadata.paymentType === INSPECTION_FEE_PURPOSE) {
+            return await completeInspectionFeeSession({ session, repairRequest, sessionId, source });
+        }
         if (isV2RepairRequest(repairRequest)) {
             return await completeV2CheckoutSession({ session, repairRequest, sessionId, source });
         }
