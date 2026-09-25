@@ -6,7 +6,9 @@ const { canTechnicianEverTakeRequest } = require('../services/technicianEligibil
 //                   started or passed.
 // - missedPickups   a technician is assigned (offered, accepted or on the
 //                   way) but the pickup window has ended and the device was
-//                   not collected.
+//                   not collected. Requests where the customer has already
+//                   been asked for a new time are left out - they are waiting
+//                   on the customer (controllers/missedPickupController.js).
 // - unmatchable     waiting, and no approved technician in its region can
 //                   ever take it (right device, repair and level) - it needs
 //                   a new local technician, not just time.
@@ -52,14 +54,19 @@ class AdminAttentionController {
         try {
             const now = this.now();
             const rr = this.collections.repairRequests;
+            const missedFilter = {
+                deliveryStatus: { $in: ASSIGNED_NOT_COLLECTED },
+                'pickupSlot.endsAt': { $lte: now },
+                pickupRescheduleRequestedAt: { $exists: false },
+            };
             const [overdueWaiting, overdueWaitingTotal, missedPickups, missedPickupsTotal, waiting, technicians, definitions] = await Promise.all([
                 // Longest overdue first.
                 rr.find({ deliveryStatus: WAITING, 'pickupSlot.startsAt': { $lte: now } }, { projection: SUMMARY_PROJECTION })
                     .sort({ 'pickupSlot.startsAt': 1 }).limit(LIST_LIMIT).toArray(),
                 rr.countDocuments({ deliveryStatus: WAITING, 'pickupSlot.startsAt': { $lte: now } }),
-                rr.find({ deliveryStatus: { $in: ASSIGNED_NOT_COLLECTED }, 'pickupSlot.endsAt': { $lte: now } }, { projection: SUMMARY_PROJECTION })
+                rr.find(missedFilter, { projection: SUMMARY_PROJECTION })
                     .sort({ 'pickupSlot.endsAt': 1 }).limit(LIST_LIMIT).toArray(),
-                rr.countDocuments({ deliveryStatus: { $in: ASSIGNED_NOT_COLLECTED }, 'pickupSlot.endsAt': { $lte: now } }),
+                rr.countDocuments(missedFilter),
                 rr.find({ deliveryStatus: WAITING, schemaVersion: 2 }, { projection: SUMMARY_PROJECTION })
                     .sort({ createdAt: 1 }).limit(MAX_WAITING_SCANNED).toArray(),
                 this.collections.technicians.find({ status: 'approved' }, { projection: { status: 1, region: 1, expertise: 1 } }).toArray(),

@@ -64,6 +64,9 @@ function projectAssignmentForRole(repairRequest, role) {
                 decision: h.decision,
                 decidedAt: h.decidedAt,
                 rejectionReason: h.rejectionReason,
+                // Set when an admin took the job back (missed pickup).
+                withdrawnAt: h.withdrawnAt || null,
+                withdrawalReason: h.withdrawalReason || null,
             })),
         };
     }

@@ -109,7 +109,8 @@ class PickupSlotController {
             const changedAt = new Date();
             const result = await this.collections.repairRequests.updateOne(
                 { _id, senderEmail: request.senderEmail, deliveryStatus: { $in: SLOT_HOLDING_STATUSES } },
-                { $set: { pickupSlot: check.pickupSlot, updatedAt: changedAt } }
+                // A new time answers an admin's "choose a new pickup time".
+                { $set: { pickupSlot: check.pickupSlot, updatedAt: changedAt }, $unset: { pickupRescheduleRequestedAt: '' } }
             );
             if (result.matchedCount === 0) {
                 return res.status(409).send({ message: 'the pickup time can no longer be changed', code: 'PICKUP_NOT_RESCHEDULABLE' });

@@ -49,6 +49,7 @@ const { runEmailTests } = require('./tests/emailTests');
 const { runSeedDevPeopleTests } = require('./tests/seedDevPeopleTests');
 const { runAdminReportTests } = require('./tests/adminReportTests');
 const { runAdminAttentionTests } = require('./tests/adminAttentionTests');
+const { runMissedPickupTests } = require('./tests/missedPickupTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -4611,10 +4612,12 @@ async function testNotificationFoundation() {
             // workflow events, and the two withdrawal outcomes that were being
             // emitted by walletController with no definition to render them.
             'repair_request_created', 'quote_revision_started', 'repair_cancelled_by_technician',
-            'withdrawal_paid', 'withdrawal_rejected', 'technician_report_submitted'
+            'withdrawal_paid', 'withdrawal_rejected', 'technician_report_submitted',
+            // Missed-pickup actions.
+            'assignment_withdrawn', 'pickup_reschedule_requested'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 25 event types exist', actualTypes.length === 25 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 27 event types exist', actualTypes.length === 27 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -5030,7 +5033,9 @@ async function testNotificationFoundation() {
         logTest('57. Each lifecycle event accepts recipientRole admin', allLifecycleAcceptAdmin);
         logTest('58. Each lifecycle event rejects an unsupported role', allLifecycleRejectUnsupported);
 
-        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed', 'quote_submitted', 'payment_completed', 'repair_started', 'repair_finished', 'quote_revision_started', 'repair_cancelled_by_technician'];
+        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed', 'quote_submitted', 'payment_completed', 'repair_started', 'repair_finished', 'quote_revision_started', 'repair_cancelled_by_technician',
+            // Missed-pickup phase: asks the request's owner for a new pickup time.
+            'pickup_reschedule_requested'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -13516,6 +13521,7 @@ async function runAllTests() {
     await runSeedDevPeopleTests({ logTest });
     await runAdminReportTests({ logTest });
     await runAdminAttentionTests({ logTest });
+    await runMissedPickupTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing

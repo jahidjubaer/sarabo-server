@@ -205,6 +205,35 @@ const NOTIFICATION_EVENTS = {
         actionUrl: () => '/dashboard/assigned-jobs',
         deduplicationKey: ({ entityId }) => `repair:${entityId}:technician_assigned:technician`,
     },
+    // Missed-pickup actions (missed-pickup phase). An admin took a job off a
+    // technician because its pickup window ended without the device being
+    // collected. `occurrence` makes each withdrawal its own notification.
+    assignment_withdrawn: {
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'occurrence'],
+        requiresMetadata: ['occurrence'],
+        title: () => 'A job was taken off your list',
+        message: ({ metadata }) => (metadata.trackingId
+            ? `The pickup for repair request ${metadata.trackingId} was missed, so an admin has given it to another technician. You are free for new jobs.`
+            : 'A pickup was missed, so an admin has given the job to another technician. You are free for new jobs.'),
+        actionUrl: () => '/dashboard/assigned-jobs',
+        deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:assignment_withdrawn:${metadata.occurrence || 'once'}`,
+    },
+    // The customer is asked to choose a new pickup time after a missed pickup.
+    // Same owner-role reasoning as technician_assigned.
+    pickup_reschedule_requested: {
+        entityType: 'repair_request',
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'occurrence'],
+        requiresMetadata: ['trackingId', 'occurrence'],
+        title: () => 'Please choose a new pickup time',
+        message: ({ metadata }) => `The pickup for your repair request ${metadata.trackingId} was missed. Please choose a new pickup time.`,
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:pickup_reschedule_requested:${metadata.occurrence || 'once'}`,
+    },
     technician_on_the_way: {
         entityType: 'repair_request',
         // Same reasoning as technician_assigned - POST /repair-requests only
