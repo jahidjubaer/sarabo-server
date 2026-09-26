@@ -56,7 +56,10 @@ function createCheckoutSessionManager(collections) {
     // stripe.checkout.sessions.create for the same repair request. A duplicate-key
     // error here means another request (any tab/device/retry) won the race
     // between the caller's own findActive() check and this insert.
-    async function claim({ requestId, ownerEmail, amount, currency }) {
+    // `purpose` says what the checkout pays for: 'repair' (the approved quote)
+    // or 'inspection_fee' (job-portal phase C, which also records the chosen
+    // `applicationId`). A request still has at most one active checkout.
+    async function claim({ requestId, ownerEmail, amount, currency, purpose = 'repair', applicationId = null }) {
         const now = new Date();
         try {
             const result = await checkoutSessions.insertOne({
@@ -64,6 +67,8 @@ function createCheckoutSessionManager(collections) {
                 ownerEmail,
                 amount,
                 currency,
+                purpose,
+                applicationId,
                 status: 'creating',
                 active: true,
                 sessionId: null,

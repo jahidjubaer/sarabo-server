@@ -2,6 +2,10 @@ const { ObjectId } = require('mongodb');
 const { normalize } = require('../services/paymentProcessor');
 const { escapeRegex } = require('../utils/searchSanitize');
 
+// The only user fields the admin list ever returns. Anything else a user
+// document may carry (now or later) never leaves the server through GET /users.
+const ADMIN_LIST_PROJECTION = Object.freeze({ _id: 1, email: 1, displayName: 1, photoURL: 1, role: 1, createdAt: 1 });
+
 // Case-insensitive name/email match. The search text is always escaped, so it
 // matches literally and can never inject a pattern (e.g. `.*`) or build a
 // catastrophic-backtracking expression.
@@ -29,7 +33,7 @@ class UserModel {
     // before for callers that do not ask for a page (see
     // UserController.getAllUsers).
     async findAll(searchText = null, limit = 5) {
-        const cursor = this.collection.find(buildUserQuery({ searchText })).sort({ createdAt: -1 }).limit(limit);
+        const cursor = this.collection.find(buildUserQuery({ searchText }), { projection: ADMIN_LIST_PROJECTION }).sort({ createdAt: -1 }).limit(limit);
         return await cursor.toArray();
     }
 
@@ -38,7 +42,7 @@ class UserModel {
     async findPaginated({ searchText, role, page, limit }) {
         const query = buildUserQuery({ searchText, role });
         const [data, totalItems] = await Promise.all([
-            this.collection.find(query).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
+            this.collection.find(query, { projection: ADMIN_LIST_PROJECTION }).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
             this.collection.countDocuments(query),
         ]);
         return { data, totalItems };
@@ -131,4 +135,5 @@ class UserModel {
 }
 
 module.exports = UserModel;
+module.exports.ADMIN_LIST_PROJECTION = ADMIN_LIST_PROJECTION;
 

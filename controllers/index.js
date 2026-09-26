@@ -6,6 +6,7 @@ const TrackingController = require('./trackingController');
 const NotificationController = require('./NotificationController');
 const HealthController = require('./healthController');
 const ServiceDefinitionController = require('./serviceDefinitionController');
+const AdminServiceDefinitionController = require('./adminServiceDefinitionController');
 const DamageUploadController = require('./damageUploadController');
 const InspectionController = require('./inspectionController');
 const QuoteController = require('./quoteController');
@@ -13,6 +14,16 @@ const RepairController = require('./repairController');
 const WalletController = require('./walletController');
 const SupportController = require('./supportController');
 const FeedbackController = require('./feedbackController');
+const PickupSlotController = require('./pickupSlotController');
+const PickupReminderController = require('./pickupReminderController');
+const AdminReportController = require('./adminReportController');
+const AdminAttentionController = require('./adminAttentionController');
+const MissedPickupController = require('./missedPickupController');
+const ServiceAvailabilityController = require('./serviceAvailabilityController');
+const JobPortalController = require('./jobPortalController');
+const InspectionFeeController = require('./inspectionFeeController');
+const { loadEmailConfig } = require('../config/email');
+const { createEmailService } = require('../services/emailService');
 const { connectDatabase } = require('../config/database');
 const { loadAiSupportConfig } = require('../config/aiSupport');
 const { createAiSupportService } = require('../services/aiSupportService');
@@ -37,21 +48,33 @@ function initializeControllers(models, collections, dependencies = {}) {
         connectDatabase: dependencies.connectDatabase || connectDatabase,
     });
 
+    // One email service for the whole app (a no-op unless EMAIL_ENABLED=true).
+    const emailService = dependencies.emailService || createEmailService({ config: loadEmailConfig(), collections });
+
     return {
         user: new UserController(models, collections),
-        repairRequest: new RepairRequestController(models, collections),
+        repairRequest: new RepairRequestController(models, collections, undefined, { emailService }),
         technician: new TechnicianController(models, collections),
         payment: new PaymentController(models, collections),
         tracking: new TrackingController(models, collections),
         notification: new NotificationController(models),
         health: new HealthController(),
         serviceDefinition: new ServiceDefinitionController(models),
+        adminServiceDefinition: new AdminServiceDefinitionController(models, collections),
         damageUpload: new DamageUploadController(models, collections),
         inspection: new InspectionController(models, collections),
         quote: new QuoteController(models, collections),
         repair: new RepairController(models, collections),
         wallet: new WalletController(models, collections),
         feedback: new FeedbackController(models, collections),
+        pickupSlot: new PickupSlotController(models, collections, { emailService }),
+        pickupReminder: new PickupReminderController(models, collections, { emailService }),
+        adminReport: new AdminReportController(models, collections),
+        adminAttention: new AdminAttentionController(models, collections),
+        missedPickup: new MissedPickupController(models, collections),
+        serviceAvailability: new ServiceAvailabilityController(models, collections),
+        jobPortal: new JobPortalController(models, collections),
+        inspectionFee: new InspectionFeeController(models, collections),
         support: new SupportController({
             aiSupportService,
             supportKnowledgeService,

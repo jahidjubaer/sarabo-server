@@ -32,8 +32,17 @@ const verifyFBToken = async (req, res, next) => {
 // is authenticated but not permitted) with a safe code - never 401, which
 // would wrongly signal an invalid session and trigger a client logout. No
 // database lookup, no role mutation, no raw Firebase internals leaked.
+// Local development only: SKIP_EMAIL_VERIFICATION=true lets unverified
+// accounts through, for testing with many accounts. Honoured ONLY on a local
+// machine - never on any Vercel deployment (production or preview) and never
+// with NODE_ENV=production - so the variable does nothing if it is ever copied
+// to a server. Read on every call so tests can switch it.
+function isEmailVerificationSkipped(env = process.env) {
+    return env.SKIP_EMAIL_VERIFICATION === 'true' && !env.VERCEL && env.NODE_ENV !== 'production';
+}
+
 const verifyEmailVerified = (req, res, next) => {
-    if (req.decoded_email_verified === true) {
+    if (req.decoded_email_verified === true || isEmailVerificationSkipped()) {
         return next();
     }
     return res.status(403).send({
@@ -74,5 +83,5 @@ const verifyTechnician = async (req, res, next) => {
     next();
 }
 
-module.exports = { verifyFBToken, verifyAdmin, verifyTechnician, verifyEmailVerified };
+module.exports = { verifyFBToken, verifyAdmin, verifyTechnician, verifyEmailVerified, isEmailVerificationSkipped };
 

@@ -27,6 +27,12 @@ const repairRoutes = require('./routes/repairs');
 const walletRoutes = require('./routes/wallet');
 const supportRoutes = require('./routes/support');
 const feedbackRoutes = require('./routes/feedback');
+const pickupSlotRoutes = require('./routes/pickupSlots');
+const adminReportRoutes = require('./routes/adminReports');
+const missedPickupRoutes = require('./routes/missedPickups');
+const jobPortalRoutes = require('./routes/jobPortal');
+const inspectionFeeRoutes = require('./routes/inspectionFee');
+const { isEmailVerificationSkipped } = require('./middleware/auth');
 
 const app = express();
 // Vercel's edge network is the sole reverse proxy in front of this function,
@@ -91,6 +97,11 @@ app.get('/', (req, res) => {
 // unregistered 404.
 userRoutes(app, controllers);
 feedbackRoutes(app, controllers);
+pickupSlotRoutes(app, controllers);
+adminReportRoutes(app, controllers);
+missedPickupRoutes(app, controllers);
+jobPortalRoutes(app, controllers);
+inspectionFeeRoutes(app, controllers);
 repairRequestRoutes(app, controllers);
 paymentRoutes(app, controllers);
 technicianRoutes(app, controllers);
@@ -113,6 +124,9 @@ if (!isServerless) {
     // the test harness's own server uses that) is visible to the caller.
     const server = app.listen(port, () => {
         console.log(`Server listening on port ${server.address().port}`)
+        if (isEmailVerificationSkipped()) {
+            console.warn('WARNING: email verification is OFF (SKIP_EMAIL_VERIFICATION=true). Local development only.');
+        }
     });
 }
 

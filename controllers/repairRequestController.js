@@ -2,7 +2,7 @@ const { ObjectId } = require('mongodb');
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const { client } = require('../config/database');
 const { generateSecureTrackingId } = require('../utils/trackingId');
-const { logTracking } = require('../middleware/logging');
+const { logTracking, logTrackingSafely } = require('../middleware/logging');
 const {
     VALID_STATUSES, ACTIVE_STATUSES, ASSIGNMENT_PENDING, INSPECTION_COMPLETED, QUOTE_SUBMITTED, QUOTE_APPROVED,
     QUOTE_REJECTED, PAYMENT_COMPLETED, REPAIR_IN_PROGRESS, REPAIR_COMPLETED, isValidTransition,
@@ -25,7 +25,11 @@ const {
     buildServiceLocationSnapshot, validateClientPricingAbsence
 } = require('../utils/repairRequestV2');
 const { getPricingEstimate } = require('../services/pricingService');
+const PickupSlotController = require('./pickupSlotController');
+const { isMatchGateSkipped, hasTechnicianFor, recordTurnedAway } = require('../services/technicianMatchGate');
+const { createDisabledEmailService } = require('../services/emailService');
 const { SETTLEMENT_PENDING, SETTLEMENT_AVAILABLE, buildSettlementView } = require('../utils/settlement');
+const { inspectionPaymentView, inspectionFeeSettlementView } = require('../utils/inspectionFee');
 const { isRepairRequestPaid, buildPaymentStateMatch } = require('../utils/paymentState');
 const {
     ELIGIBILITY_VERSION, DIAGNOSTIC_INELIGIBLE_CAP, validateDiagnosticFlag, validatePagination,
@@ -92,7 +96,7 @@ function technicianEarningView(rawRepairRequest) {
 }
 
 class RepairRequestController {
-    constructor(models, collections, storageService = damageStorageService) {
+    constructor(models, collections, storageService = damageStorageService, { emailService, skipMatchGate } = {}) {
         this.RepairRequest = models.RepairRequest;
         this.Technician = models.Technician;
         this.User = models.User;
@@ -104,6 +108,12 @@ class RepairRequestController {
         // - see services/checkoutSessionManager.js.
         this.checkoutSessions = createCheckoutSessionManager(collections);
         this.notifications = createNotificationService(models);
+        // Slot rules and per-region capacity, shared with the pickup-slot routes.
+        this.pickupSlots = new PickupSlotController(models, collections);
+        // Customer and technician emails (a no-op unless configured).
+        this.emails = emailService || createDisabledEmailService();
+        // The request-creation technician gate; a test can force it on or off.
+        this.skipMatchGate = typeof skipMatchGate === 'boolean' ? () => skipMatchGate : () => isMatchGateSkipped();
         // Generic storage adapter (services/damageStorageService.js is generic
         // over any storageKey) - used by safe deletion to purge a request's
         // damage/evidence objects. Injectable so tests exercise the cleanup
@@ -222,10 +232,14 @@ class RepairRequestController {
             // isPaid. The raw settlement is also stripped because it carries
             // technician identity; assigned Technician/Admin viewers get the
             // safe buildSettlementView projection below.
-            const { inspection, quote, repair, assignmentHistory, payment, technicianSettlement, feedbackRevision, ...safeRepairRequest } = repairRequest;
+            const { inspection, quote, repair, assignmentHistory, payment, technicianSettlement, feedbackRevision, inspectionPayment, inspectionFeeSettlement, ...safeRepairRequest } = repairRequest;
             safeRepairRequest.isPaid = isRepairRequestPaid(repairRequest);
+            // Job-portal phases C/D: the inspection fee without its Stripe ids;
+            // a kept fee's split only for its technician and admins.
+            safeRepairRequest.inspectionPayment = inspectionPaymentView(repairRequest);
             if (isAssignedTechnician || isAdmin) {
                 safeRepairRequest.technicianSettlement = buildSettlementView(repairRequest);
+                safeRepairRequest.inspectionFeeSettlement = inspectionFeeSettlementView(repairRequest);
             }
             // technicianEarning (Phase 8.11) is internal accounting - only an
             // admin reads it through this endpoint (for the settlement UI +
@@ -384,7 +398,7 @@ class RepairRequestController {
                 }
             }
 
-            logTracking(this.collections.trackingEvents, repairRequest.trackingId, 'repair_request_created');
+            await logTrackingSafely(this.collections.trackingEvents, repairRequest.trackingId, 'repair_request_created');
 
             res.send(result);
         } catch (error) {
@@ -452,6 +466,32 @@ class RepairRequestController {
                 return res.status(400).send({ message: locationValidation.message, code: locationValidation.code });
             }
 
+            // Only requests some approved technician in the region can take
+            // (job-portal phase A). A refusal is recorded as turned-away demand.
+            if (!this.skipMatchGate() && !(await hasTechnicianFor(this.collections, { region: body.serviceLocation.region.trim(), definition }))) {
+                await recordTurnedAway(this.collections, {
+                    customerEmail: req.decoded_email,
+                    region: body.serviceLocation.region,
+                    district: body.serviceLocation.district,
+                    definition,
+                });
+                return res.status(409).send({
+                    message: 'no technician in this region offers this repair yet',
+                    code: 'NO_TECHNICIAN_AVAILABLE',
+                });
+            }
+
+            // Pickup slot (pickup-scheduling phase). Optional in the API so an
+            // older client keeps working; the current client always sends one.
+            let pickupSlot = null;
+            if (body.pickupSlot !== undefined) {
+                const slotCheck = await this.pickupSlots.checkSlot(body.pickupSlot, body.serviceLocation.region.trim());
+                if (!slotCheck.valid) {
+                    return res.status(slotCheck.status).send({ message: slotCheck.message, code: slotCheck.code });
+                }
+                pickupSlot = slotCheck.pickupSlot;
+            }
+
             // Server-owned pricing snapshot - never the client's. No current
             // service definition has an exact fixed price (every seeded row
             // is a baseMin/baseMax range), so quotedAmount/finalAmount are
@@ -470,6 +510,7 @@ class RepairRequestController {
                 service: { definitionId: definition._id.toString(), repairCategorySlug: definition.repairCategorySlug },
                 damage: buildDamageSnapshot({ description: damageDescriptionInput, images: damageImagesInput }),
                 serviceLocation: buildServiceLocationSnapshot(body.serviceLocation),
+                ...(pickupSlot ? { pickupSlot } : {}),
                 pricing: {
                     currency: estimate.currency,
                     estimateMin: estimate.estimateMin,
@@ -499,7 +540,7 @@ class RepairRequestController {
                 }
             }
 
-            logTracking(this.collections.trackingEvents, document.trackingId, 'repair_request_created');
+            await logTrackingSafely(this.collections.trackingEvents, document.trackingId, 'repair_request_created');
 
             // Admin notification (Phase 9.2) - AFTER the request is durably
             // created, never before, so a failed insert can never announce a
@@ -508,6 +549,9 @@ class RepairRequestController {
             // already committed, and a notification/lookup failure must not
             // turn a successful creation into an error for the customer.
             await this.notifyAdminsOfNewRepairRequest(document, result.insertedId);
+            // Confirmation email to the customer, with the pickup time. Never
+            // fails the request (see services/emailService.js).
+            await this.emails.sendRequestReceived(document, result.insertedId.toString());
 
             res.send(result);
         } catch (error) {
@@ -756,7 +800,7 @@ class RepairRequestController {
             // trackingId, never a client-supplied value - trusting the body
             // here would let a caller write a tracking event under an
             // arbitrary/unrelated trackingId.
-            logTracking(this.collections.trackingEvents, repairRequest.trackingId, requestedStatus);
+            await logTrackingSafely(this.collections.trackingEvents, repairRequest.trackingId, requestedStatus);
 
             // Best-effort lifecycle notification - only reached after a
             // genuine, newly-committed transition (never on the no-op or
@@ -1150,9 +1194,9 @@ class RepairRequestController {
                     // is never missed), and reuses
                     // services/technicianEligibilityService.js's own
                     // evaluateTechnician rather than re-deriving the rules.
-                    // Service area is intentionally not part of this
-                    // evaluation - it is ranking-only and must never block
-                    // assignment. Skipped for the redundant
+                    // This includes the service-region rule: a technician
+                    // outside the request's region is refused here too, not
+                    // just hidden from the recommendations. Skipped for the redundant
                     // reassign-to-same-technician case above so that its
                     // existing, more specific REQUEST_ALREADY_ASSIGNED
                     // outcome (via the repair request update guard below) is never
@@ -1349,6 +1393,10 @@ class RepairRequestController {
                 return res.status(409).send({ message: 'this request can no longer be assigned', code: 'ASSIGNMENT_NOT_ALLOWED' });
             }
 
+            // Only after the offer is committed: a rolled-back assignment
+            // never emails anyone. Never fails the assignment.
+            await this.emails.sendJobOffer(repairRequest, requestId, technician, new Date());
+
             res.send({ acknowledged: true, matchedCount: 1, modifiedCount: 1, deliveryStatus: isV2RepairRequest(repairRequest) ? ASSIGNMENT_PENDING : 'driver_assigned' });
         } catch (error) {
             if (error.code === 'REPAIR_OWNER_ROLE_UNRESOLVED') {
@@ -1423,7 +1471,7 @@ class RepairRequestController {
                 return res.status(409).send({ message: 'this assignment has already been decided', code: 'ASSIGNMENT_ALREADY_DECIDED' });
             }
 
-            logTracking(this.collections.trackingEvents, repairRequest.trackingId, 'driver_assigned');
+            await logTrackingSafely(this.collections.trackingEvents, repairRequest.trackingId, 'driver_assigned');
             return res.send({ success: true, deliveryStatus: 'driver_assigned' });
         } catch (error) {
             console.error('Accept assignment failed:', error.message);
@@ -1508,7 +1556,7 @@ class RepairRequestController {
             // public timeline status, so the rejection is never exposed to the
             // customer (who only ever sees the neutral assignment_pending state
             // and, on reassignment, another assignment_pending).
-            logTracking(this.collections.trackingEvents, repairRequest.trackingId, 'assignment_rejected');
+            await logTrackingSafely(this.collections.trackingEvents, repairRequest.trackingId, 'assignment_rejected');
             return res.send({ success: true, deliveryStatus: 'pending-pickup' });
         } catch (error) {
             console.error('Reject assignment failed:', error.message);
@@ -1769,7 +1817,9 @@ class RepairRequestController {
 
             // A completed payment record is authoritative even if
             // repair request.paymentStatus is somehow inconsistent with it.
-            const existingPayment = await this.collections.payments.findOne({ requestId: id });
+            // An inspection fee (job-portal phase C) is not a repair payment:
+            // a request whose fee was refunded can still be cancelled here.
+            const existingPayment = await this.collections.payments.findOne({ requestId: id, purpose: { $ne: 'inspection_fee' } });
             const eligibility = getCancellationEligibility(repairRequest, { hasCompletedPayment: !!existingPayment });
 
             if (!eligibility.eligible) {
@@ -1811,7 +1861,7 @@ class RepairRequestController {
                 return res.status(409).send({ message: 'this request can no longer be cancelled', code: 'CANCELLATION_NOT_ALLOWED' });
             }
 
-            logTracking(this.collections.trackingEvents, repairRequest.trackingId, 'cancelled');
+            await logTrackingSafely(this.collections.trackingEvents, repairRequest.trackingId, 'cancelled');
 
             // Release any active checkout session for this repair request so an old
             // checkout URL can never be reused to reach a valid paid state.

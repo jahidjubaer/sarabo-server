@@ -41,6 +41,85 @@ command line of a single script run, together with `--expect-db=<name>`.
 **Never add them to Vercel**: the server never reads them, and a standing
 value would only weaken the next accidental script run.
 
+## AI support limits
+
+The AI support chat is rate limited per visitor, per signed-in user, per IP
+and site-wide. The counters live in MongoDB (`support_rate_limits`, expired
+by a TTL index on `expiresAt`), so every Vercel instance shares them.
+
+- `AI_SUPPORT_GLOBAL_DAILY_LIMIT` (default `300`) - AI questions answered
+  per UTC day across the whole site. Once reached, chat returns
+  `429 SUPPORT_DAILY_CAPACITY_REACHED` until the next day.
+- The per-visitor limits (`AI_SUPPORT_ANON_*`, `AI_SUPPORT_AUTH_*`) are
+  listed in `.env.example`.
+- If the database cannot be reached, chat is refused with
+  `503 SUPPORT_UNAVAILABLE` (fail closed) - the provider is never called
+  without a counted limit.
+- These limits cap requests, not money. Set a budget alert and a spending
+  cap on the Gemini API key's Google Cloud project as the final backstop.
+
+## Service catalogue
+
+Admins edit services and prices at **Dashboard → Services & prices**. A price
+change raises `pricingRule.version`; existing requests keep their price
+snapshot. Switching a service off with requests waiting for a technician
+needs a confirmation - those requests cannot be assigned until it is back on.
+There is no delete.
+
+After an admin edits a standard service, `seed:service-definitions` reports
+that row as a conflict and never overwrites it, and the BDT migration refuses
+to run; both are expected.
+
+## Pickup scheduling
+
+Customers choose a 2-hour pickup window when they create a request:
+10:00-12:00, 12:00-14:00, 14:00-16:00 or 16:00-18:00 Bangladesh time,
+Saturday to Thursday (closed Friday), up to 7 days ahead and at least 1 hour
+from now. They can change it until the device is picked up.
+
+- `PICKUP_SLOT_CAPACITY` (default `3`) - pickups per region per slot. A full
+  slot returns `409 PICKUP_SLOT_FULL`.
+- The count is checked before saving, not locked, so two customers booking
+  the last place in the same second can both get it. Admins can see every
+  request's pickup time on Assign technicians.
+- Requests created before this release have no pickup time and show
+  "Not scheduled"; the customer can choose one from the request page.
+
+## Email updates
+
+Free, sent through a Gmail account (about 500 emails a day). Three emails:
+request received (and again when the pickup time changes), a pickup reminder
+the evening before, and a new job offer to the technician. Email never blocks
+or fails a request - a failed send is logged and recorded in `email_log`
+(records delete themselves after 90 days).
+
+Turning it on (Vercel, Production):
+1. On the Gmail account: Google Account -> Security -> turn on 2-Step
+   Verification -> App passwords -> create one for "Sarabo".
+2. Set `EMAIL_ENABLED=true`, `GMAIL_USER=<the gmail address>`,
+   `GMAIL_APP_PASSWORD=<the 16-letter app password>`; optionally
+   `EMAIL_FROM_NAME` (default `Sarabo`). `SITE_DOMAIN` gives the links.
+3. Set `CRON_SECRET` to a long random string. Vercel Cron then calls
+   `GET /cron/pickup-reminders` daily at 12:00 UTC (18:00 in Dhaka, see
+   `vercel.json`) with it; without `CRON_SECRET` the job refuses to run.
+
+**Pickup reminders do not need email.** The same daily job always posts an
+in-app notification to the customer ("Your pickup is tomorrow") and to the
+assigned technician ("Pickup tomorrow"); the email is sent in addition when
+email is on. Only `CRON_SECRET` is required for the in-app reminders. Each
+pickup slot is reminded once - re-running the job sends nothing new, and a
+moved pickup is reminded again.
+
+Check it: `email_log` shows each email with status `sent` or `failed` and a
+short reason (e.g. `EAUTH` = wrong app password). Tests never send email.
+
+## Technician matching
+
+A technician can only be assigned to a request in **their own region**
+(`OUTSIDE_SERVICE_REGION`). Same district ranks highest; a different district
+in the same region is still allowed. Assign technicians lists everyone else
+as "Not available" with the reason.
+
 ## Database
 
 - Production database: `sarabo_production` (same Atlas cluster as development)
@@ -90,6 +169,8 @@ value would only weaken the next accidental script run.
 | Every request `500 FUNCTION_INVOCATION_FAILED` | Missing/invalid `MONGO_DB_NAME`, malformed `SITE_DOMAIN`, or malformed `FB_SERVICE_KEY` - all three throw synchronously at module load | Vercel function logs (`vercel logs <url>`) for the exact startup error message (never a secret value) |
 | `GET /health` returns `503`, `GET /` returns `200` | Database reachable at process start but the cluster/network is now unavailable | `vercel logs`; MongoDB Atlas cluster status |
 | `403 Origin not allowed` from the real client | `SITE_DOMAIN` misconfigured, or the client is calling from an unexpected origin | Confirm `SITE_DOMAIN` matches the client's actual origin exactly |
+| AI chat returns `503 SUPPORT_UNAVAILABLE` | The limiter could not reach MongoDB (the chat fails closed) | `GET /health`; Atlas status |
+| AI chat returns `429 SUPPORT_DAILY_CAPACITY_REACHED` | The site-wide daily cap was reached | Raise `AI_SUPPORT_GLOBAL_DAILY_LIMIT` only if the Gemini budget allows |
 | Stripe webhook returns `500 webhook not configured` | `STRIPE_WEBHOOK_SECRET` missing | Vercel env vars |
 | Stripe webhook returns `400 invalid signature` repeatedly | `STRIPE_WEBHOOK_SECRET` doesn't match the active endpoint in the Stripe dashboard (commonly after a secret rotation) | Stripe Dashboard -> Webhooks -> endpoint -> signing secret |
 

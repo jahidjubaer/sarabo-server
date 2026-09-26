@@ -8,6 +8,7 @@ const {
     validateQuoteSubmission, buildQuoteDocument, validateQuoteDecision, buildQuoteView,
     getQuoteRound, countArchivedQuotes,
 } = require('../utils/quote');
+const { inspectionCredit, buildInspectionFeeSettlement } = require('../utils/inspectionFee');
 
 // Repair-quote workflow (Phase 6.4 Unit 5): technician submits a quote after
 // inspection; the request owner approves or rejects it. Same security spine as
@@ -508,6 +509,14 @@ class QuoteController {
                                 cancelledBy: req.decoded_email,
                                 cancellationReason: 'quote_declined',
                                 updatedAt: now,
+                                // Job-portal phase D: the customer declined the
+                                // final price, so a paid inspection fee is kept -
+                                // 90% to this technician's wallet, 10% to Sarabo.
+                                ...(inspectionCredit(repairRequest) > 0 ? {
+                                    'inspectionPayment.status': 'kept',
+                                    'inspectionPayment.keptReason': 'quote_declined',
+                                    inspectionFeeSettlement: buildInspectionFeeSettlement(repairRequest, { reason: 'quote_declined', now }),
+                                } : {}),
                             },
                         },
                         { session: mongoSession }

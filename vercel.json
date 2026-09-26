@@ -12,5 +12,8 @@
       "dest": "index.js",
       "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
     }
+  ],
+  "crons": [
+    { "path": "/cron/pickup-reminders", "schedule": "0 12 * * *" }
   ]
 }

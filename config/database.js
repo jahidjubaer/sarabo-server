@@ -44,6 +44,11 @@ const collections = {
     technicianWithdrawals: db.collection("technician_withdrawals"),
     technicianReviews: db.collection("technician_reviews"),
     technicianReports: db.collection("technician_reports"),
+    // Shared AI-support rate-limit counters (middleware/mongoRateLimitStore.js).
+    supportRateLimits: db.collection("support_rate_limits"),
+    emailLog: db.collection("email_log"),
+    turnedAwayRequests: db.collection("turned_away_requests"),
+    jobApplications: db.collection("job_applications"),
 };
 
 let connectionPromise = null;
@@ -123,6 +128,12 @@ async function connectDatabase() {
                 // database, not just in application code" pattern already
                 // used above for payments.sessionId, checkoutSessions.requestId,
                 // and repair requests.trackingId.
+                // AI-support rate-limit counters expire as soon as their window
+                // ends (expiresAt is the window's reset time).
+                await collections.supportRateLimits.createIndex(
+                    { expiresAt: 1 },
+                    { expireAfterSeconds: 0, name: 'supportRateLimits_expiresAt_ttl' }
+                );
                 await collections.serviceDefinitions.createIndex(
                     { productCategorySlug: 1, repairCategorySlug: 1 },
                     { unique: true, name: 'serviceDefinitions_product_repair_unique' }
@@ -266,6 +277,32 @@ async function connectDatabase() {
                 await collections.repairRequests.createIndex(
                     { technicianEmail: 1, 'technicianSettlement.status': 1 },
                     { name: 'repairRequests_technicianEmail_settlementStatus' }
+                );
+                // Sent-email records (services/emailService.js) delete themselves
+                // after 90 days.
+                await collections.emailLog.createIndex(
+                    { expiresAt: 1 },
+                    { name: 'emailLog_expiresAt_ttl', expireAfterSeconds: 0 }
+                );
+                // Job portal applications: one per technician per request.
+                await collections.jobApplications.createIndex(
+                    { requestId: 1, technicianId: 1 },
+                    { name: 'jobApplications_request_technician_unique', unique: true }
+                );
+                await collections.jobApplications.createIndex({ technicianId: 1, status: 1 }, { name: 'jobApplications_technician_status' });
+                // Refused requests (services/technicianMatchGate.js) expire after
+                // 180 days; reports read them by day.
+                await collections.turnedAwayRequests.createIndex(
+                    { expiresAt: 1 },
+                    { name: 'turnedAwayRequests_expiresAt_ttl', expireAfterSeconds: 0 }
+                );
+                await collections.turnedAwayRequests.createIndex({ createdAt: 1 }, { name: 'turnedAwayRequests_createdAt' });
+                // Pickup-slot capacity counts (controllers/pickupSlotController.js).
+                // Same case-insensitive collation as the query, or MongoDB
+                // would not use it.
+                await collections.repairRequests.createIndex(
+                    { 'serviceLocation.region': 1, 'pickupSlot.startsAt': 1 },
+                    { name: 'repairRequests_region_pickupStartsAt', collation: { locale: 'en', strength: 2 } }
                 );
                 return { db, collections };
             })

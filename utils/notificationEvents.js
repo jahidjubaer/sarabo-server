@@ -205,6 +205,145 @@ const NOTIFICATION_EVENTS = {
         actionUrl: () => '/dashboard/assigned-jobs',
         deduplicationKey: ({ entityId }) => `repair:${entityId}:technician_assigned:technician`,
     },
+    // Missed-pickup actions (missed-pickup phase). An admin took a job off a
+    // technician because its pickup window ended without the device being
+    // collected. `occurrence` makes each withdrawal its own notification.
+    assignment_withdrawn: {
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'occurrence'],
+        requiresMetadata: ['occurrence'],
+        title: () => 'A job was taken off your list',
+        message: ({ metadata }) => (metadata.trackingId
+            ? `The pickup for repair request ${metadata.trackingId} was missed, so an admin has given it to another technician. You are free for new jobs.`
+            : 'A pickup was missed, so an admin has given the job to another technician. You are free for new jobs.'),
+        actionUrl: () => '/dashboard/assigned-jobs',
+        deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:assignment_withdrawn:${metadata.occurrence || 'once'}`,
+    },
+    // The customer is asked to choose a new pickup time after a missed pickup.
+    // Same owner-role reasoning as technician_assigned.
+    pickup_reschedule_requested: {
+        entityType: 'repair_request',
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'occurrence'],
+        requiresMetadata: ['trackingId', 'occurrence'],
+        title: () => 'Please choose a new pickup time',
+        message: ({ metadata }) => `The pickup for your repair request ${metadata.trackingId} was missed. Please choose a new pickup time.`,
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:pickup_reschedule_requested:${metadata.occurrence || 'once'}`,
+    },
+    // Day-before pickup reminders (in-app-reminders phase), posted by the
+    // daily reminder job. `occurrence` is "<date>|<slotId>", so each pickup
+    // slot is reminded once and a moved pickup is reminded again.
+    pickup_reminder: {
+        entityType: 'repair_request',
+        // Owner-facing - same role reasoning as technician_assigned.
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'pickupWindow', 'occurrence'],
+        requiresMetadata: ['trackingId', 'pickupWindow', 'occurrence'],
+        title: () => 'Your pickup is tomorrow',
+        message: ({ metadata }) => `Reminder: your device for repair request ${metadata.trackingId} will be collected ${metadata.pickupWindow}. Please have it ready.`,
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:pickup_reminder:${metadata.occurrence || 'once'}`,
+    },
+    pickup_reminder_technician: {
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'pickupWindow', 'occurrence'],
+        requiresMetadata: ['trackingId', 'pickupWindow', 'occurrence'],
+        title: () => 'Pickup tomorrow',
+        message: ({ metadata }) => `Pickup tomorrow: collect the device for repair request ${metadata.trackingId}, ${metadata.pickupWindow}.`,
+        actionUrl: () => '/dashboard/assigned-jobs',
+        deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:pickup_reminder_technician:${metadata.occurrence || 'once'}`,
+    },
+    // Job portal (job-portal phase B).
+    job_invitation: {
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: ['trackingId'],
+        title: () => "You're invited to apply for a job",
+        message: ({ metadata }) => `An admin invited you to apply for repair request ${metadata.trackingId}. Open the job portal to send your estimate.`,
+        actionUrl: () => '/dashboard/job-portal',
+        deduplicationKey: ({ entityId, recipientEmail }) => `repair:${entityId}:job_invitation:${recipientEmail || 'technician'}`,
+    },
+    application_received: {
+        entityType: 'repair_request',
+        // Owner-facing - same role reasoning as technician_assigned.
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'occurrence'],
+        requiresMetadata: ['trackingId', 'occurrence'],
+        title: () => 'A technician applied for your repair',
+        message: ({ metadata }) => `A technician sent an estimate for your repair request ${metadata.trackingId}. Compare the applications and choose one.`,
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:application_received:${metadata.occurrence || 'once'}`,
+    },
+    application_accepted: {
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: ['trackingId'],
+        title: () => 'You got the job',
+        message: ({ metadata }) => `The customer chose you for repair request ${metadata.trackingId}. It is now in your jobs.`,
+        actionUrl: () => '/dashboard/assigned-jobs',
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:application_accepted`,
+    },
+    application_not_chosen: {
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: ['trackingId'],
+        title: () => 'Another technician was chosen',
+        message: ({ metadata }) => `The customer chose another technician for repair request ${metadata.trackingId}. Thanks for applying.`,
+        actionUrl: () => '/dashboard/job-portal',
+        deduplicationKey: ({ entityId, recipientEmail }) => `repair:${entityId}:application_not_chosen:${recipientEmail || 'technician'}`,
+    },
+    // Inspection fee (job-portal phase C): the chosen technician could no
+    // longer be booked after the customer paid, so the fee is refunded.
+    inspection_fee_refunded: {
+        entityType: 'repair_request',
+        // Owner-facing - same role reasoning as technician_assigned.
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        // `reason` (phase D) picks the wording; absent = the booking failed.
+        allowedMetadataKeys: ['trackingId', 'occurrence', 'reason'],
+        requiresMetadata: ['trackingId', 'occurrence'],
+        title: () => 'Your inspection fee is being refunded',
+        message: ({ metadata }) => {
+            if (metadata.reason === 'technician_no_show') {
+                return `The technician did not come to collect repair request ${metadata.trackingId}, so your inspection fee is being refunded in full. Please choose another technician.`;
+            }
+            if (metadata.reason === 'customer_cancelled') {
+                return `You cancelled repair request ${metadata.trackingId} at least 2 hours before the visit, so your inspection fee is being refunded in full.`;
+            }
+            return `The technician you chose for repair request ${metadata.trackingId} could not be booked, so your inspection fee is being refunded. Please choose another technician.`;
+        },
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId, metadata }) => `repair:${entityId}:inspection_fee_refunded:${metadata.occurrence || 'once'}`,
+    },
+    // Job-portal phase D: the customer cancelled a booked visit. `feeOutcome`
+    // says whether the technician keeps their share of the inspection fee.
+    booking_cancelled_by_customer: {
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'feeOutcome'],
+        requiresMetadata: ['trackingId', 'feeOutcome'],
+        title: () => 'The customer cancelled a visit',
+        message: ({ metadata }) => (metadata.feeOutcome === 'kept'
+            ? `The customer cancelled repair request ${metadata.trackingId} less than 2 hours before the visit. Your share of the inspection fee is in your wallet.`
+            : `The customer cancelled repair request ${metadata.trackingId}. You are free for other jobs.`),
+        actionUrl: () => '/dashboard/assigned-jobs',
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:booking_cancelled_by_customer`,
+    },
     technician_on_the_way: {
         entityType: 'repair_request',
         // Same reasoning as technician_assigned - POST /repair-requests only

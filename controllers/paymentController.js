@@ -1,4 +1,5 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
+const { createStripeRefunder } = require('../services/inspectionFeeRefunds');
 const { ObjectId } = require('mongodb');
 const { createPaymentProcessor, normalize } = require('../services/paymentProcessor');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
@@ -32,7 +33,11 @@ class PaymentController {
         this.notifications = createNotificationService(models);
         // Shared with the Stripe webhook handler below - exactly one place
         // validates a Checkout Session and records a payment for it.
-        this.processCheckoutSession = createPaymentProcessor(models, collections, this.notifications);
+        this.processCheckoutSession = createPaymentProcessor(models, collections, this.notifications, {
+            // Job-portal phase C: returns an inspection fee that can no longer
+            // book its technician (Stripe test mode).
+            refundPayment: createStripeRefunder(stripe),
+        });
         // Guards against duplicate concurrent Stripe Checkout Sessions for
         // the same repair request - see services/checkoutSessionManager.js.
         this.checkoutSessions = createCheckoutSessionManager(collections);
@@ -254,6 +259,28 @@ class PaymentController {
             const unitAmount = toSmallestUnit(amountTaka);
             const requestId = repairRequest._id.toString();
 
+            // The inspection fee already paid covers the whole quote
+            // (job-portal phase C): nothing to charge. Completed through the
+            // same guarded processor as a Stripe payment, keyed so a retry
+            // is recognised as already done.
+            if (amountTaka === 0) {
+                const result = await this.processCheckoutSession({
+                    session: {
+                        id: `inspection-credit-${requestId}-${eligibility.quoteVersion}`,
+                        mode: 'payment', payment_status: 'paid', payment_intent: null,
+                        amount_total: 0, currency: V2_PAYMENT_CURRENCY,
+                        customer_email: repairRequest.senderEmail,
+                        metadata: { requestId, trackingId: repairRequest.trackingId, schemaVersion: '2', quoteVersion: String(eligibility.quoteVersion) },
+                    },
+                    source: 'inspection-credit',
+                    callerEmail: req.decoded_email,
+                });
+                if (result.code !== 'OK') {
+                    return res.status(409).send({ message: 'the payment could not be completed', code: result.code });
+                }
+                return res.send({ paidWithoutCharge: true, trackingId: repairRequest.trackingId });
+            }
+
             const conflictResponse = () => res.status(409).send({
                 message: 'a checkout session is already being created for this request, please try again shortly',
                 code: 'CHECKOUT_CREATION_IN_PROGRESS'
@@ -262,7 +289,17 @@ class PaymentController {
             // Reuse an existing, still-open Stripe session for this repair request - the
             // real multi-tab / rapid-retry / parallel-request guard.
             const activeRow = await this.checkoutSessions.findActive(requestId);
-            if (activeRow) {
+            if (activeRow && activeRow.purpose === 'inspection_fee') {
+                // A leftover inspection-fee checkout is never reused for the
+                // repair payment: close it, then open the right one.
+                if (activeRow.status === 'creating') {
+                    return conflictResponse();
+                }
+                const cancelled = await this.checkoutSessions.cancelByRequestId(requestId);
+                if (cancelled && cancelled.sessionId) {
+                    try { await stripe.checkout.sessions.expire(cancelled.sessionId); } catch (error) { /* already closed */ }
+                }
+            } else if (activeRow) {
                 if (activeRow.status === 'creating') {
                     return conflictResponse();
                 }
@@ -278,7 +315,7 @@ class PaymentController {
             }
 
             const claimResult = await this.checkoutSessions.claim({
-                requestId, ownerEmail, amount: amountTaka, currency: V2_PAYMENT_CURRENCY
+                requestId, ownerEmail, amount: amountTaka, currency: V2_PAYMENT_CURRENCY, purpose: 'repair'
             });
             if (!claimResult.claimed) {
                 return conflictResponse();
@@ -377,7 +414,18 @@ class PaymentController {
                         success: true,
                         alreadyProcessed: result.alreadyProcessed,
                         transactionId: result.transactionId,
-                        trackingId: result.trackingId
+                        trackingId: result.trackingId,
+                        // Job-portal phase C: an inspection fee books the
+                        // technician; the page says so and links the request.
+                        purpose: result.purpose || 'repair',
+                        requestId: result.requestId || null,
+                        technicianName: result.technicianName || null,
+                    });
+                case 'INSPECTION_FEE_REFUNDED':
+                    return res.status(409).send({
+                        message: 'the technician could not be booked, so your inspection fee is being refunded',
+                        code: 'INSPECTION_FEE_REFUNDED',
+                        requestId: result.requestId || null,
                     });
                 case 'OWNERSHIP_MISMATCH':
                     return res.status(403).send({ message: 'forbidden access' });

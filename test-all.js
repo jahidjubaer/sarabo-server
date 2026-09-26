@@ -22,6 +22,13 @@ process.env.MONGO_DB_NAME = process.env.MONGO_DB_NAME || 'sarabo-test-db';
 // Automated tests use only injected fake/mocked support providers and must
 // never inherit a local shell setting that enables paid external AI traffic.
 process.env.AI_SUPPORT_ENABLED = 'false';
+// Tests never send real email (they use a fake transport where needed).
+process.env.EMAIL_ENABLED = 'false';
+// Email verification is always enforced in tests, whatever a local .env says.
+process.env.SKIP_EMAIL_VERIFICATION = 'false';
+// Fixtures create requests in made-up regions; tests that cover the
+// technician gate turn it on explicitly.
+process.env.SKIP_TECHNICIAN_MATCH_CHECK = 'true';
 
 const http = require('http');
 require('dotenv').config();
@@ -38,6 +45,19 @@ const { runSupportFoundationTests } = require('./tests/supportFoundationTests');
 const { runGeminiSupportProviderTests } = require('./tests/geminiSupportProviderTests');
 const { runFeedbackTests } = require('./tests/feedbackTests');
 const { runProductionMigrationTests } = require('./tests/productionMigrationTests');
+const { runTechnicianAvailabilityTests } = require('./tests/technicianAvailabilityTests');
+const { runAdminServiceDefinitionTests } = require('./tests/adminServiceDefinitionTests');
+const { runPickupSlotTests } = require('./tests/pickupSlotTests');
+const { runEmailTests } = require('./tests/emailTests');
+const { runSeedDevPeopleTests } = require('./tests/seedDevPeopleTests');
+const { runAdminReportTests } = require('./tests/adminReportTests');
+const { runAdminAttentionTests } = require('./tests/adminAttentionTests');
+const { runMissedPickupTests } = require('./tests/missedPickupTests');
+const { runInAppReminderTests } = require('./tests/inAppReminderTests');
+const { runMatchGateTests } = require('./tests/matchGateTests');
+const { runJobPortalTests } = require('./tests/jobPortalTests');
+const { runInspectionFeeTests } = require('./tests/inspectionFeeTests');
+const { runInspectionFeeOutcomeTests } = require('./tests/inspectionFeeOutcomeTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -122,6 +142,10 @@ require.cache[stripeModulePath] = {
                         return { id: sessionId, ...expired };
                     }
                 }
+            },
+            // Inspection-fee refunds (job-portal phase C). Real Stripe is never called.
+            refunds: {
+                create: async (params) => ({ id: `re_test_${String(params && params.payment_intent)}`, status: 'succeeded' }),
             },
             webhooks: {
                 // A lightweight stand-in for real HMAC signature verification -
@@ -292,6 +316,24 @@ async function testStatusTransitions() {
             'Repeated same status handled safely (no duplicate tracking log)',
             res.statusCode === 200 && trackingCountAfter === trackingCountBefore
         );
+
+        // The tracking log of a completed action is awaited (so the count
+        // above is never read before the previous log lands), but a failed
+        // log write is swallowed - it must never throw or reject.
+        const { logTrackingSafely } = require('./middleware/logging');
+        const failingCollection = { insertOne: async () => { throw new Error('simulated tracking write failure'); } };
+        const originalConsoleError = console.error;
+        console.error = () => {};
+        let safeLogResult;
+        let safeLogThrew = false;
+        try {
+            safeLogResult = await logTrackingSafely(failingCollection, 'TEST-SAFE-LOG', 'rider_arriving');
+        } catch {
+            safeLogThrew = true;
+        } finally {
+            console.error = originalConsoleError;
+        }
+        logTest('A failed tracking-log write after a completed action is non-fatal', !safeLogThrew && safeLogResult === null);
 
         res = await updateStatus(main.id, 'parcel_delivered', RIDER_EMAIL, main.trackingId);
         logTest('Valid transition: parcel_picked_up -> parcel_delivered', res.statusCode === 200);
@@ -3195,6 +3237,24 @@ async function testP0AuthorizationFixes() {
         logTest('GET /users paged search is case-insensitive and finds the account',
             Array.isArray(pagedSearchRes.body?.data) && pagedSearchRes.body.data.some(u => u.email === CUSTOMER_EMAIL));
 
+        // --- 14h, 14i. Only the admin-list fields ever leave the server, even
+        // when a user document carries something else.
+        const projectionEmail = `projection-${Date.now()}@example.test`;
+        const projectionInsert = await collections.users.insertOne({ email: projectionEmail, displayName: 'Projection Test', role: 'user', createdAt: new Date(), internalNote: 'must-not-leak', uid: 'firebase-uid-must-not-leak' });
+        try {
+            const allowed = ['_id', 'email', 'displayName', 'photoURL', 'role', 'createdAt'];
+            const pagedProjection = await callGetAllUsers(ADMIN_EMAIL, { page: '1', searchText: projectionEmail });
+            const pagedRow = pagedProjection.body?.data?.[0];
+            logTest('GET /users?page returns only the admin-list fields',
+                !!pagedRow && Object.keys(pagedRow).every((key) => allowed.includes(key)) && pagedRow.internalNote === undefined && pagedRow.uid === undefined);
+            const legacyProjection = await callGetAllUsers(ADMIN_EMAIL, { searchText: projectionEmail });
+            const legacyRow = Array.isArray(legacyProjection.body) ? legacyProjection.body[0] : null;
+            logTest('GET /users (legacy array) returns only the admin-list fields',
+                !!legacyRow && Object.keys(legacyRow).every((key) => allowed.includes(key)) && legacyRow.internalNote === undefined);
+        } finally {
+            await collections.users.deleteOne({ _id: projectionInsert.insertedId });
+        }
+
         // --- 15. No alternate list-user route exists (confirmed structurally -
         // routes/users.js defines exactly one GET /users route). ---
         logTest(
@@ -3228,7 +3288,10 @@ async function testP0AuthorizationFixes() {
             'license', 'nid', 'bike', 'status', 'workStatus', 'createdAt',
             // expertise is part of the Rider.findAll projection (Phase 6.3) and
             // is rendered by ApproveTechnicians; it is a first-class allowed field.
-            'expertise'
+            'expertise',
+            // Computed yes/no (an active repair names this technician), added
+            // so admins can spot a stuck "busy" status - not stored data.
+            'hasActiveAssignment'
         ]);
         const allFieldsAllowed = ridersRes.body.every(r => Object.keys(r).every(k => ALLOWED_RIDER_FIELDS.has(k)));
         logTest(
@@ -4561,10 +4624,20 @@ async function testNotificationFoundation() {
             // workflow events, and the two withdrawal outcomes that were being
             // emitted by walletController with no definition to render them.
             'repair_request_created', 'quote_revision_started', 'repair_cancelled_by_technician',
-            'withdrawal_paid', 'withdrawal_rejected', 'technician_report_submitted'
+            'withdrawal_paid', 'withdrawal_rejected', 'technician_report_submitted',
+            // Missed-pickup actions.
+            'assignment_withdrawn', 'pickup_reschedule_requested',
+            // In-app pickup reminders.
+            'pickup_reminder', 'pickup_reminder_technician',
+            // Job portal.
+            'job_invitation', 'application_received', 'application_accepted', 'application_not_chosen',
+            // Inspection fee.
+            'inspection_fee_refunded',
+            // Inspection-fee outcomes.
+            'booking_cancelled_by_customer'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 25 event types exist', actualTypes.length === 25 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 35 event types exist', actualTypes.length === 35 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -4980,7 +5053,15 @@ async function testNotificationFoundation() {
         logTest('57. Each lifecycle event accepts recipientRole admin', allLifecycleAcceptAdmin);
         logTest('58. Each lifecycle event rejects an unsupported role', allLifecycleRejectUnsupported);
 
-        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed', 'quote_submitted', 'payment_completed', 'repair_started', 'repair_finished', 'quote_revision_started', 'repair_cancelled_by_technician'];
+        const approvedMultiRoleTypes = ['technician_assigned', 'technician_on_the_way', 'repair_in_progress', 'repair_completed', 'payment_confirmed', 'inspection_completed', 'quote_submitted', 'payment_completed', 'repair_started', 'repair_finished', 'quote_revision_started', 'repair_cancelled_by_technician',
+            // Missed-pickup phase: asks the request's owner for a new pickup time.
+            'pickup_reschedule_requested',
+            // In-app pickup reminders: the customer's copy goes to the request's owner.
+            'pickup_reminder',
+            // Job portal: tells the request's owner a technician applied.
+            'application_received',
+            // Inspection fee: tells the request's owner their fee is refunded.
+            'inspection_fee_refunded'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -8892,7 +8973,7 @@ async function testRepairRequestV2() {
         // charging-port, requiredExpertiseLevel 'intermediate') to still be
         // assignable, exactly like any other genuine v2-eligible technician.
         const raceTechDoc = {
-            name: `TEST-REQUEST-V2-TECH-${runId}`, email: raceTechEmail, region: 'Dhaka', district: 'Mirpur',
+            name: `TEST-REQUEST-V2-TECH-${runId}`, email: raceTechEmail, region: 'Test Region', district: 'Test District', // same region as validLocation()
             status: 'approved', workStatus: 'available',
             expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['charging-port'], level: 'advanced', experienceYears: 5 }],
             createdAt: new Date()
@@ -9062,7 +9143,9 @@ async function testEligibleTechnicianAPI() {
     logTest('24. Linked user with wrong role excluded', evalRider(makeRider(), { technicianRole: 'user' }).reasonCodes.includes('TECHNICIAN_ROLE_INCONSISTENT'));
     logTest('25. Incomplete region/district excluded', evalRider(makeRider({ district: undefined })).reasonCodes.includes('INCOMPLETE_TECHNICIAN_PROFILE'));
     logTest('26. Different district remains eligible', evalRider(makeRider({ district: 'Gulshan' })).eligible === true);
-    logTest('27. Different region remains eligible', evalRider(makeRider({ region: 'Chittagong', district: 'Pahartali' })).eligible === true);
+    const otherRegionEval = evalRider(makeRider({ region: 'Chittagong', district: 'Pahartali' }));
+    logTest('27. Different region is not eligible (OUTSIDE_SERVICE_REGION)', otherRegionEval.eligible === false && otherRegionEval.reasonCodes.includes('OUTSIDE_SERVICE_REGION'));
+    logTest('27b. Region match ignores case and surrounding spaces', evalRider(makeRider({ region: '  dhaka ' })).eligible === true);
 
     // ---- Ranking (28-36) ----
     const scoreExpert = es.scoreTechnician({ matchedExpertiseEntry: { level: 'expert', experienceYears: 5 }, serviceAreaMatch: { matchLevel: 'exact-district' }, completedRepairCount: 0 });
@@ -9389,7 +9472,7 @@ async function testEligibleTechnicianAPI() {
 
         logTest(
             '52. Diagnostic entries remain privacy-safe',
-            diagnosticRes.body.ineligibleTechnicians.every((t) => t.email === undefined && t.address === undefined && Object.keys(t).sort().join(',') === 'displayName,reasonCodes,technicianId')
+            diagnosticRes.body.ineligibleTechnicians.every((t) => t.email === undefined && t.address === undefined && Object.keys(t).sort().join(',') === 'displayName,district,reasonCodes,region,technicianId')
         );
         logTest('53. Diagnostic list capped and totalIneligible present', typeof diagnosticRes.body.totalIneligible === 'number' && diagnosticRes.body.ineligibleTechnicians.length <= 50);
 
@@ -9746,11 +9829,13 @@ async function testAssignmentExpertiseRevalidation() {
         const higherLevelRes = await callAssign(higherLevelParcelId, higherLevelRider.id, adminEmail);
         logTest('17. Expertise level higher than required still succeeds', higherLevelRes.statusCode === 200);
 
-        // ---- Service area is ranking-only, never a hard gate (18-19) ----
+        // ---- Service area: region is a hard rule, district is ranking-only (18-19) ----
         const differentRegionParcelId = await createV2Parcel();
         const differentRegionRider = await createTestTechnician('DIFF-REGION', { region: 'Chittagong', district: 'Pahartali' });
         const differentRegionRes = await callAssign(differentRegionParcelId, differentRegionRider.id, adminEmail);
-        logTest('18. Technician in a completely different region/district is still assignable', differentRegionRes.statusCode === 200);
+        logTest('18. Technician in a different region is refused at assignment (TECHNICIAN_NOT_ELIGIBLE)',
+            differentRegionRes.statusCode === 409 && differentRegionRes.body.code === 'TECHNICIAN_NOT_ELIGIBLE'
+            && Array.isArray(differentRegionRes.body.reasonCodes) && differentRegionRes.body.reasonCodes.includes('OUTSIDE_SERVICE_REGION'));
 
         const differentDistrictParcelId = await createV2Parcel();
         const differentDistrictRider = await createTestTechnician('DIFF-DISTRICT', { district: 'Gulshan' });
@@ -10532,7 +10617,7 @@ async function testDamageUploadFoundation() {
         // Comments explaining the deliberate absence of verifyAdmin/verifyTechnician
         // legitimately mention those identifiers in prose - strip //-style
         // comments first so test 63 checks actual usage, not word mentions.
-        const routesSourceCode = routesSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
+        const routesSourceCode = routesSource.split(/\r?\n/).map((line) => line.replace(/\/\/.*$/, '')).join('\n');
         logTest('62. Damage-upload routes are wired with verifyFBToken and ensureDatabaseReady', /verifyFBToken/.test(routesSourceCode) && /ensureDatabaseReady/.test(routesSourceCode));
         logTest('63. No admin-only bypass exists on damage-upload routes (ownership is the sole authorization boundary, by design)', !/verifyAdmin/.test(routesSourceCode) && !/verifyTechnician/.test(routesSourceCode));
 
@@ -10998,7 +11083,7 @@ async function testAuthorizedDamageImageAccess() {
 
         // ---- Route wiring (68) ----
         const routesSource = require('fs').readFileSync(require('path').join(__dirname, 'routes', 'damageUploads.js'), 'utf8');
-        const routesSourceCode = routesSource.split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
+        const routesSourceCode = routesSource.split(/\r?\n/).map((line) => line.replace(/\/\/.*$/, '')).join('\n');
         logTest(
             '68. GET damage-images list route is wired with verifyFBToken/ensureDatabaseReady only (live role resolution, not route-level admin/rider gating)',
             /app\.get\(\s*\n?\s*'\/repair-requests\/:id\/damage-images'/.test(routesSourceCode) && !/verifyAdmin/.test(routesSourceCode) && !/verifyTechnician/.test(routesSourceCode)
@@ -13186,7 +13271,7 @@ async function startTestServer() {
     }
     const child = spawn(process.execPath, ['index.js'], {
         cwd: __dirname,
-        env: { ...process.env, NODE_ENV: 'test', MONGO_DB_NAME: dbName, PORT: '0', AI_SUPPORT_ENABLED: 'false' },
+        env: { ...process.env, NODE_ENV: 'test', MONGO_DB_NAME: dbName, PORT: '0', AI_SUPPORT_ENABLED: 'false', EMAIL_ENABLED: 'false', SKIP_EMAIL_VERIFICATION: 'false', SKIP_TECHNICIAN_MATCH_CHECK: 'true' },
         stdio: ['ignore', 'pipe', 'pipe'],
     });
     process.on('exit', () => { if (child.exitCode === null) child.kill(); });
@@ -13455,6 +13540,19 @@ async function runAllTests() {
     await runGeminiSupportProviderTests({ logTest });
     await runFeedbackTests({ logTest });
     await runProductionMigrationTests({ logTest });
+    await runTechnicianAvailabilityTests({ logTest });
+    await runAdminServiceDefinitionTests({ logTest });
+    await runPickupSlotTests({ logTest });
+    await runEmailTests({ logTest });
+    await runSeedDevPeopleTests({ logTest });
+    await runAdminReportTests({ logTest });
+    await runAdminAttentionTests({ logTest });
+    await runMissedPickupTests({ logTest });
+    await runInAppReminderTests({ logTest });
+    await runMatchGateTests({ logTest });
+    await runJobPortalTests({ logTest });
+    await runInspectionFeeTests({ logTest });
+    await runInspectionFeeOutcomeTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing
@@ -14248,9 +14346,9 @@ async function testTechnicianMatchingProfileFlow() {
         const mismatchIds = (mismatchRes.body.technicians || []).map((t) => t.technicianId);
         logTest('18. Non-matching expertise excludes the technician from recommendations', !mismatchIds.includes(applyId));
 
-        // Service area is a RANKING factor, never a hard gate: a complete-profile
-        // technician in a different region is still eligible (Phase 8.7A does not
-        // change assignment semantics - it only fixes onboarding -> matching).
+        // Region is a hard rule (pickup-scheduling phase): a complete-profile
+        // technician in a different region is not eligible, and diagnostic mode
+        // says why. Within the region, district only affects ranking.
         const otherRegionEmail = `tmp-otherregion-${runId}@test.local`;
         createdUserEmails.push(otherRegionEmail);
         await collections.users.insertOne({ email: otherRegionEmail, role: 'rider', createdAt: new Date() });
@@ -14258,7 +14356,11 @@ async function testTechnicianMatchingProfileFlow() {
         createdRiderIds.push(otherRegionInsert.insertedId.toString());
         const areaRes = await callGetEligible(matchParcelId, adminEmail);
         const areaIds = (areaRes.body.technicians || []).map((t) => t.technicianId);
-        logTest('19. Service area affects ranking only - a different-region complete profile stays eligible', areaIds.includes(otherRegionInsert.insertedId.toString()));
+        const areaDiag = fakeRes();
+        await parcelController.getEligibleTechnicians({ params: { id: matchParcelId }, query: { diagnostic: 'true' }, decoded_email: adminEmail }, areaDiag);
+        const areaEntry = (areaDiag.body.ineligibleTechnicians || []).find((t) => t.technicianId === otherRegionInsert.insertedId.toString());
+        logTest('19. A different-region technician is not eligible and is reported as outside the service region',
+            !areaIds.includes(otherRegionInsert.insertedId.toString()) && !!areaEntry && areaEntry.reasonCodes.includes('OUTSIDE_SERVICE_REGION') && areaEntry.region === 'Chittagong');
 
         // Busy technician (workStatus in_delivery) is excluded.
         await collections.technicians.updateOne({ _id: new ObjectId(applyId) }, { $set: { workStatus: 'in_delivery' } });
@@ -14551,7 +14653,7 @@ async function testTechnicianAssignmentDecisions() {
 // ---------------------------------------------------------------------------
 async function testEmailVerificationMiddleware() {
     console.log('\n=== Email Verification Middleware (Phase 8.1) ===');
-    const { verifyEmailVerified } = require('./middleware/auth');
+    const { verifyEmailVerified, isEmailVerificationSkipped } = require('./middleware/auth');
 
     function fakeRes() {
         return {
@@ -14560,6 +14662,30 @@ async function testEmailVerificationMiddleware() {
             status(code) { this.statusCode = code; return this; },
             send(payload) { this.body = payload; return this; },
         };
+    }
+
+    // Local-only pause (SKIP_EMAIL_VERIFICATION): honoured on a local machine,
+    // ignored on any Vercel deployment and with NODE_ENV=production.
+    logTest('Email-verification pause is honoured only locally',
+        isEmailVerificationSkipped({ SKIP_EMAIL_VERIFICATION: 'true', NODE_ENV: 'development' }) === true
+        && isEmailVerificationSkipped({ SKIP_EMAIL_VERIFICATION: 'true' }) === true
+        && isEmailVerificationSkipped({ SKIP_EMAIL_VERIFICATION: 'true', NODE_ENV: 'production' }) === false
+        && isEmailVerificationSkipped({ SKIP_EMAIL_VERIFICATION: 'true', VERCEL: '1', VERCEL_ENV: 'preview' }) === false
+        && isEmailVerificationSkipped({ SKIP_EMAIL_VERIFICATION: 'true', VERCEL: '1', VERCEL_ENV: 'production' }) === false
+        && isEmailVerificationSkipped({ SKIP_EMAIL_VERIFICATION: 'TRUE' }) === false
+        && isEmailVerificationSkipped({}) === false);
+    {
+        const saved = process.env.SKIP_EMAIL_VERIFICATION;
+        process.env.SKIP_EMAIL_VERIFICATION = 'true';
+        const res = fakeRes();
+        let nextCalled = false;
+        try {
+            verifyEmailVerified({ decoded_email: 'unverified@test.local', decoded_email_verified: false }, res, () => { nextCalled = true; });
+        } finally {
+            process.env.SKIP_EMAIL_VERIFICATION = saved;
+        }
+        logTest('verifyEmailVerified lets an unverified user through only while the local pause is on',
+            nextCalled === true && res.body === undefined);
     }
 
     // 1. Authenticated + email_verified true -> allowed (next called, no response).

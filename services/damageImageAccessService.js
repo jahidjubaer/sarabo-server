@@ -11,6 +11,8 @@
 
 const { normalize } = require('./paymentProcessor');
 const { ACTIVE_STATUSES } = require('../utils/repairRequestStatus');
+const { isOpenForApplications } = require('../utils/jobPortal');
+const { canTechnicianEverTakeRequest } = require('./technicianEligibilityService');
 
 // Conservative technician policy (Phase D): access holds only while the
 // assignment is still "in flight" - driver_assigned, rider_arriving,
@@ -41,6 +43,24 @@ async function resolveImageAccess({ repairRequest, callerEmail, models, session 
         const technician = await models.Technician.findByEmail(callerEmail, findOptions);
         if (technician && technician._id.toString() === repairRequest.technicianId) {
             return { allowed: true, accessRole: 'assigned-technician', code: null };
+        }
+    }
+
+    // Job portal (job-portal phase B): while a request is open for
+    // applications, any approved technician who could take it may see its
+    // photos to estimate the repair - the same rule that lists it to them.
+    if (callerRole === 'rider' && isOpenForApplications(repairRequest)) {
+        const technician = await models.Technician.findByEmail(callerEmail, findOptions);
+        const definition = repairRequest.service && repairRequest.service.definitionId && models.ServiceDefinition
+            ? await models.ServiceDefinition.findById(repairRequest.service.definitionId)
+            : null;
+        if (technician && technician.status === 'approved' && canTechnicianEverTakeRequest(technician, {
+            region: repairRequest.serviceLocation && repairRequest.serviceLocation.region,
+            productCategorySlug: repairRequest.product && repairRequest.product.categorySlug,
+            repairCategorySlug: repairRequest.service && repairRequest.service.repairCategorySlug,
+            requiredExpertiseLevel: definition ? definition.requiredExpertiseLevel : undefined,
+        })) {
+            return { allowed: true, accessRole: 'prospective-technician', code: null };
         }
     }
 

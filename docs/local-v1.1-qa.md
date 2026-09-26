@@ -232,3 +232,27 @@ production bucket.
 Confirm that general request reads never expose `storageKey` or signed URLs —
 images are only ever served through their dedicated, authorized endpoints. Do not
 change the storage architecture; this is a manual verification sequence only.
+
+## Local testing with many accounts
+
+**Pause email verification (local only).** Set `SKIP_EMAIL_VERIFICATION=true`
+in the server `.env` and `VITE_SKIP_EMAIL_VERIFICATION=true` in the client
+`.env`. Unverified accounts can then create requests and pay. Both are ignored
+in production: the server ignores it on any Vercel deployment and with
+`NODE_ENV=production`, and the client only reads it in `npm run dev`. The
+server prints a warning at startup while it is on.
+
+**Dummy technicians and customers.** `node scripts/seed-dev-people.js`
+(dry run), then `--confirm-seed` to write 120 technicians (spread over every
+region and device type; most approved, some applying or rejected) and 60
+customers. Options: `--technicians=N --customers=N`. Only runs against the
+local dev database or a test database. Every seeded email ends
+`@seed.sarabo.local`; they exist only in MongoDB and cannot sign in. Remove
+them all with `--reset --confirm-seed`.
+
+**Requests need a local technician.** A request can only be created when an
+approved technician in its region offers that repair (the create form warns
+as soon as the repair and region are chosen). Refused attempts appear as
+"Turned away" on Reports. With the seeded technicians most combinations
+work; set `SKIP_TECHNICIAN_MATCH_CHECK=true` in the server `.env` to turn the
+check off locally (it is always on in production).
