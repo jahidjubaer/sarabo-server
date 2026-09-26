@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const { SLOT_HOLDING_STATUSES, dhakaDateString } = require('../utils/pickupSlots');
 const { formatPickupForEmail } = require('../utils/emailTemplates');
 const { createNotificationService } = require('../services/notificationService');
+const { closeStaleDeclinedRequests } = require('../services/declinedQuoteClose');
+const { client } = require('../config/database');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Gmail's free limit is about 500 a day; one run never sends more than this.
@@ -22,8 +24,9 @@ function secretMatches(provided, expected) {
 // the route refuses every call. Safe to run more than once: the email log
 // allows one reminder per request per pickup slot.
 class PickupReminderController {
-    constructor(models, collections, { emailService, now = () => new Date(), env = process.env } = {}) {
+    constructor(models, collections, { emailService, now = () => new Date(), env = process.env, mongoClient = client } = {}) {
         this.collections = collections;
+        this.mongoClient = mongoClient;
         this.emailService = emailService;
         this.notifications = createNotificationService(models);
         this.User = models.User;
@@ -60,7 +63,18 @@ class PickupReminderController {
                     else email.skipped += 1;
                 }
             }
-            res.send({ date: tomorrow, found: requests.length, inApp, ...email, emailEnabled: this.emailService.enabled });
+            // Same daily run (Vercel's free plan allows daily cron jobs):
+            // declined quotes nobody acted on for 3 days are closed.
+            let declinedClosed;
+            try {
+                declinedClosed = await closeStaleDeclinedRequests({
+                    collections: this.collections, notifications: this.notifications, User: this.User, mongoClient: this.mongoClient, now: this.now(),
+                });
+            } catch (error) {
+                console.error('Closing stale declined quotes failed:', error.message);
+                declinedClosed = { error: true };
+            }
+            res.send({ date: tomorrow, found: requests.length, inApp, ...email, emailEnabled: this.emailService.enabled, declinedClosed });
         } catch (error) {
             res.status(500).send({ message: 'Error sending reminders', code: 'INTERNAL_ERROR' });
         }

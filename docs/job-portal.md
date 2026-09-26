@@ -67,11 +67,19 @@ confirms and pays nothing more. The technician's settlement is still 90% of the
 | Technician does not come (admin: missed pickup -> "Offer to another technician") | `POST /admin/repair-requests/:id/missed-pickup/withdraw` | Full refund; other applicants can be chosen again |
 | Customer cancels **2 hours or more** before the pickup time starts | `POST /repair-requests/:id/cancel-booking` | Full refund |
 | Customer cancels **less than 2 hours** before | same | Kept, 90/10 |
-| Customer declines the final price and the technician closes the job | `POST /repair-requests/:id/quote/cancel-request` | Kept, 90/10 |
+| Customer declines the final price, then the request ends (see below) | | Kept, 90/10 |
 
 - `GET /repair-requests/:id/booking-cancellation` tells the customer beforehand
   which outcome cancelling now would have. A visit can be cancelled this way
   only while the device has not been collected and a fee was paid.
+- After a declined price the request ends one of three ways
+  (`services/declinedQuoteClose.js`): the technician closes the job
+  (`POST /repair-requests/:id/quote/cancel-request`), the customer ends it
+  (`POST /repair-requests/:id/quote/close`), or - if the technician neither
+  revises nor closes it within **3 days** - the daily job
+  (`GET /cron/pickup-reminders`) closes it. The request records `closedBy`
+  (`technician`, `customer` or `auto`). Revising the quote moves the request out
+  of the declined state, so a revision is never closed.
 - A **kept** fee becomes `request.inspectionFeeSettlement`: 90% to the
   technician (available in their wallet at once, shown as "Inspection fee
   kept"), 10% to Sarabo, whole taka, commission rounded and the technician's
@@ -104,12 +112,15 @@ presses **Retry refund** (`POST /admin/repair-requests/:id/inspection-fee/retry-
 `application_not_chosen`, `inspection_fee_refunded` (wording follows the
 reason: booking failed, no-show, cancelled in time) and
 `booking_cancelled_by_customer` (to the technician; says whether they keep their
-share).
+share), `declined_request_closed` (to the technician, when the customer or the
+daily job ends a declined request) and `declined_request_auto_closed` (to the
+customer).
 
 ## 9. Testing
 
-- `tests/jobPortalTests.js`, `tests/inspectionFeeTests.js` and
-  `tests/inspectionFeeOutcomeTests.js` run inside `npm test`, with a fake Stripe
+- `tests/jobPortalTests.js`, `tests/inspectionFeeTests.js`,
+  `tests/inspectionFeeOutcomeTests.js` and `tests/declinedQuoteCloseTests.js`
+  run inside `npm test`, with a fake Stripe
   and fake refunds.
 - To try it by hand: Stripe test card `4242 4242 4242 4242`, any future date,
   any CVC. Refunds appear in the Stripe test dashboard.

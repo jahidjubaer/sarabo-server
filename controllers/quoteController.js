@@ -8,7 +8,11 @@ const {
     validateQuoteSubmission, buildQuoteDocument, validateQuoteDecision, buildQuoteView,
     getQuoteRound, countArchivedQuotes,
 } = require('../utils/quote');
-const { inspectionCredit, buildInspectionFeeSettlement } = require('../utils/inspectionFee');
+const { closeDeclinedRequest } = require('../services/declinedQuoteClose');
+
+function normalizeEmail(value) {
+    return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
 
 // Repair-quote workflow (Phase 6.4 Unit 5): technician submits a quote after
 // inspection; the request owner approves or rejects it. Same security spine as
@@ -486,91 +490,54 @@ class QuoteController {
         try {
             const loaded = await this.loadRejectedQuoteRequestForTechnician(req);
             if (loaded.error) return res.status(loaded.error.status).send(loaded.error.body);
-            const repairRequest = loaded.repairRequest;
-
-            const mongoSession = client.startSession();
-            let conflictCode = null;
-            try {
-                await mongoSession.withTransaction(async () => {
-                    conflictCode = null;
-                    const now = new Date();
-
-                    const updateResult = await this.collections.repairRequests.updateOne(
-                        {
-                            _id: repairRequest._id,
-                            schemaVersion: 2,
-                            deliveryStatus: QUOTE_REJECTED,
-                            paymentStatus: { $ne: 'paid' },
-                        },
-                        {
-                            $set: {
-                                deliveryStatus: 'cancelled',
-                                cancelledAt: now,
-                                cancelledBy: req.decoded_email,
-                                cancellationReason: 'quote_declined',
-                                updatedAt: now,
-                                // Job-portal phase D: the customer declined the
-                                // final price, so a paid inspection fee is kept -
-                                // 90% to this technician's wallet, 10% to Sarabo.
-                                ...(inspectionCredit(repairRequest) > 0 ? {
-                                    'inspectionPayment.status': 'kept',
-                                    'inspectionPayment.keptReason': 'quote_declined',
-                                    inspectionFeeSettlement: buildInspectionFeeSettlement(repairRequest, { reason: 'quote_declined', now }),
-                                } : {}),
-                            },
-                        },
-                        { session: mongoSession }
-                    );
-
-                    if (updateResult.matchedCount === 0) {
-                        conflictCode = 'CANCELLATION_NOT_ALLOWED';
-                        throw new Error('technician cancellation guard failed');
-                    }
-
-                    // Belt and braces: quote_rejected already released the slot,
-                    // but a technician who was re-assigned elsewhere in between
-                    // must not be flipped available while genuinely busy.
-                    if (repairRequest.technicianId) {
-                        const technicianObjectId = new ObjectId(repairRequest.technicianId);
-                        const technician = await this.collections.technicians.findOne({ _id: technicianObjectId }, { session: mongoSession });
-                        if (technician) {
-                            const otherActive = await this.collections.repairRequests.findOne(
-                                { technicianId: repairRequest.technicianId, deliveryStatus: { $in: ACTIVE_STATUSES }, _id: { $ne: repairRequest._id } },
-                                { session: mongoSession }
-                            );
-                            await this.collections.technicians.updateOne(
-                                { _id: technicianObjectId },
-                                { $set: { workStatus: otherActive ? technician.workStatus : 'available' } },
-                                { session: mongoSession }
-                            );
-                        }
-                    }
-
-                    await logTracking(this.collections.trackingEvents, repairRequest.trackingId, 'cancelled', mongoSession);
-                    await this.notifications.createNotification({
-                        session: mongoSession,
-                        recipientEmail: repairRequest.senderEmail,
-                        recipientRole: 'user',
-                        type: 'repair_cancelled_by_technician',
-                        entityType: 'repair_request',
-                        entityId: repairRequest._id.toString(),
-                        metadata: { trackingId: repairRequest.trackingId },
-                        actorEmail: req.decoded_email,
-                    });
-                });
-            } catch (txError) {
-                if (!conflictCode) throw txError;
-            } finally {
-                await mongoSession.endSession();
+            const { closed } = await closeDeclinedRequest({
+                collections: this.collections, notifications: this.notifications, User: this.User, mongoClient: client,
+                request: loaded.repairRequest, closedBy: 'technician', actorEmail: req.decoded_email,
+            });
+            if (!closed) {
+                return res.status(409).send({ message: 'this request can no longer be cancelled', code: 'CANCELLATION_NOT_ALLOWED' });
             }
-
-            if (conflictCode) {
-                return res.status(409).send({ message: 'this request can no longer be cancelled', code: conflictCode });
-            }
-
             return res.status(200).send({ message: 'repair request cancelled', deliveryStatus: 'cancelled' });
         } catch (error) {
             return res.status(500).send({ message: 'Error cancelling the repair request', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // POST /repair-requests/:id/quote/close (declined-quote follow-through)
+    //
+    // The customer, having declined the final price, ends the request instead
+    // of waiting for a revised quote. Same outcome as the technician closing
+    // it: cancelled, and a paid inspection fee kept (90/10). Owner-only and
+    // existence-preserving - anyone else gets the same 404 as a missing request.
+    async closeDeclinedByCustomer(req, res) {
+        try {
+            const id = req.params.id;
+            if (!ObjectId.isValid(id)) {
+                return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
+            }
+            const repairRequest = await this.RepairRequest.findById(id);
+            if (!repairRequest || normalizeEmail(repairRequest.senderEmail) !== normalizeEmail(req.decoded_email)) {
+                return res.status(404).send({ message: 'repair request not found', code: 'REQUEST_NOT_FOUND' });
+            }
+            if (!isV2RepairRequest(repairRequest)) {
+                return res.status(400).send({ message: 'quotes are only available for newer (v2) repair requests', code: 'LEGACY_REQUEST_NOT_SUPPORTED' });
+            }
+            if (repairRequest.paymentStatus === 'paid') {
+                return res.status(409).send({ message: 'this repair has already been paid for', code: 'REQUEST_ALREADY_PAID' });
+            }
+            if (repairRequest.deliveryStatus !== QUOTE_REJECTED) {
+                return res.status(409).send({ message: 'this action is only available after you decline a quote', code: 'QUOTE_NOT_REJECTED' });
+            }
+            const { closed, feeKept } = await closeDeclinedRequest({
+                collections: this.collections, notifications: this.notifications, User: this.User, mongoClient: client,
+                request: repairRequest, closedBy: 'customer', actorEmail: normalizeEmail(req.decoded_email),
+            });
+            if (!closed) {
+                return res.status(409).send({ message: 'this request changed meanwhile - reload it', code: 'REQUEST_CHANGED' });
+            }
+            return res.status(200).send({ message: 'repair request closed', deliveryStatus: 'cancelled', inspectionFee: feeKept ? 'kept' : 'none' });
+        } catch (error) {
+            return res.status(500).send({ message: 'Error closing the repair request', code: 'INTERNAL_ERROR' });
         }
     }
 

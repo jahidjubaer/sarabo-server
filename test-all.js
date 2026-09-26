@@ -58,6 +58,7 @@ const { runMatchGateTests } = require('./tests/matchGateTests');
 const { runJobPortalTests } = require('./tests/jobPortalTests');
 const { runInspectionFeeTests } = require('./tests/inspectionFeeTests');
 const { runInspectionFeeOutcomeTests } = require('./tests/inspectionFeeOutcomeTests');
+const { runDeclinedQuoteCloseTests } = require('./tests/declinedQuoteCloseTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
 const RIDER_EMAIL = 'jahidjubaer07@gmail.com';
@@ -4634,10 +4635,12 @@ async function testNotificationFoundation() {
             // Inspection fee.
             'inspection_fee_refunded',
             // Inspection-fee outcomes.
-            'booking_cancelled_by_customer'
+            'booking_cancelled_by_customer',
+            // Declined-quote follow-through.
+            'declined_request_closed', 'declined_request_auto_closed'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 35 event types exist', actualTypes.length === 35 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 37 event types exist', actualTypes.length === 37 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -5061,7 +5064,9 @@ async function testNotificationFoundation() {
             // Job portal: tells the request's owner a technician applied.
             'application_received',
             // Inspection fee: tells the request's owner their fee is refunded.
-            'inspection_fee_refunded'];
+            'inspection_fee_refunded',
+            // Declined-quote follow-through: tells the owner it closed itself.
+            'declined_request_auto_closed'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -13553,6 +13558,7 @@ async function runAllTests() {
     await runJobPortalTests({ logTest });
     await runInspectionFeeTests({ logTest });
     await runInspectionFeeOutcomeTests({ logTest });
+    await runDeclinedQuoteCloseTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing
@@ -15558,8 +15564,10 @@ async function testWorkflowStabilization() {
             registered.includes('POST /repair-requests/:id/quote/cancel-request'));
         // Both are 4-segment paths, so Express can never confuse them with the
         // 2-segment /repair-requests/:id routes.
+        logTest('9.2-17b: the customer close route is registered (declined-quote follow-through)',
+            registered.includes('POST /repair-requests/:id/quote/close'));
         logTest('9.2-18: both use distinct sub-paths under the quote namespace',
-            registered.filter((r) => r.startsWith('POST /repair-requests/:id/quote')).length === 4
+            registered.filter((r) => r.startsWith('POST /repair-requests/:id/quote')).length === 5
             && new Set(registered).size === registered.length);
 
         const QuoteController = require('./controllers/quoteController');

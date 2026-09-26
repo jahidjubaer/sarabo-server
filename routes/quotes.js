@@ -25,6 +25,9 @@ function quoteRoutes(app, controllers) {
     // carries that authority here, matching this file's existing convention.
     app.post('/repair-requests/:id/quote/revise', verifyFBToken, ensureDatabaseReady, (req, res) => quoteController.reviseQuote(req, res));
     app.post('/repair-requests/:id/quote/cancel-request', verifyFBToken, ensureDatabaseReady, (req, res) => quoteController.cancelAfterQuoteRejection(req, res));
+    // The customer ends a request after declining its quote - a customer
+    // business action, so it needs a verified email like deciding the quote.
+    app.post('/repair-requests/:id/quote/close', verifyFBToken, ensureDatabaseReady, verifyEmailVerified, (req, res) => quoteController.closeDeclinedByCustomer(req, res));
 }
 
 module.exports = quoteRoutes;

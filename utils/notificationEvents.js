@@ -344,6 +344,36 @@ const NOTIFICATION_EVENTS = {
         actionUrl: () => '/dashboard/assigned-jobs',
         deduplicationKey: ({ entityId }) => `repair:${entityId}:booking_cancelled_by_customer`,
     },
+    // Declined-quote follow-through: a declined request was ended by the
+    // customer or, after 3 days with nobody acting, automatically.
+    declined_request_closed: {
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'closedBy', 'feeOutcome'],
+        requiresMetadata: ['trackingId', 'closedBy', 'feeOutcome'],
+        title: () => 'A declined job was closed',
+        message: ({ metadata }) => {
+            const who = metadata.closedBy === 'auto'
+                ? `Repair request ${metadata.trackingId} was closed because the declined quote was not revised within 3 days.`
+                : `The customer ended repair request ${metadata.trackingId} after declining your quote.`;
+            return metadata.feeOutcome === 'kept' ? `${who} Your share of the inspection fee is in your wallet.` : who;
+        },
+        actionUrl: () => '/dashboard/wallet',
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:declined_request_closed`,
+    },
+    declined_request_auto_closed: {
+        entityType: 'repair_request',
+        // Owner-facing - same role reasoning as technician_assigned.
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: ['trackingId'],
+        title: () => 'Your declined request was closed',
+        message: ({ metadata }) => `Repair request ${metadata.trackingId} was closed because no new quote was made within 3 days of you declining it. You can request the repair again at any time.`,
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId }) => `repair:${entityId}:declined_request_auto_closed`,
+    },
     technician_on_the_way: {
         entityType: 'repair_request',
         // Same reasoning as technician_assigned - POST /repair-requests only
