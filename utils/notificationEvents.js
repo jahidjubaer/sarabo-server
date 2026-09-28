@@ -268,8 +268,8 @@ const NOTIFICATION_EVENTS = {
         allowedMetadataKeys: ['trackingId'],
         requiresMetadata: ['trackingId'],
         title: () => "You're invited to apply for a job",
-        message: ({ metadata }) => `An admin invited you to apply for repair request ${metadata.trackingId}. Open the job portal to send your estimate.`,
-        actionUrl: () => '/dashboard/job-portal',
+        message: ({ metadata }) => `An admin invited you to apply for repair request ${metadata.trackingId}. Open the jobs board to send your estimate.`,
+        actionUrl: () => '/jobs',
         deduplicationKey: ({ entityId, recipientEmail }) => `repair:${entityId}:job_invitation:${recipientEmail || 'technician'}`,
     },
     application_received: {
@@ -303,8 +303,23 @@ const NOTIFICATION_EVENTS = {
         requiresMetadata: ['trackingId'],
         title: () => 'Another technician was chosen',
         message: ({ metadata }) => `The customer chose another technician for repair request ${metadata.trackingId}. Thanks for applying.`,
-        actionUrl: () => '/dashboard/job-portal',
+        actionUrl: () => '/jobs',
         deduplicationKey: ({ entityId, recipientEmail }) => `repair:${entityId}:application_not_chosen:${recipientEmail || 'technician'}`,
+    },
+    // Open jobs board: the customer rejected the offer and reposted the
+    // request. `canReoffer` says whether one revised offer is still allowed.
+    application_declined: {
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'canReoffer', 'occurrence'],
+        requiresMetadata: ['trackingId', 'occurrence'],
+        title: () => 'The customer rejected your offer',
+        message: ({ metadata }) => (metadata.canReoffer === 'yes'
+            ? `The customer did not agree with your offer for repair request ${metadata.trackingId} and reposted it. You can send one revised offer from the jobs board.`
+            : `The customer did not agree with your revised offer for repair request ${metadata.trackingId}. Thanks for applying.`),
+        actionUrl: () => '/jobs',
+        deduplicationKey: ({ entityId, recipientEmail, metadata }) => `repair:${entityId}:application_declined:${recipientEmail || 'technician'}:${metadata.occurrence || 'once'}`,
     },
     // Inspection fee (job-portal phase C): the chosen technician could no
     // longer be booked after the customer paid, so the fee is refunded.

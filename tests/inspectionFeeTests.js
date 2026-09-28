@@ -209,6 +209,23 @@ async function runInspectionFeeTests({ logTest }) {
         const refundedAgain = await processPayment({ session: stripe.paidSession(sessionC.id), source: 'browser-verification', callerEmail: CUSTOMER });
         logTest('Inspection fee: a refunded payment is never refunded twice',
             refundedAgain.code === 'INSPECTION_FEE_REFUNDED' && refundedAgain.alreadyProcessed === true && refunds.length === 1);
+
+        // ---- the customer rejects an offer whose checkout is open ----
+        const delta = await insertTech('delta');
+        const id3 = await insertRequest();
+        await apply(delta, id3, feeA);
+        await accept(delta, id3);
+        const sessionD = stripe.created[stripe.created.length - 1];
+        const rejected = await call('decline', CUSTOMER, { params: { id: id3, applicationId: (await appOf(delta, id3))._id.toString() }, body: { reason: 'inspection_fee' } });
+        const afterReject = await c.repairRequests.findOne({ _id: new ObjectId(id3) });
+        logTest('Open jobs: rejecting an offer closes its open checkout and reposts the request',
+            rejected.statusCode === 200 && stripe.expired.includes(sessionD.id) && !afterReject.feeCheckout && afterReject.repostCount === 1
+            && (await c.checkoutSessions.countDocuments({ requestId: id3, active: true })) === 0);
+        const late = await processPayment({ session: stripe.paidSession(sessionD.id), source: 'webhook' });
+        const afterLate = await c.repairRequests.findOne({ _id: new ObjectId(id3) });
+        logTest('Open jobs: a payment that still arrives for a rejected offer is refunded and books no one',
+            late.code === 'INSPECTION_FEE_REFUNDED' && refunds.length === 2 && refunds[1].paymentIntentId === `pi_${sessionD.id}`
+            && !afterLate.technicianId && afterLate.deliveryStatus === 'pending-pickup');
     } finally {
         const ids = requestIds.map(String);
         await c.payments.deleteMany({ requestId: { $in: ids } });

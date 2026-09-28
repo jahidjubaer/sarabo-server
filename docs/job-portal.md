@@ -19,21 +19,40 @@ the repair does not go ahead. Payments use **Stripe test mode** only.
 - A request is **open** in the portal while it is a v2 request, waiting for
   pickup (`pending-pickup`), has no technician, and has **at least one photo**.
   It counts as published at the time of its first photo.
-- Approved technicians who could take it see it at `GET /technician/job-portal`
+- **Open jobs board** (`/jobs` on the website, outside the dashboard):
+  `GET /jobs` needs no sign-in (rate limited, 60 a minute per address) and
+  lists every open request as a safe summary - device, repair, region and
+  district, pickup day, the usual price, when it was (re)posted and how many
+  offers it has. No problem text, photos, tracking id or address.
+- Approved technicians who could take it see the details at
+  `GET /technician/job-portal` (shown on the same `/jobs` page when signed in)
   - district, pickup time, problem and photos; never the customer's name, email
-  or street address.
+  or street address. The newest (re)posted jobs come first.
 - A technician applies with an estimate range, an inspection fee (capped by the
   service's catalogue inspection fee) and a note:
   `POST /repair-requests/:id/applications` (withdraw with `.../applications/mine/withdraw`).
 - The customer compares applications (`GET /repair-requests/:id/applications`)
   and chooses one: `POST /repair-requests/:id/applications/:applicationId/accept`.
+- Or the customer **rejects** an offer they don't agree with:
+  `POST /repair-requests/:id/applications/:applicationId/decline`
+  `{ reason: 'price' | 'inspection_fee' | 'other', note? }`. The offer becomes
+  `declined`, an open fee checkout for it is closed, and the request is
+  **reposted** (`repostedAt`, `repostCount`): it goes back to the top of the
+  board. The technician is told (`application_declined`, with the customer's
+  note) and may send **one** revised offer; if that is rejected too they
+  cannot offer again on that request. A payment that still arrives for a
+  rejected offer books no one and is refunded.
 - Admins can invite a technician to apply (`POST /admin/repair-requests/:id/invite`),
   or still assign directly as an override (no inspection fee).
-- If nobody is chosen **24 hours** after publishing, the request appears on the
-  admin attention list (`unchosen`).
+- The admin is not involved while technicians are replying. Only if **no
+  technician has an offer waiting 24 hours** after the request was last
+  posted (published, or reposted after a rejection) does it appear on the
+  admin attention list (`unchosen`, "No offers in 24h").
 
 Application states: `pending`, `accepted`, `not_chosen` (another was chosen),
-`withdrawn` (by the technician), `no_show` (the chosen technician did not come).
+`withdrawn` (by the technician), `no_show` (the chosen technician did not come),
+`declined` (the customer rejected it; `revisedAfterDecline` marks the one
+revised offer).
 
 ## 3. Paying the inspection fee (booking)
 
@@ -108,8 +127,9 @@ presses **Retry refund** (`POST /admin/repair-requests/:id/inspection-fee/retry-
 
 ## 8. Notifications
 
-`job_invitation`, `application_received`, `application_accepted`,
-`application_not_chosen`, `inspection_fee_refunded` (wording follows the
+`job_invitation`, `application_received` (also for a revised offer),
+`application_accepted`, `application_not_chosen`, `application_declined`,
+`inspection_fee_refunded` (wording follows the
 reason: booking failed, no-show, cancelled in time) and
 `booking_cancelled_by_customer` (to the technician; says whether they keep their
 share), `declined_request_closed` (to the technician, when the customer or the

@@ -1,6 +1,7 @@
 // Job portal (job-portal phase B): who sees an open request, applying and
 // withdrawing, what the customer sees, accepting (which books the
-// technician), invitations, photo access and the 24-hour alert.
+// technician), invitations, photo access and the 24-hour alert. Open jobs
+// board: the public listing, rejecting an offer (repost) and one revised offer.
 const { ObjectId } = require('mongodb');
 
 function fakeRes() {
@@ -169,6 +170,54 @@ async function runJobPortalTests({ logTest }) {
             && (await call('accept', CUSTOMER, { params: { id: open, applicationId: alphaDoc._id.toString() } })).statusCode === 409
             && !(await resolveImageAccess({ repairRequest: bookedRequest, callerEmail: beta.email, models })).allowed);
 
+        // ---- open jobs board (no sign-in) ----
+        const board = await insertRequest();
+        const pub = fakeRes();
+        await portal.listPublic({ query: {} }, pub);
+        const pubJob = pub.body.jobs.find((j) => j.id === board);
+        const pubText = JSON.stringify(pub.body);
+        logTest('Open jobs: anyone sees a safe summary - no problem text, photos, tracking id, address or customer',
+            pub.statusCode === 200 && !!pubJob && pubJob.district === 'Near' && pubJob.offers === 0 && !('photoCount' in pubJob)
+            && !pub.body.jobs.some((j) => j.id === noPhoto) && !pub.body.jobs.some((j) => j.id === open)
+            && !pubText.includes('Portal test problem') && !pubText.includes('SECRET STREET') && !pubText.includes(`PORTAL-${runId}`) && !pubText.includes(CUSTOMER));
+        const pubOther = fakeRes();
+        await portal.listPublic({ query: { region: `Other-${runId}` } }, pubOther);
+        logTest('Open jobs: the board can be filtered by region', pubOther.statusCode === 200 && !pubOther.body.jobs.some((j) => j.id === board));
+
+        // ---- rejecting an offer reposts the request ----
+        await call('apply', beta.email, { params: { id: board }, body: good });
+        const betaBoardApp = await c.jobApplications.findOne({ requestId: board, technicianId: beta.id });
+        const rejectReq = (body = {}) => ({ params: { id: board, applicationId: betaBoardApp._id.toString() }, body });
+        logTest('Open jobs: only the owner can reject an offer, with a known reason',
+            (await call('decline', `stranger-${runId}@example.test`, rejectReq())).statusCode === 404
+            && (await call('decline', CUSTOMER, rejectReq({ reason: 'nope' }))).body.code === 'INVALID_DECLINE_REASON');
+        const declined = await call('decline', CUSTOMER, rejectReq({ reason: 'price', note: 'Too expensive for me.' }));
+        const repostedDoc = await c.repairRequests.findOne({ _id: new ObjectId(board) });
+        const betaView = (await call('listPortal', beta.email)).body.jobs.find((j) => j.id === board);
+        logTest('Open jobs: rejecting an offer reposts the request, and the technician is told they may revise it',
+            declined.statusCode === 200 && repostedDoc.repostCount === 1 && !!repostedDoc.repostedAt
+            && !!betaView && betaView.reposted === true && betaView.myApplication.status === 'declined' && betaView.myApplication.canReoffer === true
+            && (await c.notifications.countDocuments({ recipientEmail: beta.email, type: 'application_declined', entityId: board })) === 1);
+        const listedAfter = await call('listForRequest', CUSTOMER, { params: { id: board } });
+        logTest('Open jobs: the customer still sees the rejected offer, marked rejected',
+            listedAfter.body.applications.length === 1 && listedAfter.body.applications[0].status === 'declined'
+            && listedAfter.body.applications[0].declineReason === 'price' && listedAfter.body.repostCount === 1 && listedAfter.body.open === true);
+        logTest('Open jobs: a rejected offer cannot be accepted or rejected again',
+            (await call('accept', CUSTOMER, rejectReq())).body.code === 'APPLICATION_NOT_PENDING'
+            && (await call('decline', CUSTOMER, rejectReq())).body.code === 'APPLICATION_NOT_PENDING');
+        const revised = await call('apply', beta.email, { params: { id: board }, body: { ...good, estimateMin: 800, estimateMax: 1500 } });
+        const revisedDoc = await c.jobApplications.findOne({ requestId: board, technicianId: beta.id });
+        logTest('Open jobs: the technician sends one revised offer, and the customer is told',
+            revised.statusCode === 200 && revisedDoc.status === 'pending' && revisedDoc.revisedAfterDecline === true && revisedDoc.estimateMax === 1500
+            && (await c.notifications.countDocuments({ recipientEmail: CUSTOMER, type: 'application_received', entityId: board })) === 2);
+        await call('decline', CUSTOMER, rejectReq());
+        const blocked = await call('apply', beta.email, { params: { id: board }, body: good });
+        logTest('Open jobs: once the revised offer is rejected too, no further offer is allowed',
+            blocked.statusCode === 409 && blocked.body.code === 'APPLICATION_CLOSED'
+            && (await call('listPortal', beta.email)).body.jobs.find((j) => j.id === board).myApplication.canReoffer === false
+            && (await c.repairRequests.findOne({ _id: new ObjectId(board) })).repostCount === 2
+            && (await c.notifications.countDocuments({ recipientEmail: beta.email, type: 'application_declined', entityId: board })) === 2);
+
         // ---- invitations ----
         const second = await insertRequest();
         const invited = await call('invite', ADMIN, { params: { id: second }, body: { technicianId: beta.id } });
@@ -180,13 +229,17 @@ async function runJobPortalTests({ logTest }) {
             (await call('invite', ADMIN, { params: { id: second }, body: { technicianId: outsider.id } })).body.code === 'TECHNICIAN_NOT_ELIGIBLE');
 
         // ---- 24 hours ----
-        const stale = await insertRequest({ damage: { description: 'Old request.', images: [photo(new Date(Date.now() - 25 * 3600000))] } });
+        const dayAgo = () => new Date(Date.now() - 25 * 3600000);
+        const stale = await insertRequest({ damage: { description: 'Old request.', images: [photo(dayAgo())] } });
         await call('apply', beta.email, { params: { id: stale }, body: good });
+        const silent = await insertRequest({ damage: { description: 'Nobody answered.', images: [photo(dayAgo())] } });
+        const repostedRecently = await insertRequest({ damage: { description: 'Reposted.', images: [photo(dayAgo())] }, repostedAt: new Date(), repostCount: 1 });
         const attentionRes = fakeRes();
         await new AdminAttentionController(models, c).getAttention({}, attentionRes);
-        const staleEntry = attentionRes.body.unchosen.find((r) => r.id === stale);
-        logTest('Job portal: 24 hours after publishing with nobody chosen, the admin is alerted (with the application count)',
-            !!staleEntry && staleEntry.pendingApplications === 1 && !attentionRes.body.unchosen.some((r) => r.id === second));
+        const unchosenIds = attentionRes.body.unchosen.map((r) => r.id);
+        logTest('Open jobs: 24 hours after posting, the admin is alerted only when no technician has sent an offer',
+            unchosenIds.includes(silent) && !unchosenIds.includes(stale) && !unchosenIds.includes(second) && !unchosenIds.includes(board));
+        logTest('Open jobs: a repost restarts the 24-hour clock', !unchosenIds.includes(repostedRecently));
 
         // ---- routes ----
         const captured = [];
@@ -194,7 +247,9 @@ async function runJobPortalTests({ logTest }) {
         routes({ get: capture('GET'), post: capture('POST') }, { jobPortal: portal });
         const find = (method, path) => captured.find((r) => r.method === method && r.path === path);
         logTest('Job portal: technician routes need the technician role, accepting a verified email, inviting an admin',
-            captured.every((r) => r.handlers.includes(verifyFBToken))
+            captured.every((r) => r.path === '/jobs' || r.handlers.includes(verifyFBToken))
+            && !find('GET', '/jobs').handlers.includes(verifyFBToken)
+            && !!find('POST', '/repair-requests/:id/applications/:applicationId/decline')
             && find('GET', '/technician/job-portal').handlers.includes(verifyTechnician)
             && find('POST', '/repair-requests/:id/applications').handlers.includes(verifyTechnician)
             && find('POST', '/repair-requests/:id/applications/:applicationId/accept').handlers.includes(verifyEmailVerified)

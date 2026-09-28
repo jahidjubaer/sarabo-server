@@ -1,5 +1,5 @@
 const { canTechnicianEverTakeRequest } = require('../services/technicianEligibilityService');
-const { isOpenForApplications, publishedAt, CHOOSE_WITHIN_MS } = require('../utils/jobPortal');
+const { isOpenForApplications, publishedAt, lastPostedAt, CHOOSE_WITHIN_MS } = require('../utils/jobPortal');
 
 // Requests that need an admin now (overdue-alerts phase). Read-only.
 //
@@ -13,8 +13,11 @@ const { isOpenForApplications, publishedAt, CHOOSE_WITHIN_MS } = require('../uti
 // - unmatchable     waiting, and no approved technician in its region can
 //                   ever take it (right device, repair and level) - it needs
 //                   a new local technician, not just time.
-// - unchosen        open in the job portal (has a photo, nobody chosen) for
-//                   24 hours or more since it was published (job-portal phase B).
+// - unchosen        open in the job portal (has a photo, nobody chosen), no
+//                   technician has an offer waiting, and it was last posted
+//                   (published, or reposted after the customer rejected an
+//                   offer) 24 hours or more ago. While any technician has
+//                   replied, the customer decides and no admin is needed.
 // - feeRefunds      an inspection-fee refund Stripe has not completed yet
 //                   (job-portal phase D) - an admin retries it from the
 //                   request page. Read from the payments rows, which are what
@@ -32,7 +35,7 @@ const SUMMARY_PROJECTION = {
     trackingId: 1, product: 1, service: 1, serviceLocation: 1, pickupSlot: 1, deliveryStatus: 1,
     technicianId: 1, technicianName: 1, createdAt: 1,
     // For the job-portal checks only (publish time); never returned as-is.
-    schemaVersion: 1, 'damage.images.uploadedAt': 1,
+    schemaVersion: 1, 'damage.images.uploadedAt': 1, repostedAt: 1, repostCount: 1,
 };
 
 function summarize(doc) {
@@ -89,17 +92,19 @@ class AdminAttentionController {
 
             const levelByDefinition = new Map(definitions.map((d) => [d._id.toString(), d.requiredExpertiseLevel]));
             const chooseBy = now.getTime() - CHOOSE_WITHIN_MS;
-            const unchosen = waiting.filter((doc) => {
+            const staleOpen = waiting.filter((doc) => {
                 if (!isOpenForApplications(doc)) return false;
-                const published = publishedAt(doc);
-                return published !== null && published.getTime() <= chooseBy;
+                const posted = lastPostedAt(doc);
+                return posted !== null && posted.getTime() <= chooseBy;
             });
-            const unchosenIds = unchosen.map((doc) => doc._id.toString());
-            const applicationCounts = unchosenIds.length ? await this.collections.jobApplications.aggregate([
-                { $match: { requestId: { $in: unchosenIds }, status: 'pending' } },
-                { $group: { _id: '$requestId', count: { $sum: 1 } } },
+            const staleIds = staleOpen.map((doc) => doc._id.toString());
+            // aggregate, not distinct: the connection uses the strict Stable API.
+            const withOffers = staleIds.length ? await this.collections.jobApplications.aggregate([
+                { $match: { requestId: { $in: staleIds }, status: 'pending' } },
+                { $group: { _id: '$requestId' } },
             ]).toArray() : [];
-            const applicationsById = new Map(applicationCounts.map((row) => [row._id, row.count]));
+            const answered = new Set(withOffers.map((row) => row._id));
+            const unchosen = staleOpen.filter((doc) => !answered.has(doc._id.toString()));
             const unmatchable = waiting.filter((doc) => !technicians.some((t) => canTechnicianEverTakeRequest(t, {
                 region: doc.serviceLocation && doc.serviceLocation.region,
                 productCategorySlug: doc.product && doc.product.categorySlug,
@@ -122,7 +127,9 @@ class AdminAttentionController {
                 unchosen: unchosen.slice(0, LIST_LIMIT).map((doc) => ({
                     ...summarize(doc),
                     publishedAt: publishedAt(doc),
-                    pendingApplications: applicationsById.get(doc._id.toString()) || 0,
+                    postedAt: lastPostedAt(doc),
+                    repostCount: doc.repostCount || 0,
+                    pendingApplications: 0,
                 })),
                 feeRefunds: feeRefunds.map((row) => ({
                     id: row.requestId,

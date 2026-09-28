@@ -2,7 +2,9 @@ const { ObjectId } = require('mongodb');
 const { client } = require('../config/database');
 const { createNotificationService } = require('../services/notificationService');
 const { canTechnicianEverTakeRequest } = require('../services/technicianEligibilityService');
-const { isOpenForApplications, publishedAt, maxInspectionFee, validateApplicationInput } = require('../utils/jobPortal');
+const {
+    isOpenForApplications, publishedAt, lastPostedAt, canReoffer, maxInspectionFee, validateApplicationInput, validateDeclineInput,
+} = require('../utils/jobPortal');
 const { bookApplication, notifyBooking } = require('../services/jobBooking');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
 const { INSPECTION_FEE_PURPOSE } = require('../utils/inspectionFee');
@@ -23,7 +25,20 @@ const { normalizeSiteOrigin } = require('../config/siteOrigin');
 //
 // Before a technician is chosen they see the district, pickup time, problem
 // and photos - never the customer's name, email or street address.
+//
+// Open jobs board: GET /jobs lists open requests to anyone, signed in or not,
+// with a safe summary only (device, repair, district, pickup day, offers) -
+// no problem text, photos or tracking id. Rejecting an offer reposts the
+// request: it moves back to the top of the board, and that technician may
+// send one revised offer.
 const PORTAL_LIMIT = 100;
+const OPEN_REQUEST_FILTER = Object.freeze({
+    schemaVersion: 2, deliveryStatus: 'pending-pickup', technicianId: { $exists: false }, 'damage.images.0': { $exists: true },
+});
+
+function byLastPostedDesc(a, b) {
+    return (lastPostedAt(b) || 0) - (lastPostedAt(a) || 0);
+}
 const MAX_DEFINITIONS = 500;
 
 function normalize(value) {
@@ -106,16 +121,14 @@ class JobPortalController {
 
             const [candidates, levels] = await Promise.all([
                 this.collections.repairRequests.find(
-                    {
-                        schemaVersion: 2, deliveryStatus: 'pending-pickup', technicianId: { $exists: false },
-                        'damage.images.0': { $exists: true }, 'product.categorySlug': { $in: products },
-                    },
-                    { projection: { trackingId: 1, product: 1, service: 1, serviceLocation: 1, pickupSlot: 1, damage: 1, pricing: 1, createdAt: 1, invitations: 1, deliveryStatus: 1, schemaVersion: 1 } }
+                    { ...OPEN_REQUEST_FILTER, 'product.categorySlug': { $in: products } },
+                    { projection: { trackingId: 1, product: 1, service: 1, serviceLocation: 1, pickupSlot: 1, damage: 1, pricing: 1, createdAt: 1, invitations: 1, deliveryStatus: 1, schemaVersion: 1, repostedAt: 1 } }
                 ).sort({ createdAt: -1 }).limit(PORTAL_LIMIT * 3).toArray(),
                 this.levelsByDefinition(),
             ]);
             const open = candidates
                 .filter((r) => isOpenForApplications(r) && canTechnicianEverTakeRequest(technician, this.needsOf(r, levels)))
+                .sort(byLastPostedDesc)
                 .slice(0, PORTAL_LIMIT);
             const ids = open.map((r) => r._id.toString());
             const [mine, counts] = await Promise.all([
@@ -145,11 +158,17 @@ class JobPortalController {
                         catalogueEstimate: { min: r.pricing.estimateMin, max: r.pricing.estimateMax, currency: r.pricing.currency },
                         maxInspectionFee: maxInspectionFee(r),
                         publishedAt: publishedAt(r),
+                        postedAt: lastPostedAt(r),
+                        reposted: !!r.repostedAt,
                         invited: Array.isArray(r.invitations) && r.invitations.some((i) => i.technicianId === myId),
                         otherApplications: Math.max((countByRequest.get(r._id.toString()) || 0) - (application && application.status === 'pending' ? 1 : 0), 0),
                         myApplication: application ? {
                             id: application._id.toString(), status: application.status, estimateMin: application.estimateMin,
                             estimateMax: application.estimateMax, inspectionFee: application.inspectionFee, note: application.note,
+                            revised: !!application.revisedAfterDecline,
+                            declineReason: application.status === 'declined' ? application.declineReason || null : null,
+                            declineNote: application.status === 'declined' ? application.declineNote || '' : '',
+                            canReoffer: canReoffer(application),
                         } : null,
                     };
                 }),
@@ -159,8 +178,50 @@ class JobPortalController {
         }
     }
 
+    // GET /jobs  (no sign-in)  ?region=&product=
+    // The open jobs board: a safe summary of every open request. Technicians
+    // sign in and use GET /technician/job-portal for the details.
+    async listPublic(req, res) {
+        try {
+            const query = req.query || {};
+            const filter = { ...OPEN_REQUEST_FILTER };
+            const region = typeof query.region === 'string' ? query.region.trim().slice(0, 60) : '';
+            const product = typeof query.product === 'string' ? query.product.trim().slice(0, 60) : '';
+            if (region) filter['serviceLocation.region'] = region;
+            if (product) filter['product.categorySlug'] = product;
+            const candidates = await this.collections.repairRequests.find(
+                filter,
+                { projection: { product: 1, service: 1, serviceLocation: 1, pickupSlot: 1, damage: 1, pricing: 1, createdAt: 1, deliveryStatus: 1, schemaVersion: 1, repostedAt: 1 } }
+            ).sort({ createdAt: -1 }).limit(PORTAL_LIMIT * 3).toArray();
+            const open = candidates.filter(isOpenForApplications).sort(byLastPostedDesc).slice(0, PORTAL_LIMIT);
+            const ids = open.map((r) => r._id.toString());
+            const counts = ids.length ? await this.collections.jobApplications.aggregate([
+                { $match: { requestId: { $in: ids }, status: 'pending' } },
+                { $group: { _id: '$requestId', count: { $sum: 1 } } },
+            ]).toArray() : [];
+            const countByRequest = new Map(counts.map((c) => [c._id, c.count]));
+            res.send({
+                jobs: open.map((r) => ({
+                    id: r._id.toString(),
+                    product: { categorySlug: r.product.categorySlug, brand: r.product.brand || null },
+                    repairCategorySlug: r.service.repairCategorySlug,
+                    region: r.serviceLocation.region,
+                    district: r.serviceLocation.district,
+                    pickupDate: r.pickupSlot && r.pickupSlot.date ? r.pickupSlot.date : null,
+                    catalogueEstimate: { min: r.pricing.estimateMin, max: r.pricing.estimateMax, currency: r.pricing.currency },
+                    postedAt: lastPostedAt(r),
+                    reposted: !!r.repostedAt,
+                    offers: countByRequest.get(r._id.toString()) || 0,
+                })),
+            });
+        } catch (error) {
+            res.status(500).send({ message: 'Error loading open jobs', code: 'INTERNAL_ERROR' });
+        }
+    }
+
     // POST /repair-requests/:id/applications  { estimateMin, estimateMax, inspectionFee, note }
     // Applying again while pending (or after withdrawing) updates the application.
+    // After the customer rejects it, the technician may send one revised offer.
     async apply(req, res) {
         try {
             const technician = await this.callerTechnician(req, res);
@@ -178,30 +239,43 @@ class JobPortalController {
             const technicianId = technician._id.toString();
             const now = this.now();
             const existing = await this.collections.jobApplications.findOne({ requestId, technicianId });
-            if (existing && !['pending', 'withdrawn'].includes(existing.status)) {
-                return refuse(res, 409, 'APPLICATION_CLOSED', 'your application for this job is already decided');
+            const revising = canReoffer(existing);
+            if (existing && !revising && !['pending', 'withdrawn'].includes(existing.status)) {
+                const message = existing.status === 'declined'
+                    ? 'the customer rejected your revised offer - you cannot send another for this job'
+                    : 'your application for this job is already decided';
+                return refuse(res, 409, 'APPLICATION_CLOSED', message);
             }
             try {
-                await this.collections.jobApplications.updateOne(
-                    { requestId, technicianId, status: { $in: ['pending', 'withdrawn'] } },
-                    {
-                        $set: { ...check.normalized, status: 'pending', technicianName: technician.name, updatedAt: now },
-                        $setOnInsert: { requestId, technicianId, technicianEmail: normalize(technician.email), createdAt: now },
-                    },
-                    { upsert: true }
-                );
+                if (revising) {
+                    const result = await this.collections.jobApplications.updateOne(
+                        { requestId, technicianId, status: 'declined', revisedAfterDecline: { $ne: true } },
+                        { $set: { ...check.normalized, status: 'pending', technicianName: technician.name, updatedAt: now, revisedAfterDecline: true, revisedAt: now } }
+                    );
+                    if (result.matchedCount === 0) return refuse(res, 409, 'APPLICATION_CLOSED', 'your application for this job is already decided');
+                } else {
+                    await this.collections.jobApplications.updateOne(
+                        { requestId, technicianId, status: { $in: ['pending', 'withdrawn'] } },
+                        {
+                            $set: { ...check.normalized, status: 'pending', technicianName: technician.name, updatedAt: now },
+                            $setOnInsert: { requestId, technicianId, technicianEmail: normalize(technician.email), createdAt: now },
+                        },
+                        { upsert: true }
+                    );
+                }
             } catch (error) {
                 if (error && error.code === 11000) return refuse(res, 409, 'APPLICATION_CLOSED', 'your application for this job is already decided');
                 throw error;
             }
             const saved = await this.collections.jobApplications.findOne({ requestId, technicianId });
-            // The customer hears about each technician once.
+            // The customer hears about each technician once, and again for a
+            // revised offer after rejecting one.
             const ownerRole = await this.User.findRoleByEmail(request.senderEmail);
-            if (ownerRole && !existing) {
+            if (ownerRole && (!existing || revising)) {
                 await this.notifySafely({
                     recipientEmail: request.senderEmail, recipientRole: ownerRole, type: 'application_received',
                     entityType: 'repair_request', entityId: requestId, actorEmail: normalize(technician.email), actorRole: 'rider',
-                    metadata: { trackingId: request.trackingId, occurrence: technicianId },
+                    metadata: { trackingId: request.trackingId, occurrence: revising ? `${technicianId}:revised` : technicianId },
                 });
             }
             res.status(existing ? 200 : 201).send({ application: { id: saved._id.toString(), status: saved.status, ...check.normalized } });
@@ -238,7 +312,7 @@ class JobPortalController {
             if (!request || (!isOwner && !isAdmin)) return refuse(res, 404, 'REQUEST_NOT_FOUND', 'repair request not found');
 
             const applications = await this.collections.jobApplications
-                .find({ requestId: request._id.toString(), status: { $in: ['pending', 'accepted', 'not_chosen'] } })
+                .find({ requestId: request._id.toString(), status: { $in: ['pending', 'accepted', 'not_chosen', 'declined'] } })
                 .sort({ createdAt: 1 }).toArray();
             const techIds = applications.map((a) => a.technicianId).filter((id) => ObjectId.isValid(id));
             const [technicians, completed] = await Promise.all([
@@ -260,6 +334,8 @@ class JobPortalController {
             res.send({
                 open: isOpenForApplications(request),
                 publishedAt: publishedAt(request),
+                postedAt: lastPostedAt(request),
+                repostCount: request.repostCount || 0,
                 applications: applications.map((a) => {
                     const t = techById.get(a.technicianId) || {};
                     const entry = (t.expertise || []).find((e) => e && e.productCategorySlug === product) || null;
@@ -273,6 +349,9 @@ class JobPortalController {
                         inspectionFee: a.inspectionFee,
                         note: a.note || '',
                         createdAt: a.createdAt,
+                        revised: !!a.revisedAfterDecline,
+                        declineReason: a.status === 'declined' ? a.declineReason || null : null,
+                        canReoffer: canReoffer(a),
                         technician: {
                             name: t.name || a.technicianName || 'Technician',
                             district: t.district || null,
@@ -325,6 +404,63 @@ class JobPortalController {
         } catch (error) {
             res.status(500).send({ message: 'Error accepting the application', code: 'INTERNAL_ERROR' });
         }
+    }
+
+    // POST /repair-requests/:id/applications/:applicationId/decline  { reason?, note? }  (the owner)
+    // The customer does not agree with the offer (price, inspection fee or
+    // anything else): the offer is rejected and the request is reposted to the
+    // jobs board. The technician is told and may send one revised offer.
+    async decline(req, res) {
+        try {
+            const request = await this.loadRequest(req.params.id);
+            const caller = normalize(req.decoded_email);
+            if (!request || normalize(request.senderEmail) !== caller) return refuse(res, 404, 'REQUEST_NOT_FOUND', 'repair request not found');
+            if (!ObjectId.isValid(req.params.applicationId)) return refuse(res, 404, 'APPLICATION_NOT_FOUND', 'application not found');
+            const requestId = request._id.toString();
+            const application = await this.collections.jobApplications.findOne({ _id: new ObjectId(req.params.applicationId), requestId });
+            if (!application) return refuse(res, 404, 'APPLICATION_NOT_FOUND', 'application not found');
+            if (application.status !== 'pending') return refuse(res, 409, 'APPLICATION_NOT_PENDING', 'this application is no longer open');
+            if (!isOpenForApplications(request)) return refuse(res, 409, 'JOB_NOT_OPEN', 'a technician has already been chosen for this request');
+            const check = validateDeclineInput(req.body);
+            if (!check.valid) return refuse(res, 400, check.code, check.message);
+
+            const now = this.now();
+            const result = await this.collections.jobApplications.updateOne(
+                { _id: application._id, status: 'pending' },
+                { $set: { status: 'declined', declineReason: check.normalized.reason, declineNote: check.normalized.note, declinedAt: now, updatedAt: now } }
+            );
+            if (result.matchedCount === 0) return refuse(res, 409, 'APPLICATION_NOT_PENDING', 'this application is no longer open');
+
+            // A checkout already opened for this offer must never be paid.
+            await this.closeFeeCheckoutFor(request, application._id.toString());
+            await this.collections.repairRequests.updateOne(
+                { _id: request._id, deliveryStatus: 'pending-pickup', technicianId: { $exists: false } },
+                { $set: { repostedAt: now, updatedAt: now }, $inc: { repostCount: 1 } }
+            );
+            const reoffer = canReoffer({ ...application, status: 'declined' });
+            await this.notifySafely({
+                recipientEmail: application.technicianEmail, recipientRole: 'rider', type: 'application_declined',
+                entityType: 'repair_request', entityId: requestId, actorEmail: caller, actorRole: 'user',
+                metadata: { trackingId: request.trackingId, canReoffer: reoffer ? 'yes' : 'no', occurrence: application.revisedAfterDecline ? 'revised' : 'first' },
+            });
+            res.send({ success: true, reposted: true, postedAt: now });
+        } catch (error) {
+            res.status(500).send({ message: 'Error rejecting the offer', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    async closeFeeCheckoutFor(request, applicationId) {
+        const requestId = request._id.toString();
+        const active = await this.checkoutSessions.findActive(requestId);
+        if (!active || active.purpose !== INSPECTION_FEE_PURPOSE || active.applicationId !== applicationId) return;
+        const cancelled = await this.checkoutSessions.cancelByRequestId(requestId);
+        if (cancelled && cancelled.sessionId) {
+            try { await this.stripe().checkout.sessions.expire(cancelled.sessionId); } catch (error) { /* already closed */ }
+        }
+        await this.collections.repairRequests.updateOne(
+            { _id: request._id, 'feeCheckout.applicationId': applicationId },
+            { $unset: { feeCheckout: '' } }
+        );
     }
 
     async bookInTransaction({ request, application, technician, customerEmail, now }) {

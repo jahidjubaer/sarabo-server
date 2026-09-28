@@ -14,6 +14,12 @@ const { ACTIVE_STATUSES } = require('../utils/repairRequestStatus');
 // the technician is claimed by someone else between the checks and the write.
 async function bookApplication({ collections, request, application, technician, customerEmail, now, session, extraSet = {} }) {
     const requestId = request._id.toString();
+    // The customer may have rejected this offer (or the technician withdrawn
+    // it) after the checkout opened: then nothing is booked and a paid fee is
+    // refunded by the caller.
+    const current = await collections.jobApplications.findOne({ _id: application._id }, { session, projection: { status: 1 } });
+    if (!current || current.status !== 'pending') return 'JOB_NOT_OPEN';
+
     const busy = await collections.repairRequests.findOne(
         { technicianId: application.technicianId, deliveryStatus: { $in: ACTIVE_STATUSES }, _id: { $ne: request._id } },
         { session }

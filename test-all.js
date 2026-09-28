@@ -4631,7 +4631,7 @@ async function testNotificationFoundation() {
             // In-app pickup reminders.
             'pickup_reminder', 'pickup_reminder_technician',
             // Job portal.
-            'job_invitation', 'application_received', 'application_accepted', 'application_not_chosen',
+            'job_invitation', 'application_received', 'application_accepted', 'application_not_chosen', 'application_declined',
             // Inspection fee.
             'inspection_fee_refunded',
             // Inspection-fee outcomes.
@@ -4640,7 +4640,7 @@ async function testNotificationFoundation() {
             'declined_request_closed', 'declined_request_auto_closed'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 37 event types exist', actualTypes.length === 37 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 38 event types exist', actualTypes.length === 38 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -4657,7 +4657,7 @@ async function testNotificationFoundation() {
             if (!title || typeof title !== 'string' || !message || typeof message !== 'string') allHaveTitleMessage = false;
             if (!ENTITY_TYPES.includes(def.entityType)) allHaveValidEntityType = false;
             if (def.priority !== 'normal') allUseNormalPriority = false;
-            const allowedUrlPrefixes = ['/dashboard/approve-technicians', '/dashboard/assigned-jobs', '/dashboard', '/dashboard/my-requests/'];
+            const allowedUrlPrefixes = ['/dashboard/approve-technicians', '/dashboard/assigned-jobs', '/dashboard', '/dashboard/my-requests/', '/jobs'];
             if (!allowedUrlPrefixes.some(prefix => actionUrl === prefix || actionUrl.startsWith(prefix))) allHaveAllowlistedActionUrl = false;
             if (/<[a-z]/i.test(title) || /<[a-z]/i.test(message)) noneContainHtml = false;
             if (/\brider\b/i.test(title) || /\brider\b/i.test(message)) noneContainRawRider = false;
