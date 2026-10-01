@@ -42,6 +42,9 @@ the repair does not go ahead. Payments use **Stripe test mode** only.
   note) and may send **one** revised offer; if that is rejected too they
   cannot offer again on that request. A payment that still arrives for a
   rejected offer books no one and is refunded.
+- When a request is first published (its first photo is attached), every
+  approved technician who could take it gets an in-app `job_posted`
+  notification, once per request (`services/jobAnnouncements.js`, at most 50).
 - After a repost, every other approved technician who could take the job
   (not the rejected one, not anyone with an offer waiting; at most 50) gets an
   in-app `job_reposted` notification linking to `/jobs`.
@@ -132,7 +135,7 @@ presses **Retry refund** (`POST /admin/repair-requests/:id/inspection-fee/retry-
 
 `job_invitation`, `application_received` (also for a revised offer),
 `application_accepted`, `application_not_chosen`, `application_declined`,
-`job_reposted`,
+`job_posted`, `job_reposted`,
 `inspection_fee_refunded` (wording follows the
 reason: booking failed, no-show, cancelled in time) and
 `booking_cancelled_by_customer` (to the technician; says whether they keep their

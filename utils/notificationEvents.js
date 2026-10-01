@@ -308,6 +308,19 @@ const NOTIFICATION_EVENTS = {
     },
     // Open jobs board: the customer rejected the offer and reposted the
     // request. `canReoffer` says whether one revised offer is still allowed.
+    // A new request is on the jobs board (its first photo): sent to the
+    // approved technicians who could take it, once per request.
+    job_posted: {
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId'],
+        requiresMetadata: ['trackingId'],
+        title: () => 'New job near you',
+        message: ({ metadata }) => `A customer posted repair request ${metadata.trackingId} that matches your skills. Send your offer from the jobs board.`,
+        actionUrl: () => '/jobs',
+        deduplicationKey: ({ entityId, recipientEmail }) => `repair:${entityId}:job_posted:${recipientEmail || 'technician'}`,
+    },
     // A request was reposted after the customer rejected an offer: sent to the
     // other technicians who could take it.
     job_reposted: {

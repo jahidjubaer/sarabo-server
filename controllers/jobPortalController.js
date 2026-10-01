@@ -6,6 +6,7 @@ const {
     isOpenForApplications, publishedAt, lastPostedAt, canReoffer, maxInspectionFee, validateApplicationInput, validateDeclineInput,
 } = require('../utils/jobPortal');
 const { bookApplication, notifyBooking } = require('../services/jobBooking');
+const { announceJob } = require('../services/jobAnnouncements');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
 const { INSPECTION_FEE_PURPOSE } = require('../utils/inspectionFee');
 const { V2_PAYMENT_CURRENCY, toSmallestUnit } = require('../config/paymentConfig');
@@ -32,8 +33,6 @@ const { normalizeSiteOrigin } = require('../config/siteOrigin');
 // request: it moves back to the top of the board, and that technician may
 // send one revised offer.
 const PORTAL_LIMIT = 100;
-// Most technicians told about one repost (in-app only, free).
-const REPOST_NOTIFY_LIMIT = 50;
 const OPEN_REQUEST_FILTER = Object.freeze({
     schemaVersion: 2, deliveryStatus: 'pending-pickup', technicianId: { $exists: false }, 'damage.images.0': { $exists: true },
 });
@@ -449,7 +448,7 @@ class JobPortalController {
             });
             res.send({ success: true, reposted: true, postedAt: now });
             // After answering: tell the other technicians who could take it.
-            await this.notifyRepost({ request, requestId, repostCount, rejectedTechnicianId: application.technicianId, customerEmail: caller });
+            await this.notifyRepost({ request, repostCount, rejectedTechnicianId: application.technicianId, customerEmail: caller });
         } catch (error) {
             res.status(500).send({ message: 'Error rejecting the offer', code: 'INTERNAL_ERROR' });
         }
@@ -457,32 +456,12 @@ class JobPortalController {
 
     // A reposted request is news to every approved technician who could take
     // it - except the one just rejected (told separately) and anyone whose
-    // offer is still waiting. In-app notifications only; never fatal.
-    async notifyRepost({ request, requestId, repostCount, rejectedTechnicianId, customerEmail }) {
-        try {
-            const [technicians, levels, waiting] = await Promise.all([
-                this.collections.technicians.find(
-                    { status: 'approved' },
-                    { projection: { email: 1, status: 1, region: 1, expertise: 1 } }
-                ).toArray(),
-                this.levelsByDefinition(),
-                this.collections.jobApplications.find({ requestId, status: 'pending' }, { projection: { technicianId: 1 } }).toArray(),
-            ]);
-            const skip = new Set([rejectedTechnicianId, ...waiting.map((a) => a.technicianId)]);
-            const needs = this.needsOf(request, levels);
-            const recipients = technicians
-                .filter((t) => t.email && !skip.has(t._id.toString()) && canTechnicianEverTakeRequest(t, needs))
-                .slice(0, REPOST_NOTIFY_LIMIT);
-            for (const technician of recipients) {
-                await this.notifySafely({
-                    recipientEmail: technician.email, recipientRole: 'rider', type: 'job_reposted',
-                    entityType: 'repair_request', entityId: requestId, actorEmail: customerEmail, actorRole: 'user',
-                    metadata: { trackingId: request.trackingId, occurrence: String(repostCount) },
-                });
-            }
-        } catch (error) {
-            console.error('Repost notifications failed (non-fatal):', error.message);
-        }
+    // offer is still waiting (services/jobAnnouncements.js). Never fatal.
+    async notifyRepost({ request, repostCount, rejectedTechnicianId, customerEmail }) {
+        await announceJob({
+            collections: this.collections, notifications: this.notifications, request, type: 'job_reposted',
+            occurrence: String(repostCount), excludeTechnicianIds: [rejectedTechnicianId], actorEmail: customerEmail,
+        });
     }
 
     async closeFeeCheckoutFor(request, applicationId) {

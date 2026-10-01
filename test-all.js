@@ -4632,7 +4632,7 @@ async function testNotificationFoundation() {
             // In-app pickup reminders.
             'pickup_reminder', 'pickup_reminder_technician',
             // Job portal.
-            'job_invitation', 'application_received', 'application_accepted', 'application_not_chosen', 'application_declined', 'job_reposted',
+            'job_invitation', 'application_received', 'application_accepted', 'application_not_chosen', 'application_declined', 'job_reposted', 'job_posted',
             // Inspection fee.
             'inspection_fee_refunded',
             // Inspection-fee outcomes.
@@ -4641,7 +4641,7 @@ async function testNotificationFoundation() {
             'declined_request_closed', 'declined_request_auto_closed'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 39 event types exist', actualTypes.length === 39 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 40 event types exist', actualTypes.length === 40 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -10598,6 +10598,25 @@ async function testDamageUploadFoundation() {
             pricingParcelBefore.technicianId === pricingParcelAfter.technicianId &&
             JSON.stringify(pricingParcelBefore.service) === JSON.stringify(pricingParcelAfter.service)
         );
+
+        // ---- Open jobs board: the first photo announces the job ----
+        const announceTechEmail = `damage-upload-announce-tech-${runId}@test.local`;
+        const announceTech = await collections.technicians.insertOne({
+            name: `Announce Tech ${runId}`, email: announceTechEmail, region: 'Dhaka', district: 'Mirpur', status: 'approved', workStatus: 'available',
+            expertise: [{ productCategorySlug: 'smartphone', repairCategorySlugs: ['motherboard'], level: 'expert', experienceYears: 5 }], createdAt: new Date(),
+        });
+        try {
+            const announcedId = await createV2Parcel(customerEmail, { damage: { description: 'Phone will not turn on after water damage.', images: [] } });
+            const firstPhoto = await uploadAndFinalize(announcedId);
+            const postedCount = () => collections.notifications.countDocuments({ recipientEmail: announceTechEmail, type: 'job_posted', entityId: announcedId });
+            const afterFirst = await postedCount();
+            const secondPhoto = await uploadAndFinalize(announcedId);
+            logTest('Open jobs: the first photo tells matching technicians a new job is posted - once, not again for more photos',
+                firstPhoto.finalizeRes.statusCode === 200 && secondPhoto.finalizeRes.statusCode === 200 && afterFirst === 1 && (await postedCount()) === 1);
+            await collections.notifications.deleteMany({ entityId: announcedId });
+        } finally {
+            await collections.technicians.deleteOne({ _id: announceTech.insertedId });
+        }
 
         // ---- Regression / isolation (58-62) ----
         const zeroImageParcelId = await createV2Parcel(customerEmail, { damage: { description: 'Minor cosmetic scratch on the back panel.', images: [] } });
