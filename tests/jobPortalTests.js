@@ -198,6 +198,10 @@ async function runJobPortalTests({ logTest }) {
             declined.statusCode === 200 && repostedDoc.repostCount === 1 && !!repostedDoc.repostedAt
             && !!betaView && betaView.reposted === true && betaView.myApplication.status === 'declined' && betaView.myApplication.canReoffer === true
             && (await c.notifications.countDocuments({ recipientEmail: beta.email, type: 'application_declined', entityId: board })) === 1);
+        const repostNotes = async (email) => c.notifications.countDocuments({ recipientEmail: email, type: 'job_reposted', entityId: board });
+        logTest('Open jobs: other local technicians who could take it are told it is open again - not the rejected one or outsiders',
+            (await repostNotes(gamma.email)) === 1 && (await repostNotes(alpha.email)) === 1
+            && (await repostNotes(beta.email)) === 0 && (await repostNotes(outsider.email)) === 0);
         const listedAfter = await call('listForRequest', CUSTOMER, { params: { id: board } });
         logTest('Open jobs: the customer still sees the rejected offer, marked rejected',
             listedAfter.body.applications.length === 1 && listedAfter.body.applications[0].status === 'declined'
@@ -216,6 +220,7 @@ async function runJobPortalTests({ logTest }) {
             blocked.statusCode === 409 && blocked.body.code === 'APPLICATION_CLOSED'
             && (await call('listPortal', beta.email)).body.jobs.find((j) => j.id === board).myApplication.canReoffer === false
             && (await c.repairRequests.findOne({ _id: new ObjectId(board) })).repostCount === 2
+            && (await repostNotes(gamma.email)) === 2
             && (await c.notifications.countDocuments({ recipientEmail: beta.email, type: 'application_declined', entityId: board })) === 2);
 
         // ---- invitations ----

@@ -32,6 +32,8 @@ const { normalizeSiteOrigin } = require('../config/siteOrigin');
 // request: it moves back to the top of the board, and that technician may
 // send one revised offer.
 const PORTAL_LIMIT = 100;
+// Most technicians told about one repost (in-app only, free).
+const REPOST_NOTIFY_LIMIT = 50;
 const OPEN_REQUEST_FILTER = Object.freeze({
     schemaVersion: 2, deliveryStatus: 'pending-pickup', technicianId: { $exists: false }, 'damage.images.0': { $exists: true },
 });
@@ -433,10 +435,12 @@ class JobPortalController {
 
             // A checkout already opened for this offer must never be paid.
             await this.closeFeeCheckoutFor(request, application._id.toString());
-            await this.collections.repairRequests.updateOne(
+            const reposted = await this.collections.repairRequests.findOneAndUpdate(
                 { _id: request._id, deliveryStatus: 'pending-pickup', technicianId: { $exists: false } },
-                { $set: { repostedAt: now, updatedAt: now }, $inc: { repostCount: 1 } }
+                { $set: { repostedAt: now, updatedAt: now }, $inc: { repostCount: 1 } },
+                { returnDocument: 'after', projection: { repostCount: 1 } }
             );
+            const repostCount = reposted && reposted.repostCount ? reposted.repostCount : (request.repostCount || 0) + 1;
             const reoffer = canReoffer({ ...application, status: 'declined' });
             await this.notifySafely({
                 recipientEmail: application.technicianEmail, recipientRole: 'rider', type: 'application_declined',
@@ -444,8 +448,40 @@ class JobPortalController {
                 metadata: { trackingId: request.trackingId, canReoffer: reoffer ? 'yes' : 'no', occurrence: application.revisedAfterDecline ? 'revised' : 'first' },
             });
             res.send({ success: true, reposted: true, postedAt: now });
+            // After answering: tell the other technicians who could take it.
+            await this.notifyRepost({ request, requestId, repostCount, rejectedTechnicianId: application.technicianId, customerEmail: caller });
         } catch (error) {
             res.status(500).send({ message: 'Error rejecting the offer', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // A reposted request is news to every approved technician who could take
+    // it - except the one just rejected (told separately) and anyone whose
+    // offer is still waiting. In-app notifications only; never fatal.
+    async notifyRepost({ request, requestId, repostCount, rejectedTechnicianId, customerEmail }) {
+        try {
+            const [technicians, levels, waiting] = await Promise.all([
+                this.collections.technicians.find(
+                    { status: 'approved' },
+                    { projection: { email: 1, status: 1, region: 1, expertise: 1 } }
+                ).toArray(),
+                this.levelsByDefinition(),
+                this.collections.jobApplications.find({ requestId, status: 'pending' }, { projection: { technicianId: 1 } }).toArray(),
+            ]);
+            const skip = new Set([rejectedTechnicianId, ...waiting.map((a) => a.technicianId)]);
+            const needs = this.needsOf(request, levels);
+            const recipients = technicians
+                .filter((t) => t.email && !skip.has(t._id.toString()) && canTechnicianEverTakeRequest(t, needs))
+                .slice(0, REPOST_NOTIFY_LIMIT);
+            for (const technician of recipients) {
+                await this.notifySafely({
+                    recipientEmail: technician.email, recipientRole: 'rider', type: 'job_reposted',
+                    entityType: 'repair_request', entityId: requestId, actorEmail: customerEmail, actorRole: 'user',
+                    metadata: { trackingId: request.trackingId, occurrence: String(repostCount) },
+                });
+            }
+        } catch (error) {
+            console.error('Repost notifications failed (non-fatal):', error.message);
         }
     }
 

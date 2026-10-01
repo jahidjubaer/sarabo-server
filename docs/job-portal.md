@@ -42,6 +42,9 @@ the repair does not go ahead. Payments use **Stripe test mode** only.
   note) and may send **one** revised offer; if that is rejected too they
   cannot offer again on that request. A payment that still arrives for a
   rejected offer books no one and is refunded.
+- After a repost, every other approved technician who could take the job
+  (not the rejected one, not anyone with an offer waiting; at most 50) gets an
+  in-app `job_reposted` notification linking to `/jobs`.
 - Admins can invite a technician to apply (`POST /admin/repair-requests/:id/invite`),
   or still assign directly as an override (no inspection fee).
 - The admin is not involved while technicians are replying. Only if **no
@@ -129,6 +132,7 @@ presses **Retry refund** (`POST /admin/repair-requests/:id/inspection-fee/retry-
 
 `job_invitation`, `application_received` (also for a revised offer),
 `application_accepted`, `application_not_chosen`, `application_declined`,
+`job_reposted`,
 `inspection_fee_refunded` (wording follows the
 reason: booking failed, no-show, cancelled in time) and
 `booking_cancelled_by_customer` (to the technician; says whether they keep their
@@ -144,3 +148,12 @@ customer).
   and fake refunds.
 - To try it by hand: Stripe test card `4242 4242 4242 4242`, any future date,
   any CVC. Refunds appear in the Stripe test dashboard.
+
+## 10. Dummy jobs for local development
+
+`npm run seed:dev-jobs -- --confirm-seed` (after `scripts/seed-dev-people.js`)
+writes 24 open jobs (`SEED-J...`) to the local dev or a test database only:
+about 40% that your own approved technician can take, some with offers from
+seeded technicians, some reposted, and two over a day old with no offers. Their
+placeholder photo has no stored file, so the photo viewer shows none. Remove
+them with `-- --reset --confirm-seed`; `--count=N` changes how many.

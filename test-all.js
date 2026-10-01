@@ -50,6 +50,7 @@ const { runAdminServiceDefinitionTests } = require('./tests/adminServiceDefiniti
 const { runPickupSlotTests } = require('./tests/pickupSlotTests');
 const { runEmailTests } = require('./tests/emailTests');
 const { runSeedDevPeopleTests } = require('./tests/seedDevPeopleTests');
+const { runSeedDevJobsTests } = require('./tests/seedDevJobsTests');
 const { runAdminReportTests } = require('./tests/adminReportTests');
 const { runAdminAttentionTests } = require('./tests/adminAttentionTests');
 const { runMissedPickupTests } = require('./tests/missedPickupTests');
@@ -4631,7 +4632,7 @@ async function testNotificationFoundation() {
             // In-app pickup reminders.
             'pickup_reminder', 'pickup_reminder_technician',
             // Job portal.
-            'job_invitation', 'application_received', 'application_accepted', 'application_not_chosen', 'application_declined',
+            'job_invitation', 'application_received', 'application_accepted', 'application_not_chosen', 'application_declined', 'job_reposted',
             // Inspection fee.
             'inspection_fee_refunded',
             // Inspection-fee outcomes.
@@ -4640,7 +4641,7 @@ async function testNotificationFoundation() {
             'declined_request_closed', 'declined_request_auto_closed'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 38 event types exist', actualTypes.length === 38 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 39 event types exist', actualTypes.length === 39 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -13550,6 +13551,7 @@ async function runAllTests() {
     await runPickupSlotTests({ logTest });
     await runEmailTests({ logTest });
     await runSeedDevPeopleTests({ logTest });
+    await runSeedDevJobsTests({ logTest });
     await runAdminReportTests({ logTest });
     await runAdminAttentionTests({ logTest });
     await runMissedPickupTests({ logTest });
