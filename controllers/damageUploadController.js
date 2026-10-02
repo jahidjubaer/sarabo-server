@@ -15,8 +15,6 @@ const {
 } = require('../utils/damageUpload');
 const { damageStorageService } = require('../services/damageStorageService');
 const { resolveImageAccess } = require('../services/damageImageAccessService');
-const { announceJob } = require('../services/jobAnnouncements');
-const { createNotificationService } = require('../services/notificationService');
 
 const UPLOAD_SESSION_BODY_FIELDS = ['fileName', 'mimeType', 'size'];
 
@@ -281,23 +279,10 @@ class DamageUploadController {
                 return res.status(outcome.httpStatus).send({ message: outcome.code, code: outcome.code });
             }
 
-            res.status(200).send({
+            return res.status(200).send({
                 message: 'damage image attached',
                 image: this._serializeImage(uploadSession._id, imageEntry)
             });
-            // The first photo publishes the request on the jobs board: tell the
-            // technicians who could take it (once - the notification key is
-            // per request). After answering; never fatal.
-            const hadPhotos = repairRequest.damage && Array.isArray(repairRequest.damage.images) && repairRequest.damage.images.length > 0;
-            if (!hadPhotos) {
-                try {
-                    const published = await this.collections.repairRequests.findOne({ _id: new ObjectId(requestId) });
-                    if (published) await announceJob({ collections: this.collections, notifications: createNotificationService(this.models), request: published, type: 'job_posted' });
-                } catch (error) {
-                    console.error('New job announcement failed (non-fatal):', error.message);
-                }
-            }
-            return undefined;
         } catch (error) {
             if (error && error.httpStatus) {
                 return res.status(error.httpStatus).send({ message: error.code, code: error.code });

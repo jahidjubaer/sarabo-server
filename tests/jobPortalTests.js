@@ -84,9 +84,10 @@ async function runJobPortalTests({ logTest }) {
             && validateApplicationInput({ ...good, inspectionFee: cap + 1 }, { maxFee: cap }).code === 'INSPECTION_FEE_TOO_HIGH'
             && validateApplicationInput({ ...good, estimateMax: 1.5 }, { maxFee: cap }).code === 'INVALID_ESTIMATE'
             && validateApplicationInput({ ...good, note: 'x'.repeat(501) }, { maxFee: cap }).code === 'INVALID_NOTE');
-        logTest('Job portal: only a waiting v2 request with a photo and no technician is open',
+        logTest('Job portal: a waiting v2 request with no technician is open, with or without photos',
             isOpenForApplications({ schemaVersion: 2, deliveryStatus: 'pending-pickup', damage: { images: [photo(new Date())] } })
-            && !isOpenForApplications({ schemaVersion: 2, deliveryStatus: 'pending-pickup', damage: { images: [] } })
+            && isOpenForApplications({ schemaVersion: 2, deliveryStatus: 'pending-pickup', damage: { images: [] } })
+            && !isOpenForApplications({ schemaVersion: 2, deliveryStatus: 'picked-up', damage: { images: [] } })
             && !isOpenForApplications({ schemaVersion: 2, deliveryStatus: 'pending-pickup', technicianId: 'x', damage: { images: [photo(new Date())] } }));
 
         const alpha = await insertTech('alpha');
@@ -98,8 +99,8 @@ async function runJobPortalTests({ logTest }) {
         // ---- the portal ----
         const alphaPortal = await call('listPortal', alpha.email);
         const job = alphaPortal.body.jobs.find((j) => j.id === open);
-        logTest('Job portal: a qualified local technician sees the open request, but not one without photos',
-            alphaPortal.statusCode === 200 && !!job && !alphaPortal.body.jobs.some((j) => j.id === noPhoto));
+        logTest('Job portal: a qualified local technician sees open requests, including one without photos',
+            alphaPortal.statusCode === 200 && !!job && alphaPortal.body.jobs.some((j) => j.id === noPhoto && j.photoCount === 0));
         logTest('Job portal: the listing shows the district, problem and fee limit - never the address or customer',
             job && job.district === 'Near' && job.maxInspectionFee === cap && !JSON.stringify(alphaPortal.body).includes('SECRET STREET') && !JSON.stringify(alphaPortal.body).includes(CUSTOMER));
         logTest('Job portal: a technician in another region does not see it and cannot apply',
@@ -178,7 +179,7 @@ async function runJobPortalTests({ logTest }) {
         const pubText = JSON.stringify(pub.body);
         logTest('Open jobs: anyone sees a safe summary - no problem text, photos, tracking id, address or customer',
             pub.statusCode === 200 && !!pubJob && pubJob.district === 'Near' && pubJob.offers === 0 && !('photoCount' in pubJob)
-            && !pub.body.jobs.some((j) => j.id === noPhoto) && !pub.body.jobs.some((j) => j.id === open)
+            && pub.body.jobs.some((j) => j.id === noPhoto) && !pub.body.jobs.some((j) => j.id === open)
             && !pubText.includes('Portal test problem') && !pubText.includes('SECRET STREET') && !pubText.includes(`PORTAL-${runId}`) && !pubText.includes(CUSTOMER));
         const pubOther = fakeRes();
         await portal.listPublic({ query: { region: `Other-${runId}` } }, pubOther);
@@ -235,10 +236,10 @@ async function runJobPortalTests({ logTest }) {
 
         // ---- 24 hours ----
         const dayAgo = () => new Date(Date.now() - 25 * 3600000);
-        const stale = await insertRequest({ damage: { description: 'Old request.', images: [photo(dayAgo())] } });
+        const stale = await insertRequest({ damage: { description: 'Old request.', images: [photo(dayAgo())] }, createdAt: dayAgo() });
         await call('apply', beta.email, { params: { id: stale }, body: good });
-        const silent = await insertRequest({ damage: { description: 'Nobody answered.', images: [photo(dayAgo())] } });
-        const repostedRecently = await insertRequest({ damage: { description: 'Reposted.', images: [photo(dayAgo())] }, repostedAt: new Date(), repostCount: 1 });
+        const silent = await insertRequest({ damage: { description: 'Nobody answered.', images: [] }, createdAt: dayAgo() });
+        const repostedRecently = await insertRequest({ damage: { description: 'Reposted.', images: [photo(dayAgo())] }, createdAt: dayAgo(), repostedAt: new Date(), repostCount: 1 });
         const attentionRes = fakeRes();
         await new AdminAttentionController(models, c).getAttention({}, attentionRes);
         const unchosenIds = attentionRes.body.unchosen.map((r) => r.id);

@@ -11,6 +11,7 @@ const { validateRejectionReason, buildPendingAssignmentEntry, projectAssignmentF
 const { stripDamageImages, projectSafeListRepairRequest } = require('../utils/repairRequestProjection');
 const { normalize } = require('../services/paymentProcessor');
 const { createNotificationService } = require('../services/notificationService');
+const { announceJob } = require('../services/jobAnnouncements');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
 const { getCancellationEligibility } = require('../services/cancellationPolicy');
 const { getDeletionEligibility } = require('../services/deletionPolicy');
@@ -554,6 +555,13 @@ class RepairRequestController {
             await this.emails.sendRequestReceived(document, result.insertedId.toString());
 
             res.send(result);
+            // The new request is on the open jobs board now: tell the
+            // technicians who could take it (once per request). After
+            // answering; announceJob never throws.
+            await announceJob({
+                collections: this.collections, notifications: this.notifications,
+                request: { ...document, _id: result.insertedId }, type: 'job_posted',
+            });
         } catch (error) {
             res.status(500).send({ message: 'Error creating repair request', error: error.message });
         }

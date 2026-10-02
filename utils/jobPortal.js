@@ -1,9 +1,9 @@
 // Job portal rules (job-portal phase B). Pure: no database access.
 //
 // A request is OPEN in the portal while it waits for a technician (v2,
-// pending-pickup, nobody assigned) and has at least one photo - technicians
-// estimate from the photos. Its first photo's upload time is when it was
-// published. When the customer rejects an offer the request is reposted
+// pending-pickup, nobody assigned). Photos are optional when the customer
+// creates a request, so a request is listed from the moment it is created;
+// its creation time is when it was published. When the customer rejects an offer the request is reposted
 // (repostedAt); the admin is alerted only if no technician has an offer
 // waiting 24 hours after it was last posted.
 const { isV2RepairRequest } = require('./repairRequestSchema');
@@ -23,12 +23,14 @@ function photosOf(request) {
 function isOpenForApplications(request) {
     return isV2RepairRequest(request)
         && (request.deliveryStatus || 'pending-pickup') === 'pending-pickup'
-        && !request.technicianId
-        && photosOf(request).length > 0;
+        && !request.technicianId;
 }
 
-// When the request was published: its earliest photo, or null without photos.
+// When the request was published: its creation time (older rows without one
+// fall back to their earliest photo), or null.
 function publishedAt(request) {
+    const created = request && request.createdAt ? new Date(request.createdAt) : null;
+    if (created && Number.isFinite(created.getTime())) return created;
     const times = photosOf(request)
         .map((image) => (image && image.uploadedAt ? new Date(image.uploadedAt).getTime() : NaN))
         .filter((t) => Number.isFinite(t));

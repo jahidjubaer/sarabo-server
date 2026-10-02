@@ -46,7 +46,7 @@ async function runSeedDevJobsTests({ logTest }) {
         }));
     logTest('Seed jobs: some are reposted and the oldest two have no offers (for the 24-hour alert)',
         a.jobs.some((j) => j.repostedAt && j.repostCount === 1)
-        && a.jobs.slice(-2).every((j) => !a.offers.some((o) => o.trackingId === j.trackingId) && now - j.damage.images[0].uploadedAt > 24 * 3600000));
+        && a.jobs.slice(-2).every((j) => !a.offers.some((o) => o.trackingId === j.trackingId) && now - j.createdAt > 24 * 3600000));
 }
 
 module.exports = { runSeedDevJobsTests };

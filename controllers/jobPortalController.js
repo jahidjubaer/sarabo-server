@@ -34,7 +34,7 @@ const { normalizeSiteOrigin } = require('../config/siteOrigin');
 // send one revised offer.
 const PORTAL_LIMIT = 100;
 const OPEN_REQUEST_FILTER = Object.freeze({
-    schemaVersion: 2, deliveryStatus: 'pending-pickup', technicianId: { $exists: false }, 'damage.images.0': { $exists: true },
+    schemaVersion: 2, deliveryStatus: 'pending-pickup', technicianId: { $exists: false },
 });
 
 function byLastPostedDesc(a, b) {

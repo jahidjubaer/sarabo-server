@@ -10599,7 +10599,7 @@ async function testDamageUploadFoundation() {
             JSON.stringify(pricingParcelBefore.service) === JSON.stringify(pricingParcelAfter.service)
         );
 
-        // ---- Open jobs board: the first photo announces the job ----
+        // ---- Open jobs board: creating the request announces the job ----
         const announceTechEmail = `damage-upload-announce-tech-${runId}@test.local`;
         const announceTech = await collections.technicians.insertOne({
             name: `Announce Tech ${runId}`, email: announceTechEmail, region: 'Dhaka', district: 'Mirpur', status: 'approved', workStatus: 'available',
@@ -10607,12 +10607,11 @@ async function testDamageUploadFoundation() {
         });
         try {
             const announcedId = await createV2Parcel(customerEmail, { damage: { description: 'Phone will not turn on after water damage.', images: [] } });
-            const firstPhoto = await uploadAndFinalize(announcedId);
             const postedCount = () => collections.notifications.countDocuments({ recipientEmail: announceTechEmail, type: 'job_posted', entityId: announcedId });
-            const afterFirst = await postedCount();
-            const secondPhoto = await uploadAndFinalize(announcedId);
-            logTest('Open jobs: the first photo tells matching technicians a new job is posted - once, not again for more photos',
-                firstPhoto.finalizeRes.statusCode === 200 && secondPhoto.finalizeRes.statusCode === 200 && afterFirst === 1 && (await postedCount()) === 1);
+            const afterCreate = await postedCount();
+            const firstPhoto = await uploadAndFinalize(announcedId);
+            logTest('Open jobs: a new request (even without photos) tells matching technicians once - adding photos does not again',
+                afterCreate === 1 && firstPhoto.finalizeRes.statusCode === 200 && (await postedCount()) === 1);
             await collections.notifications.deleteMany({ entityId: announcedId });
         } finally {
             await collections.technicians.deleteOne({ _id: announceTech.insertedId });

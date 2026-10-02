@@ -1,7 +1,7 @@
 // DEVELOPMENT-ONLY seed of dummy open jobs for the open jobs board (/jobs):
-// waiting repair requests from the seeded customers, each with a placeholder
-// photo (so it is open), some with offers from seeded technicians and some
-// reposted after a rejected offer.
+// waiting repair requests from the seeded customers (no photos, as customers
+// may skip them), some with offers from seeded technicians and some reposted
+// after a rejected offer.
 //
 // Usage:
 //   node scripts/seed-dev-jobs.js                         (dry run - writes nothing)
@@ -14,9 +14,6 @@
 // can take, so they show up in the signed-in technician view; the rest are
 // spread over every region. Every job can be taken by at least one approved
 // technician, as the app requires when a request is created.
-//
-// The placeholder photo has no stored file: the board and matching treat the
-// job as open, and the photo viewer simply shows no photos.
 //
 // Safety: same guards as seed-dev-people.js (never production; only the
 // local dev database or a test database). Everything written carries
@@ -139,10 +136,7 @@ function buildOpenJobs(count, { customers, technicians, definitions, now = new D
             service: { definitionId: definition._id.toString(), repairCategorySlug: definition.repairCategorySlug },
             damage: {
                 description: pick(random, PROBLEMS[definition.repairCategorySlug] || PROBLEMS.diagnosis),
-                images: [{
-                    storageKey: `seed/${SEED_MARKER}/${trackingId}.jpg`, url: '', mimeType: 'image/jpeg', size: 1,
-                    uploadedAt: postedAt, uploadedByRole: 'user', seed: true,
-                }],
+                images: [],
             },
             serviceLocation: { region, district, address: `${1 + Math.floor(random() * 150)} ${district} Road` },
             pricing: {
@@ -158,7 +152,7 @@ function buildOpenJobs(count, { customers, technicians, definitions, now = new D
             },
             pickupSlot: upcomingPickupSlot(random, now),
             deliveryStatus: 'pending-pickup',
-            createdAt: new Date(postedAt.getTime() - 10 * 60 * 1000),
+            createdAt: postedAt,
             updatedAt: postedAt,
             seed: SEED_MARKER,
         };

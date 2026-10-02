@@ -17,8 +17,9 @@ the repair does not go ahead. Payments use **Stripe test mode** only.
 ## 2. The job portal
 
 - A request is **open** in the portal while it is a v2 request, waiting for
-  pickup (`pending-pickup`), has no technician, and has **at least one photo**.
-  It counts as published at the time of its first photo.
+  pickup (`pending-pickup`) and has no technician - from the moment it is
+  created, with or without photos (photos are optional for the customer). It
+  counts as published when it was created.
 - **Open jobs board** (`/jobs` on the website, outside the dashboard):
   `GET /jobs` needs no sign-in (rate limited, 60 a minute per address) and
   lists every open request as a safe summary - device, repair, region and
@@ -42,7 +43,7 @@ the repair does not go ahead. Payments use **Stripe test mode** only.
   note) and may send **one** revised offer; if that is rejected too they
   cannot offer again on that request. A payment that still arrives for a
   rejected offer books no one and is refunded.
-- When a request is first published (its first photo is attached), every
+- When a request is created, every
   approved technician who could take it gets an in-app `job_posted`
   notification, once per request (`services/jobAnnouncements.js`, at most 50).
 - After a repost, every other approved technician who could take the job
@@ -157,6 +158,6 @@ customer).
 `npm run seed:dev-jobs -- --confirm-seed` (after `scripts/seed-dev-people.js`)
 writes 24 open jobs (`SEED-J...`) to the local dev or a test database only:
 about 40% that your own approved technician can take, some with offers from
-seeded technicians, some reposted, and two over a day old with no offers. Their
-placeholder photo has no stored file, so the photo viewer shows none. Remove
+seeded technicians, some reposted, and two over a day old with no offers. They
+have no photos. Remove
 them with `-- --reset --confirm-seed`; `--count=N` changes how many.
