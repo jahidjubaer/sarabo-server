@@ -9,6 +9,7 @@ const {
     getQuoteRound, countArchivedQuotes,
 } = require('../utils/quote');
 const { closeDeclinedRequest } = require('../services/declinedQuoteClose');
+const { inspectionCredit, amountDueForQuote } = require('../utils/inspectionFee');
 
 function normalizeEmail(value) {
     return typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -325,7 +326,15 @@ class QuoteController {
             if (!isV2RepairRequest(repairRequest)) {
                 return res.status(400).send({ message: 'quotes are only available for newer (v2) repair requests', code: 'LEGACY_REQUEST_NOT_SUPPORTED' });
             }
-            return res.send({ quote: buildQuoteView(repairRequest.quote) });
+            const quote = buildQuoteView(repairRequest.quote);
+            // The inspection fee already paid counts toward the price, so the
+            // customer sees what is left to pay before deciding.
+            if (quote.status !== 'not_submitted') {
+                quote.inspectionCredit = inspectionCredit(repairRequest);
+                const due = amountDueForQuote(repairRequest);
+                quote.amountDue = Number.isFinite(due) ? due : null;
+            }
+            return res.send({ quote });
         } catch (error) {
             return res.status(500).send({ message: 'Error fetching quote', code: 'INTERNAL_ERROR' });
         }

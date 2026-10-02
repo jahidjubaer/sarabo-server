@@ -90,6 +90,17 @@ If the customer approves the final quote, the repair payment is the quote total
 confirms and pays nothing more. The technician's settlement is still 90% of the
 **full** quote.
 
+When to pay: right after approving. `GET /repair-requests/:id/quote` returns
+`inspectionCredit` and `amountDue` with the quote, so before deciding the
+customer sees the final price, the fee already paid and what is left. The
+button reads "Approve and pay BDT X": approving goes straight to the card
+payment, and the repair starts once it is paid. If the payment page can't
+open, the quote stays approved and the request's Pay button takes over.
+
+The customer's request list (`GET /repair-requests`) carries
+`pendingOfferCount` on every open request, so it can say "2 offers waiting"
+with a "Choose a technician" button.
+
 ## 5. When the repair does not go ahead
 
 | Situation | Where | Fee |

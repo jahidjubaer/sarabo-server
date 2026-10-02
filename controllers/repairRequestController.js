@@ -12,6 +12,7 @@ const { stripDamageImages, projectSafeListRepairRequest } = require('../utils/re
 const { normalize } = require('../services/paymentProcessor');
 const { createNotificationService } = require('../services/notificationService');
 const { announceJob } = require('../services/jobAnnouncements');
+const { isOpenForApplications } = require('../utils/jobPortal');
 const { createCheckoutSessionManager } = require('../services/checkoutSessionManager');
 const { getCancellationEligibility } = require('../services/cancellationPolicy');
 const { getDeletionEligibility } = require('../services/deletionPolicy');
@@ -144,7 +145,23 @@ class RepairRequestController {
             // aggregate on the list too - a general list must never carry raw
             // storageKey/url metadata for any request it returns.
             const result = await this.RepairRequest.findAll(query);
-            res.send(result.map(projectSafeListRepairRequest));
+            const rows = result.map(projectSafeListRepairRequest);
+            // Open requests carry how many technician offers are waiting, so
+            // the list can say "2 offers waiting" without opening each one.
+            const openIds = result.filter(isOpenForApplications).map((r) => r._id.toString());
+            if (openIds.length > 0) {
+                const counts = await this.collections.jobApplications.aggregate([
+                    { $match: { requestId: { $in: openIds }, status: 'pending' } },
+                    { $group: { _id: '$requestId', n: { $sum: 1 } } },
+                ]).toArray();
+                const byId = new Map(counts.map((row) => [row._id, row.n]));
+                const open = new Set(openIds);
+                rows.forEach((row, i) => {
+                    const id = result[i]._id.toString();
+                    if (open.has(id)) row.pendingOfferCount = byId.get(id) || 0;
+                });
+            }
+            res.send(rows);
         } catch (error) {
             res.status(500).send({ message: 'Error fetching repair requests', error: error.message });
         }
