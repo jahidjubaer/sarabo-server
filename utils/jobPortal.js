@@ -20,6 +20,11 @@ function photosOf(request) {
     return request && request.damage && Array.isArray(request.damage.images) ? request.damage.images : [];
 }
 
+// The database form of isOpenForApplications (keep the two in step).
+const OPEN_REQUEST_FILTER = Object.freeze({
+    schemaVersion: 2, deliveryStatus: 'pending-pickup', technicianId: { $exists: false },
+});
+
 function isOpenForApplications(request) {
     return isV2RepairRequest(request)
         && (request.deliveryStatus || 'pending-pickup') === 'pending-pickup'
@@ -99,6 +104,7 @@ function validateApplicationInput(body, { maxFee }) {
 }
 
 module.exports = {
+    OPEN_REQUEST_FILTER,
     CHOOSE_WITHIN_MS,
     MAX_ESTIMATE_BDT,
     NOTE_MAX_LENGTH,

@@ -46,6 +46,10 @@ the repair does not go ahead. Payments use **Stripe test mode** only.
 - When a request is created, every
   approved technician who could take it gets an in-app `job_posted`
   notification, once per request (`services/jobAnnouncements.js`, at most 50).
+- A technician who starts matching later - just approved by an admin, or
+  added a repair to their expertise - gets the same `job_posted` for each
+  open job they can now take and have not offered on (newest first, at most
+  50). A job they were already told about is never announced twice.
 - After a repost, every other approved technician who could take the job
   (not the rejected one, not anyone with an offer waiting; at most 50) gets an
   in-app `job_reposted` notification linking to `/jobs`.

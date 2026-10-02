@@ -2,6 +2,7 @@ const { ObjectId } = require('mongodb');
 const { client } = require('../config/database');
 const { normalize } = require('../services/paymentProcessor');
 const { createNotificationService } = require('../services/notificationService');
+const { announceOpenJobsToTechnician } = require('../services/jobAnnouncements');
 const { REQUESTABLE_STATUSES, ROLE_FOR_STATUS, isValidTechnicianTransition } = require('../utils/technicianStatus');
 const { ACTIVE_STATUSES } = require('../utils/repairRequestStatus');
 const { validateTechnicianExpertise, normalizeTechnicianExpertise } = require('../utils/technicianExpertise');
@@ -580,7 +581,13 @@ class TechnicianController {
                 return res.send({ message: 'technician status already set', status: requestedStatus, alreadyConsistent: true });
             }
             if (outcome.success) {
-                return res.send({ message: 'technician status updated', status: requestedStatus, alreadyConsistent: false });
+                res.send({ message: 'technician status updated', status: requestedStatus, alreadyConsistent: false });
+                // A newly approved technician hears about the open jobs they
+                // can take (after the response; never throws).
+                if (requestedStatus === 'approved') {
+                    await announceOpenJobsToTechnician({ collections: this.collections, notifications: this.notifications, technicianId });
+                }
+                return;
             }
             return res.status(outcome.httpStatus).send({ message: outcome.message, code: outcome.code });
         } catch (error) {
@@ -695,7 +702,11 @@ class TechnicianController {
             }
 
             if (outcome.success) {
-                return res.send({ message: 'technician expertise updated', expertise: outcome.expertise });
+                res.send({ message: 'technician expertise updated', expertise: outcome.expertise });
+                // New repairs in their expertise can match jobs already open;
+                // ones they were told about before are not repeated.
+                await announceOpenJobsToTechnician({ collections: this.collections, notifications: this.notifications, technicianId: technician._id });
+                return;
             }
             return res.status(outcome.httpStatus).send({ message: outcome.message, code: outcome.code });
         } catch (error) {

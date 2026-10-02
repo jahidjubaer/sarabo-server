@@ -4,6 +4,7 @@ const { createNotificationService } = require('../services/notificationService')
 const { canTechnicianEverTakeRequest } = require('../services/technicianEligibilityService');
 const {
     isOpenForApplications, publishedAt, lastPostedAt, canReoffer, maxInspectionFee, validateApplicationInput, validateDeclineInput,
+    OPEN_REQUEST_FILTER,
 } = require('../utils/jobPortal');
 const { bookApplication, notifyBooking } = require('../services/jobBooking');
 const { announceJob } = require('../services/jobAnnouncements');
@@ -33,9 +34,6 @@ const { normalizeSiteOrigin } = require('../config/siteOrigin');
 // request: it moves back to the top of the board, and that technician may
 // send one revised offer.
 const PORTAL_LIMIT = 100;
-const OPEN_REQUEST_FILTER = Object.freeze({
-    schemaVersion: 2, deliveryStatus: 'pending-pickup', technicianId: { $exists: false },
-});
 
 function byLastPostedDesc(a, b) {
     return (lastPostedAt(b) || 0) - (lastPostedAt(a) || 0);
