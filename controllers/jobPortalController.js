@@ -12,6 +12,14 @@ const { createCheckoutSessionManager } = require('../services/checkoutSessionMan
 const { INSPECTION_FEE_PURPOSE } = require('../utils/inspectionFee');
 const { V2_PAYMENT_CURRENCY, toSmallestUnit } = require('../config/paymentConfig');
 const { normalizeSiteOrigin } = require('../config/siteOrigin');
+const { buildPriceGuide } = require('../services/offerPriceGuide');
+const { AiHelperError } = require('../services/aiHelperCall');
+const { LANGUAGES: NOTE_LANGUAGES } = require('../services/aiOfferNoteService');
+const { findSensitiveInputKind } = require('../utils/supportValidation');
+const { getProductCategoryBySlug } = require('../utils/productCategory');
+const { logSafeError, getSafeLogPath, ERROR_CATEGORIES } = require('../utils/safeLogger');
+
+const TECHNICIAN_NOTES_MAX_LENGTH = 300;
 
 // Job portal (job-portal phase B). Customers' waiting requests with a photo
 // are listed to every approved technician who could take them (same region,
@@ -49,8 +57,9 @@ function refuse(res, status, code, message) {
 }
 
 class JobPortalController {
-    constructor(models, collections, { now = () => new Date(), mongoClient = client, stripeClient, siteOrigin } = {}) {
+    constructor(models, collections, { now = () => new Date(), mongoClient = client, stripeClient, siteOrigin, aiOfferNoteService = null } = {}) {
         this.collections = collections;
+        this.aiOfferNoteService = aiOfferNoteService;
         // Stripe (test mode) is created lazily so tests can inject a fake.
         this.stripeClient = stripeClient || null;
         this.siteOrigin = siteOrigin || null;
@@ -95,6 +104,86 @@ class JobPortalController {
             return null;
         }
         return technician;
+    }
+
+    // The caller's technician record and a job open to them, or null after
+    // sending the refusal - the same rule as applying.
+    async openJobForCaller(req, res) {
+        const technician = await this.callerTechnician(req, res);
+        if (!technician) return null;
+        const request = await this.loadRequest(req.params.id);
+        if (!request) {
+            refuse(res, 404, 'REQUEST_NOT_FOUND', 'repair request not found');
+            return null;
+        }
+        const levels = await this.levelsByDefinition();
+        if (!isOpenForApplications(request) || !canTechnicianEverTakeRequest(technician, this.needsOf(request, levels))) {
+            refuse(res, 409, 'JOB_NOT_OPEN', 'this job is not open to you');
+            return null;
+        }
+        return { technician, request };
+    }
+
+    // GET /repair-requests/:id/applications/price-guide  (technician, no AI)
+    // The usual estimate and inspection fee for this service, from recent
+    // offers - or the catalogue's range when there are too few.
+    async priceGuide(req, res) {
+        try {
+            const job = await this.openJobForCaller(req, res);
+            if (!job) return;
+            const guide = await buildPriceGuide({
+                collections: this.collections, request: job.request, maxInspectionFee: maxInspectionFee(job.request), now: this.now(),
+            });
+            res.send({ guide });
+        } catch (error) {
+            res.status(500).send({ message: 'Error loading the price guide', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // POST /repair-requests/:id/applications/ai-note  { language?: 'en'|'bn', technicianNotes? }
+    // An AI draft of the offer note; the technician edits it before sending.
+    async aiNote(req, res) {
+        const startedAt = Date.now();
+        const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+        const language = body.language === undefined ? 'en' : body.language;
+        if (!NOTE_LANGUAGES.includes(language)) return refuse(res, 400, 'AI_HELPER_VALIDATION_ERROR', 'the language must be en or bn');
+        const technicianNotes = typeof body.technicianNotes === 'string' ? body.technicianNotes.trim() : '';
+        if (technicianNotes.length > TECHNICIAN_NOTES_MAX_LENGTH) {
+            return refuse(res, 400, 'AI_HELPER_VALIDATION_ERROR', `your notes must be at most ${TECHNICIAN_NOTES_MAX_LENGTH} characters`);
+        }
+        if (findSensitiveInputKind(technicianNotes)) {
+            return refuse(res, 400, 'AI_HELPER_VALIDATION_ERROR', 'please remove private details (card numbers, passwords, codes) from your notes');
+        }
+        try {
+            const job = await this.openJobForCaller(req, res);
+            if (!job) return;
+            if (!this.aiOfferNoteService) return refuse(res, 503, 'AI_HELPER_UNAVAILABLE', 'The AI note writer is not available right now. Please write the note yourself.');
+            const { request } = job;
+            const definitionId = request.service && request.service.definitionId;
+            const definition = definitionId && ObjectId.isValid(definitionId)
+                ? await this.collections.serviceDefinitions.findOne({ _id: new ObjectId(definitionId) }, { projection: { label: 1 } })
+                : null;
+            const category = getProductCategoryBySlug(request.product && request.product.categorySlug);
+            const note = await this.aiOfferNoteService.writeNote({
+                job: {
+                    deviceLabel: category ? category.label : request.product.categorySlug,
+                    brand: request.product.brand,
+                    model: request.product.model,
+                    repairLabel: definition ? definition.label : request.service.repairCategorySlug,
+                    problem: (request.damage && request.damage.description) || '',
+                    photoCount: Array.isArray(request.damage && request.damage.images) ? request.damage.images.length : 0,
+                },
+                language,
+                technicianNotes,
+                requestId: req.requestId,
+            });
+            res.send({ note });
+        } catch (error) {
+            const status = error instanceof AiHelperError ? error.status : 500;
+            logSafeError({ requestId: req.requestId, method: req.method, path: getSafeLogPath(req), status, category: ERROR_CATEGORIES.INTERNAL_ERROR, durationMs: Date.now() - startedAt });
+            if (error instanceof AiHelperError) return res.status(error.status).send({ message: error.message, code: error.code });
+            res.status(500).send({ message: 'The AI note writer failed. Please write the note yourself.', code: 'INTERNAL_ERROR' });
+        }
     }
 
     async loadRequest(id) {

@@ -1,11 +1,5 @@
-const {
-    SupportProviderError,
-    classifyGeminiError,
-    calculateRetryDelayMs,
-    waitForRetry,
-    createGeminiClient,
-} = require('./geminiSupportProvider');
-const { logSafeSupportProviderEvent } = require('../../utils/safeLogger');
+const { createGeminiClient } = require('./geminiSupportProvider');
+const { callGeminiJson } = require('./geminiJsonCall');
 
 // Turns a customer's own words (Bangla, English or a mix) into a draft repair
 // request. The model may only pick from the live catalogue it is given; the
@@ -85,68 +79,37 @@ function createGeminiRequestDraftProvider({
     retryMaxDelayMs = 1000,
     client,
     clientFactory = createGeminiClient,
-    diagnosticLogger = logSafeSupportProviderEvent,
-    wait = waitForRetry,
-    now = Date.now,
+    diagnosticLogger,
+    wait,
+    now,
 } = {}) {
     if (!apiKey || !model || !Number.isInteger(maxOutputTokens)) return null;
     const geminiClient = client || clientFactory(apiKey);
-    const attemptLimit = Math.min(2, Math.max(1, maxAttempts));
 
     return Object.freeze({
         async generateDraft({ text, photo, catalogue, signal, requestId }) {
-            const overallStartedAt = now();
-            const request = {
+            return callGeminiJson({
+                client: geminiClient,
                 model,
-                contents: buildContents({ text, photo }),
-                config: {
-                    systemInstruction: buildSystemInstruction(catalogue),
-                    responseMimeType: 'application/json',
-                    responseJsonSchema: buildResponseSchema(catalogue, { withPhoto: Boolean(photo) }),
-                    maxOutputTokens,
-                    thinkingConfig: { thinkingLevel: 'LOW', includeThoughts: false },
-                    abortSignal: signal,
-                },
-            };
-            const log = (attempt, outcome, failureClass, startedAt) => diagnosticLogger({
+                signal,
                 requestId,
-                provider: 'gemini',
-                model,
-                attempt,
-                outcome,
-                failureClass,
-                durationMs: Math.max(0, now() - startedAt),
-                totalDurationMs: Math.max(0, now() - overallStartedAt),
+                maxAttempts,
+                retryBaseDelayMs,
+                retryMaxDelayMs,
+                diagnosticLogger,
+                wait,
+                now,
+                request: {
+                    contents: buildContents({ text, photo }),
+                    config: {
+                        systemInstruction: buildSystemInstruction(catalogue),
+                        responseMimeType: 'application/json',
+                        responseJsonSchema: buildResponseSchema(catalogue, { withPhoto: Boolean(photo) }),
+                        maxOutputTokens,
+                        thinkingConfig: { thinkingLevel: 'LOW', includeThoughts: false },
+                    },
+                },
             });
-
-            for (let attempt = 1; attempt <= attemptLimit; attempt += 1) {
-                const startedAt = now();
-                let response;
-                try {
-                    response = await geminiClient.models.generateContent(request);
-                } catch (error) {
-                    const classification = classifyGeminiError(error, signal);
-                    const canRetry = classification.retryable && attempt < attemptLimit;
-                    log(attempt, canRetry ? 'retrying' : 'failed', classification.failureClass, startedAt);
-                    if (canRetry) {
-                        await wait(calculateRetryDelayMs({ baseDelayMs: retryBaseDelayMs, maxDelayMs: retryMaxDelayMs }), signal);
-                        continue;
-                    }
-                    throw new SupportProviderError(classification.code, 'The AI provider request failed.', {
-                        failureClass: classification.failureClass,
-                        attempts: attempt,
-                    });
-                }
-                try {
-                    const parsed = JSON.parse(response && response.text);
-                    log(attempt, 'succeeded', null, startedAt);
-                    return parsed;
-                } catch {
-                    log(attempt, 'failed', 'invalid_response', startedAt);
-                    throw new SupportProviderError('PROVIDER_INVALID_RESPONSE', 'The AI provider returned an unusable response.');
-                }
-            }
-            throw new SupportProviderError('PROVIDER_REQUEST_FAILED', 'The AI provider request failed.');
         },
     });
 }

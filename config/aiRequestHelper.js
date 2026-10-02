@@ -1,8 +1,9 @@
 const { loadAiSupportConfig } = require('./aiSupport');
 
-// The "describe your problem" helper on the create-request form. It shares the
-// Gemini key and model with AI support but has its own on/off switch and its
-// own daily budget, so one feature can never use up the other's free quota.
+// The AI helpers (create-request draft, technician offer note, admin weekly
+// summary) share the Gemini key and model with AI support, but each has its
+// own on/off switch and its own daily budget, so one feature can never use up
+// another's free quota.
 const DEFAULTS = Object.freeze({
     enabled: false,
     timeoutMs: 20000,
@@ -21,9 +22,13 @@ function readPositiveInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_I
     return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
 }
 
-function loadAiRequestHelperConfig(env = process.env) {
+// `prefix` names the env variables: `${prefix}_ENABLED`, `${prefix}_TIMEOUT_MS`,
+// `${prefix}_USER_10M_LIMIT`, `${prefix}_USER_DAILY_LIMIT`,
+// `${prefix}_GLOBAL_DAILY_LIMIT`.
+function buildAiHelperConfig(env, prefix, overrides = {}) {
+    const defaults = { ...DEFAULTS, ...overrides };
     const support = loadAiSupportConfig(env);
-    const enabled = String(env.AI_REQUEST_HELPER_ENABLED || '').trim().toLowerCase() === 'true';
+    const enabled = String(env[`${prefix}_ENABLED`] || '').trim().toLowerCase() === 'true';
     return Object.freeze({
         // Off unless switched on AND a Gemini key is configured.
         enabled: enabled && Boolean(support.apiKey),
@@ -32,21 +37,30 @@ function loadAiRequestHelperConfig(env = process.env) {
         providerMaxAttempts: support.providerMaxAttempts,
         providerRetryBaseDelayMs: support.providerRetryBaseDelayMs,
         providerRetryMaxDelayMs: support.providerRetryMaxDelayMs,
-        timeoutMs: readPositiveInteger(env.AI_REQUEST_HELPER_TIMEOUT_MS, DEFAULTS.timeoutMs, { min: 1000, max: 60000 }),
-        maxOutputTokens: DEFAULTS.maxOutputTokens,
-        textMaxChars: DEFAULTS.textMaxChars,
-        // Shape expected by createSupportRateLimit. Only signed-in customers
-        // can call the helper, so the anonymous limits are never used.
+        timeoutMs: readPositiveInteger(env[`${prefix}_TIMEOUT_MS`], defaults.timeoutMs, { min: 1000, max: 60000 }),
+        maxOutputTokens: defaults.maxOutputTokens,
+        textMaxChars: defaults.textMaxChars,
+        // Shape expected by createSupportRateLimit. Only signed-in users can
+        // call the helpers, so the anonymous limits are never used.
         shortWindowMs: support.shortWindowMs,
         dailyWindowMs: support.dailyWindowMs,
         anonymousShortWindowLimit: 1,
         anonymousDailyLimit: 1,
-        authenticatedShortWindowLimit: readPositiveInteger(env.AI_REQUEST_HELPER_USER_10M_LIMIT, DEFAULTS.userShortWindowLimit),
-        authenticatedDailyLimit: readPositiveInteger(env.AI_REQUEST_HELPER_USER_DAILY_LIMIT, DEFAULTS.userDailyLimit),
-        authenticatedIpShortWindowLimit: DEFAULTS.ipShortWindowLimit,
-        authenticatedIpDailyLimit: DEFAULTS.ipDailyLimit,
-        globalDailyLimit: readPositiveInteger(env.AI_REQUEST_HELPER_GLOBAL_DAILY_LIMIT, DEFAULTS.globalDailyLimit),
+        authenticatedShortWindowLimit: readPositiveInteger(env[`${prefix}_USER_10M_LIMIT`], defaults.userShortWindowLimit),
+        authenticatedDailyLimit: readPositiveInteger(env[`${prefix}_USER_DAILY_LIMIT`], defaults.userDailyLimit),
+        authenticatedIpShortWindowLimit: defaults.ipShortWindowLimit,
+        authenticatedIpDailyLimit: defaults.ipDailyLimit,
+        globalDailyLimit: readPositiveInteger(env[`${prefix}_GLOBAL_DAILY_LIMIT`], defaults.globalDailyLimit),
     });
 }
 
-module.exports = { DEFAULTS, loadAiRequestHelperConfig };
+function loadAiRequestHelperConfig(env = process.env) {
+    return buildAiHelperConfig(env, 'AI_REQUEST_HELPER');
+}
+
+// Technicians write offer notes: short output, a few per job.
+function loadAiOfferHelperConfig(env = process.env) {
+    return buildAiHelperConfig(env, 'AI_OFFER_HELPER', { maxOutputTokens: 400, timeoutMs: 15000, userDailyLimit: 40 });
+}
+
+module.exports = { DEFAULTS, buildAiHelperConfig, loadAiRequestHelperConfig, loadAiOfferHelperConfig };

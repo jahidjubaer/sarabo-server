@@ -46,14 +46,18 @@ function invalid(res, message) {
 }
 
 class AiRequestDraftController {
-    constructor({ aiRequestDraftService, config }) {
+    constructor({ aiRequestDraftService, aiOfferNoteService = null, config }) {
         this.service = aiRequestDraftService;
+        this.offerNoteService = aiOfferNoteService;
         this.config = config;
     }
 
-    // Lets the form show the helper only when it can work.
+    // Lets each form show its AI helper only when it can work.
     status(req, res) {
-        return res.send({ requestHelper: this.service.isAvailable() });
+        return res.send({
+            requestHelper: this.service.isAvailable(),
+            offerHelper: Boolean(this.offerNoteService && this.offerNoteService.isAvailable()),
+        });
     }
 
     async draft(req, res) {

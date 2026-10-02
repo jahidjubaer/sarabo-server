@@ -30,7 +30,9 @@ const { loadAiSupportConfig } = require('../config/aiSupport');
 const { createAiSupportService } = require('../services/aiSupportService');
 const { createSupportKnowledgeService } = require('../services/supportKnowledgeService');
 const { createConfiguredGeminiSupportProvider } = require('../services/aiProviders/geminiSupportProvider');
-const { loadAiRequestHelperConfig } = require('../config/aiRequestHelper');
+const { loadAiRequestHelperConfig, loadAiOfferHelperConfig } = require('../config/aiRequestHelper');
+const { createAiOfferNoteService } = require('../services/aiOfferNoteService');
+const { createConfiguredGeminiOfferNoteProvider } = require('../services/aiProviders/geminiOfferNoteProvider');
 const { createAiRequestDraftService } = require('../services/aiRequestDraftService');
 const { createConfiguredGeminiRequestDraftProvider } = require('../services/aiProviders/geminiRequestDraftProvider');
 
@@ -64,6 +66,17 @@ function initializeControllers(models, collections, dependencies = {}) {
         serviceDefinitionModel: models.ServiceDefinition,
     });
 
+    const aiOfferHelperConfig = dependencies.aiOfferHelperConfig || loadAiOfferHelperConfig();
+    const aiOfferNoteService = dependencies.aiOfferNoteService || createAiOfferNoteService({
+        provider: Object.prototype.hasOwnProperty.call(dependencies, 'aiOfferNoteProvider')
+            ? dependencies.aiOfferNoteProvider
+            : createConfiguredGeminiOfferNoteProvider(aiOfferHelperConfig, {
+                client: dependencies.geminiClient,
+                clientFactory: dependencies.geminiClientFactory,
+            }),
+        config: aiOfferHelperConfig,
+    });
+
     // One email service for the whole app (a no-op unless EMAIL_ENABLED=true).
     const emailService = dependencies.emailService || createEmailService({ config: loadEmailConfig(), collections });
 
@@ -89,9 +102,9 @@ function initializeControllers(models, collections, dependencies = {}) {
         adminAttention: new AdminAttentionController(models, collections),
         missedPickup: new MissedPickupController(models, collections),
         serviceAvailability: new ServiceAvailabilityController(models, collections),
-        jobPortal: new JobPortalController(models, collections),
+        jobPortal: new JobPortalController(models, collections, { aiOfferNoteService }),
         inspectionFee: new InspectionFeeController(models, collections),
-        aiRequestDraft: new AiRequestDraftController({ aiRequestDraftService, config: aiRequestHelperConfig }),
+        aiRequestDraft: new AiRequestDraftController({ aiRequestDraftService, aiOfferNoteService, config: aiRequestHelperConfig }),
         support: new SupportController({
             aiSupportService,
             supportKnowledgeService,

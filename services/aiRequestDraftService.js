@@ -1,4 +1,5 @@
 const { getProductCategoryBySlug } = require('../utils/productCategory');
+const { AiHelperError, helperErrors, runAiCall } = require('./aiHelperCall');
 const {
     BRAND_MODEL_MAX_LENGTH,
     DAMAGE_DESCRIPTION_MIN_LENGTH,
@@ -9,18 +10,13 @@ const FOLLOW_UP_MAX_LENGTH = 200;
 const PHOTO_FINDING_MAX_LENGTH = 300;
 const CONFIDENCE_LEVELS = Object.freeze(['high', 'medium', 'low']);
 
-class RequestDraftError extends Error {
-    constructor(code, status, message) {
-        super(message);
-        this.name = 'RequestDraftError';
-        this.code = code;
-        this.status = status;
-    }
-}
-
-const unavailable = () => new RequestDraftError('AI_HELPER_UNAVAILABLE', 503, 'The AI helper is not available right now. Please fill in the form yourself.');
-const timedOut = () => new RequestDraftError('AI_HELPER_TIMEOUT', 504, 'The AI helper took too long. Please try again or fill in the form yourself.');
-const unusable = () => new RequestDraftError('AI_HELPER_INVALID_RESPONSE', 502, 'The AI helper could not understand that. Please try again or fill in the form yourself.');
+const RequestDraftError = AiHelperError;
+const errors = helperErrors({
+    unavailable: 'The AI helper is not available right now. Please fill in the form yourself.',
+    timeout: 'The AI helper took too long. Please try again or fill in the form yourself.',
+    invalid: 'The AI helper could not understand that. Please try again or fill in the form yourself.',
+});
+const { unusable } = errors;
 
 // Active services whose device category is also active - the same set the
 // create-request form offers.
@@ -95,33 +91,15 @@ function createAiRequestDraftService({ provider = null, config, serviceDefinitio
     const isAvailable = () => Boolean(config && config.enabled && provider && typeof provider.generateDraft === 'function');
 
     async function draftRequest({ text, photo = null, requestId }) {
-        if (!isAvailable()) throw unavailable();
+        if (!isAvailable()) throw errors.unavailable();
         const catalogue = buildCatalogue(await serviceDefinitionModel.findMany({ isActive: true }));
-        if (catalogue.services.length === 0) throw unavailable();
+        if (catalogue.services.length === 0) throw errors.unavailable();
 
-        const abortController = new AbortController();
-        let timeoutId;
-        const timeout = new Promise((resolve, reject) => {
-            timeoutId = setTimeout(() => {
-                reject(timedOut());
-                abortController.abort();
-            }, config.timeoutMs);
+        const raw = await runAiCall({
+            timeoutMs: config.timeoutMs,
+            errors,
+            call: (signal) => provider.generateDraft({ text, photo, catalogue, signal, requestId }),
         });
-
-        let raw;
-        try {
-            raw = await Promise.race([
-                Promise.resolve().then(() => provider.generateDraft({ text, photo, catalogue, signal: abortController.signal, requestId })),
-                timeout,
-            ]);
-        } catch (error) {
-            if (error instanceof RequestDraftError) throw error;
-            if (error && error.code === 'PROVIDER_INVALID_RESPONSE') throw unusable();
-            if (error && error.code === 'PROVIDER_TIMEOUT') throw timedOut();
-            throw unavailable();
-        } finally {
-            clearTimeout(timeoutId);
-        }
         return validateDraft(raw, catalogue, { withPhoto: Boolean(photo) });
     }
 

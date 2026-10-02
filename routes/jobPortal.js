@@ -1,6 +1,19 @@
 const rateLimit = require('express-rate-limit');
 const { ensureDatabaseReady } = require('../middleware/database');
 const { verifyFBToken, verifyAdmin, verifyTechnician, verifyEmailVerified } = require('../middleware/auth');
+const { createSupportRateLimit } = require('../middleware/supportRateLimit');
+const { loadAiOfferHelperConfig } = require('../config/aiRequestHelper');
+
+// The shared AI rate limiter keys signed-in callers by req.supportAuth.uid.
+function markSignedIn(req, res, next) {
+    req.supportAuth = Object.freeze({ authenticated: true, uid: String(req.decoded_email || '').toLowerCase() });
+    next();
+}
+let aiNoteRateLimit;
+function aiNoteLimit(req, res, next) {
+    if (!aiNoteRateLimit) aiNoteRateLimit = createSupportRateLimit(loadAiOfferHelperConfig(), { keyPrefix: 'offer-helper', label: 'AI note' });
+    return aiNoteRateLimit(req, res, next);
+}
 
 // The open jobs board needs no sign-in, so it is rate limited per address
 // (in-memory, like the public tracking lookup).
@@ -21,6 +34,8 @@ function jobPortalRoutes(app, controllers) {
     app.get('/jobs', publicJobsLimiter, ensureDatabaseReady, (req, res) => c.listPublic(req, res));
     app.get('/technician/job-portal', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => c.listPortal(req, res));
     app.post('/repair-requests/:id/applications', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => c.apply(req, res));
+    app.get('/repair-requests/:id/applications/price-guide', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => c.priceGuide(req, res));
+    app.post('/repair-requests/:id/applications/ai-note', verifyFBToken, ensureDatabaseReady, verifyTechnician, markSignedIn, aiNoteLimit, (req, res) => c.aiNote(req, res));
     app.post('/repair-requests/:id/applications/mine/withdraw', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => c.withdraw(req, res));
     app.get('/repair-requests/:id/applications', verifyFBToken, ensureDatabaseReady, (req, res) => c.listForRequest(req, res));
     app.post('/repair-requests/:id/applications/:applicationId/accept', verifyFBToken, ensureDatabaseReady, verifyEmailVerified, (req, res) => c.accept(req, res));
