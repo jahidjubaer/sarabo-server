@@ -60,9 +60,16 @@ function runMiddlewareChain(middlewares, req, res, next) {
 // If the counter store is unreachable, the request is refused with the same
 // 503 SUPPORT_UNAVAILABLE the service returns when AI is off - never allowed
 // through uncounted (the rest of the API is down in that case anyway).
-function createSupportRateLimit(config = loadAiSupportConfig(), { keyPrefix = 'support', storeFactory } = {}) {
+//
+// `label` names the feature in the refusal messages ("AI support" by default).
+function createSupportRateLimit(config = loadAiSupportConfig(), { keyPrefix = 'support', storeFactory, label } = {}) {
     const makeStore = storeFactory || ((name) => new MongoRateLimitStore({ prefix: `${keyPrefix}:${name}` }));
-    const limiter = (name, options) => createLimiter({ ...options, store: makeStore(name) });
+    const perClientMessage = label ? `Too many ${label} requests. Please try again later.` : undefined;
+    const limiter = (name, options) => createLimiter({
+        ...(perClientMessage ? { message: perClientMessage } : {}),
+        ...options,
+        store: makeStore(name),
+    });
 
     const anonymousShort = limiter('anon-10m', {
         windowMs: config.shortWindowMs,
@@ -95,7 +102,7 @@ function createSupportRateLimit(config = loadAiSupportConfig(), { keyPrefix = 's
         limit: config.globalDailyLimit,
         keyGenerator: () => 'all',
         code: 'SUPPORT_DAILY_CAPACITY_REACHED',
-        message: 'AI support has reached its limit for today. Please try again tomorrow.',
+        message: `${label || 'AI support'} has reached its limit for today. Please try again tomorrow.`,
     });
 
     return function supportRateLimit(req, res, next) {
@@ -109,7 +116,7 @@ function createSupportRateLimit(config = loadAiSupportConfig(), { keyPrefix = 's
                 category: ERROR_CATEGORIES.DATABASE_UNAVAILABLE,
             });
             return res.status(503).send({
-                message: 'AI support is temporarily unavailable. Please try again later.',
+                message: `${label || 'AI support'} is temporarily unavailable. Please try again later.`,
                 code: 'SUPPORT_UNAVAILABLE',
             });
         };

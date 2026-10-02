@@ -22,6 +22,7 @@ const MissedPickupController = require('./missedPickupController');
 const ServiceAvailabilityController = require('./serviceAvailabilityController');
 const JobPortalController = require('./jobPortalController');
 const InspectionFeeController = require('./inspectionFeeController');
+const AiRequestDraftController = require('./aiRequestDraftController');
 const { loadEmailConfig } = require('../config/email');
 const { createEmailService } = require('../services/emailService');
 const { connectDatabase } = require('../config/database');
@@ -29,6 +30,9 @@ const { loadAiSupportConfig } = require('../config/aiSupport');
 const { createAiSupportService } = require('../services/aiSupportService');
 const { createSupportKnowledgeService } = require('../services/supportKnowledgeService');
 const { createConfiguredGeminiSupportProvider } = require('../services/aiProviders/geminiSupportProvider');
+const { loadAiRequestHelperConfig } = require('../config/aiRequestHelper');
+const { createAiRequestDraftService } = require('../services/aiRequestDraftService');
+const { createConfiguredGeminiRequestDraftProvider } = require('../services/aiProviders/geminiRequestDraftProvider');
 
 function initializeControllers(models, collections, dependencies = {}) {
     const aiSupportConfig = dependencies.aiSupportConfig || loadAiSupportConfig();
@@ -46,6 +50,18 @@ function initializeControllers(models, collections, dependencies = {}) {
     const supportKnowledgeService = dependencies.supportKnowledgeService || createSupportKnowledgeService({
         serviceDefinitionModel: models.ServiceDefinition,
         connectDatabase: dependencies.connectDatabase || connectDatabase,
+    });
+
+    const aiRequestHelperConfig = dependencies.aiRequestHelperConfig || loadAiRequestHelperConfig();
+    const aiRequestDraftService = dependencies.aiRequestDraftService || createAiRequestDraftService({
+        provider: Object.prototype.hasOwnProperty.call(dependencies, 'aiRequestDraftProvider')
+            ? dependencies.aiRequestDraftProvider
+            : createConfiguredGeminiRequestDraftProvider(aiRequestHelperConfig, {
+                client: dependencies.geminiClient,
+                clientFactory: dependencies.geminiClientFactory,
+            }),
+        config: aiRequestHelperConfig,
+        serviceDefinitionModel: models.ServiceDefinition,
     });
 
     // One email service for the whole app (a no-op unless EMAIL_ENABLED=true).
@@ -75,6 +91,7 @@ function initializeControllers(models, collections, dependencies = {}) {
         serviceAvailability: new ServiceAvailabilityController(models, collections),
         jobPortal: new JobPortalController(models, collections),
         inspectionFee: new InspectionFeeController(models, collections),
+        aiRequestDraft: new AiRequestDraftController({ aiRequestDraftService, config: aiRequestHelperConfig }),
         support: new SupportController({
             aiSupportService,
             supportKnowledgeService,

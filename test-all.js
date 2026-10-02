@@ -43,6 +43,7 @@ let testsFailed = 0;
 const results = [];
 const { runSupportFoundationTests } = require('./tests/supportFoundationTests');
 const { runGeminiSupportProviderTests } = require('./tests/geminiSupportProviderTests');
+const { runAiRequestDraftTests } = require('./tests/aiRequestDraftTests');
 const { runFeedbackTests } = require('./tests/feedbackTests');
 const { runProductionMigrationTests } = require('./tests/productionMigrationTests');
 const { runTechnicianAvailabilityTests } = require('./tests/technicianAvailabilityTests');
@@ -13566,6 +13567,7 @@ async function runAllTests() {
     await testQuoteRoundNotificationSafety();
     await runSupportFoundationTests({ logTest });
     await runGeminiSupportProviderTests({ logTest });
+    await runAiRequestDraftTests({ logTest });
     await runFeedbackTests({ logTest });
     await runProductionMigrationTests({ logTest });
     await runTechnicianAvailabilityTests({ logTest });

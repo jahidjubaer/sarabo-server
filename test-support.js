@@ -16,6 +16,7 @@ require('dotenv').config();
 
 const { runSupportFoundationTests } = require('./tests/supportFoundationTests');
 const { runGeminiSupportProviderTests } = require('./tests/geminiSupportProviderTests');
+const { runAiRequestDraftTests } = require('./tests/aiRequestDraftTests');
 
 let passed = 0;
 let failed = 0;
@@ -33,6 +34,7 @@ function logTest(name, condition, message = '') {
 (async () => {
     await runSupportFoundationTests({ logTest });
     await runGeminiSupportProviderTests({ logTest });
+    await runAiRequestDraftTests({ logTest });
 })()
     .then(() => {
         console.log(`\nSupport Tests: ${passed + failed}`);
