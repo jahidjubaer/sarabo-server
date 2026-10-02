@@ -27,6 +27,9 @@ function paymentRoutes(app, controllers) {
 
     // Get payments
     app.get('/payments', verifyFBToken, ensureDatabaseReady, (req, res) => paymentController.getAllPayments(req, res));
+
+    // PDF receipt for one payment - the payer or an admin only.
+    app.get('/payments/:transactionId/receipt.pdf', verifyFBToken, ensureDatabaseReady, (req, res) => paymentController.getReceipt(req, res));
 }
 
 module.exports = paymentRoutes;

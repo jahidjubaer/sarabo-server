@@ -124,6 +124,17 @@ If Stripe fails, the refund **stays pending** - it is never lost. It shows on
 the admin home ("Refund waiting") and on the request page, where an admin
 presses **Retry refund** (`POST /admin/repair-requests/:id/inspection-fee/retry-refund`).
 
+### Receipts
+
+Every payment (inspection fee or repair) has a PDF receipt:
+`GET /payments/:transactionId/receipt.pdf` (signed in; the payer or an admin,
+anyone else gets 404). `services/paymentReceipt.js` builds it with `pdfkit`
+from the stored `payments` row and its request: receipt number (the Stripe
+payment id), date paid in Dhaka time, device, repair, technician, the amount
+in BDT (a repair payment shows the repair total minus the inspection fee
+already paid) and whether a refund is in progress or done. The customer
+downloads it from the payment success page and from Payment History.
+
 ## 7. Reports and alerts
 
 - `GET /admin/attention`: `feeRefunds` (refunds waiting on Stripe) alongside

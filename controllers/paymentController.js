@@ -7,6 +7,7 @@ const { getPaymentEligibility, getV2PaymentEligibility } = require('../services/
 const { createNotificationService } = require('../services/notificationService');
 const { PAYMENT_CURRENCY, V2_PAYMENT_CURRENCY, toSmallestUnit } = require('../config/paymentConfig');
 const { normalizeSiteOrigin } = require('../config/siteOrigin');
+const { buildReceipt, renderReceiptPdf } = require('../services/paymentReceipt');
 
 // Fails fast at module load (server startup) rather than at first checkout
 // request - the same normalized origin config/cors.js uses as the production
@@ -18,6 +19,8 @@ const SITE_ORIGIN = normalizeSiteOrigin(process.env.SITE_DOMAIN);
 // A generous max length guards against pathological inputs without coupling
 // to Stripe's exact internal ID format.
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_]{1,500}$/;
+// Payment intent ids (pi_...) and older transaction ids.
+const RECEIPT_ID_PATTERN = /^[a-zA-Z0-9_-]{1,200}$/;
 
 class PaymentController {
     constructor(models, collections) {
@@ -547,6 +550,49 @@ class PaymentController {
             res.send(sanitized);
         } catch (error) {
             res.status(500).send({ message: 'Error fetching payments', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // GET /payments/:transactionId/receipt.pdf - the payer (or an admin)
+    // downloads a PDF receipt built from the stored payment row.
+    async getReceipt(req, res) {
+        try {
+            const transactionId = req.params.transactionId;
+            if (typeof transactionId !== 'string' || !RECEIPT_ID_PATTERN.test(transactionId)) {
+                return res.status(400).send({ message: 'invalid transaction id', code: 'INVALID_TRANSACTION_ID' });
+            }
+            const requesterEmail = req.decoded_email;
+            const currentUser = await this.User.findByEmail(requesterEmail);
+            const isAdmin = currentUser?.role === 'admin';
+            const payment = await this.collections.payments.findOne({ transactionId });
+            // Someone else's receipt looks the same as a missing one.
+            if (!payment || (!isAdmin && normalize(payment.customerEmail) !== normalize(requesterEmail))) {
+                return res.status(404).send({ message: 'receipt not found', code: 'RECEIPT_NOT_FOUND' });
+            }
+
+            const repairRequest = ObjectId.isValid(payment.requestId)
+                ? await this.collections.repairRequests.findOne(
+                    { _id: new ObjectId(payment.requestId) },
+                    { projection: { product: 1, service: 1, repairCategorySlug: 1, technicianId: 1, technicianName: 1 } }
+                )
+                : null;
+            const technicianId = payment.technicianId || (repairRequest && repairRequest.technicianId);
+            let technicianName = (repairRequest && repairRequest.technicianName) || null;
+            if (payment.technicianId && ObjectId.isValid(technicianId)) {
+                const technician = await this.collections.technicians.findOne({ _id: new ObjectId(technicianId) }, { projection: { name: 1 } });
+                technicianName = (technician && technician.name) || technicianName;
+            }
+
+            const pdf = await renderReceiptPdf(buildReceipt({ payment, repairRequest, technicianName }));
+            res.set({
+                'Content-Type': 'application/pdf',
+                'Content-Disposition': `attachment; filename="sarabo-receipt-${payment.trackingId || transactionId}.pdf"`,
+                'Cache-Control': 'private, no-store',
+            });
+            return res.send(pdf);
+        } catch (error) {
+            console.error('Receipt generation failed:', error.message);
+            return res.status(500).send({ message: 'Error creating receipt', code: 'INTERNAL_ERROR' });
         }
     }
 }
