@@ -61,86 +61,90 @@ class AdminAttentionController {
         this.now = now;
     }
 
+    // Everything that needs an admin now; also used by the AI report summary.
+    async buildAttention(now = this.now()) {
+        const rr = this.collections.repairRequests;
+        const missedFilter = {
+            deliveryStatus: { $in: ASSIGNED_NOT_COLLECTED },
+            'pickupSlot.endsAt': { $lte: now },
+            pickupRescheduleRequestedAt: { $exists: false },
+        };
+        const refundFilter = { purpose: 'inspection_fee', refundStatus: 'pending' };
+        const [overdueWaiting, overdueWaitingTotal, missedPickups, missedPickupsTotal, waiting, technicians, definitions, feeRefunds, feeRefundsTotal] = await Promise.all([
+            // Longest overdue first.
+            rr.find({ deliveryStatus: WAITING, 'pickupSlot.startsAt': { $lte: now } }, { projection: SUMMARY_PROJECTION })
+                .sort({ 'pickupSlot.startsAt': 1 }).limit(LIST_LIMIT).toArray(),
+            rr.countDocuments({ deliveryStatus: WAITING, 'pickupSlot.startsAt': { $lte: now } }),
+            rr.find(missedFilter, { projection: SUMMARY_PROJECTION })
+                .sort({ 'pickupSlot.endsAt': 1 }).limit(LIST_LIMIT).toArray(),
+            rr.countDocuments(missedFilter),
+            rr.find({ deliveryStatus: WAITING, schemaVersion: 2 }, { projection: SUMMARY_PROJECTION })
+                .sort({ createdAt: 1 }).limit(MAX_WAITING_SCANNED).toArray(),
+            this.collections.technicians.find({ status: 'approved' }, { projection: { status: 1, region: 1, expertise: 1 } }).toArray(),
+            this.collections.serviceDefinitions.find({}, { projection: { requiredExpertiseLevel: 1 } }).toArray(),
+            // Oldest first; never the customer's email or Stripe ids.
+            this.collections.payments.find(refundFilter, { projection: { requestId: 1, trackingId: 1, amount: 1, currency: 1, refundReason: 1, paidAt: 1, lastRefundAttemptAt: 1 } })
+                .sort({ paidAt: 1 }).limit(LIST_LIMIT).toArray(),
+            this.collections.payments.countDocuments(refundFilter),
+        ]);
+
+        const levelByDefinition = new Map(definitions.map((d) => [d._id.toString(), d.requiredExpertiseLevel]));
+        const chooseBy = now.getTime() - CHOOSE_WITHIN_MS;
+        const staleOpen = waiting.filter((doc) => {
+            if (!isOpenForApplications(doc)) return false;
+            const posted = lastPostedAt(doc);
+            return posted !== null && posted.getTime() <= chooseBy;
+        });
+        const staleIds = staleOpen.map((doc) => doc._id.toString());
+        // aggregate, not distinct: the connection uses the strict Stable API.
+        const withOffers = staleIds.length ? await this.collections.jobApplications.aggregate([
+            { $match: { requestId: { $in: staleIds }, status: 'pending' } },
+            { $group: { _id: '$requestId' } },
+        ]).toArray() : [];
+        const answered = new Set(withOffers.map((row) => row._id));
+        const unchosen = staleOpen.filter((doc) => !answered.has(doc._id.toString()));
+        const unmatchable = waiting.filter((doc) => !technicians.some((t) => canTechnicianEverTakeRequest(t, {
+            region: doc.serviceLocation && doc.serviceLocation.region,
+            productCategorySlug: doc.product && doc.product.categorySlug,
+            repairCategorySlug: doc.service && doc.service.repairCategorySlug,
+            requiredExpertiseLevel: levelByDefinition.get(doc.service && doc.service.definitionId),
+        })));
+
+        return {
+            generatedAt: now,
+            counts: {
+                overdueWaiting: overdueWaitingTotal,
+                missedPickups: missedPickupsTotal,
+                unmatchable: unmatchable.length,
+                unchosen: unchosen.length,
+                feeRefunds: feeRefundsTotal,
+            },
+            overdueWaiting: overdueWaiting.map(summarize),
+            missedPickups: missedPickups.map(summarize),
+            unmatchable: unmatchable.slice(0, LIST_LIMIT).map(summarize),
+            unchosen: unchosen.slice(0, LIST_LIMIT).map((doc) => ({
+                ...summarize(doc),
+                publishedAt: publishedAt(doc),
+                postedAt: lastPostedAt(doc),
+                repostCount: doc.repostCount || 0,
+                pendingApplications: 0,
+            })),
+            feeRefunds: feeRefunds.map((row) => ({
+                id: row.requestId,
+                trackingId: row.trackingId || null,
+                amount: row.amount,
+                currency: row.currency || 'BDT',
+                reason: row.refundReason || null,
+                paidAt: row.paidAt || null,
+                lastAttemptAt: row.lastRefundAttemptAt || null,
+            })),
+        };
+    }
+
     // GET /admin/attention
     async getAttention(req, res) {
         try {
-            const now = this.now();
-            const rr = this.collections.repairRequests;
-            const missedFilter = {
-                deliveryStatus: { $in: ASSIGNED_NOT_COLLECTED },
-                'pickupSlot.endsAt': { $lte: now },
-                pickupRescheduleRequestedAt: { $exists: false },
-            };
-            const refundFilter = { purpose: 'inspection_fee', refundStatus: 'pending' };
-            const [overdueWaiting, overdueWaitingTotal, missedPickups, missedPickupsTotal, waiting, technicians, definitions, feeRefunds, feeRefundsTotal] = await Promise.all([
-                // Longest overdue first.
-                rr.find({ deliveryStatus: WAITING, 'pickupSlot.startsAt': { $lte: now } }, { projection: SUMMARY_PROJECTION })
-                    .sort({ 'pickupSlot.startsAt': 1 }).limit(LIST_LIMIT).toArray(),
-                rr.countDocuments({ deliveryStatus: WAITING, 'pickupSlot.startsAt': { $lte: now } }),
-                rr.find(missedFilter, { projection: SUMMARY_PROJECTION })
-                    .sort({ 'pickupSlot.endsAt': 1 }).limit(LIST_LIMIT).toArray(),
-                rr.countDocuments(missedFilter),
-                rr.find({ deliveryStatus: WAITING, schemaVersion: 2 }, { projection: SUMMARY_PROJECTION })
-                    .sort({ createdAt: 1 }).limit(MAX_WAITING_SCANNED).toArray(),
-                this.collections.technicians.find({ status: 'approved' }, { projection: { status: 1, region: 1, expertise: 1 } }).toArray(),
-                this.collections.serviceDefinitions.find({}, { projection: { requiredExpertiseLevel: 1 } }).toArray(),
-                // Oldest first; never the customer's email or Stripe ids.
-                this.collections.payments.find(refundFilter, { projection: { requestId: 1, trackingId: 1, amount: 1, currency: 1, refundReason: 1, paidAt: 1, lastRefundAttemptAt: 1 } })
-                    .sort({ paidAt: 1 }).limit(LIST_LIMIT).toArray(),
-                this.collections.payments.countDocuments(refundFilter),
-            ]);
-
-            const levelByDefinition = new Map(definitions.map((d) => [d._id.toString(), d.requiredExpertiseLevel]));
-            const chooseBy = now.getTime() - CHOOSE_WITHIN_MS;
-            const staleOpen = waiting.filter((doc) => {
-                if (!isOpenForApplications(doc)) return false;
-                const posted = lastPostedAt(doc);
-                return posted !== null && posted.getTime() <= chooseBy;
-            });
-            const staleIds = staleOpen.map((doc) => doc._id.toString());
-            // aggregate, not distinct: the connection uses the strict Stable API.
-            const withOffers = staleIds.length ? await this.collections.jobApplications.aggregate([
-                { $match: { requestId: { $in: staleIds }, status: 'pending' } },
-                { $group: { _id: '$requestId' } },
-            ]).toArray() : [];
-            const answered = new Set(withOffers.map((row) => row._id));
-            const unchosen = staleOpen.filter((doc) => !answered.has(doc._id.toString()));
-            const unmatchable = waiting.filter((doc) => !technicians.some((t) => canTechnicianEverTakeRequest(t, {
-                region: doc.serviceLocation && doc.serviceLocation.region,
-                productCategorySlug: doc.product && doc.product.categorySlug,
-                repairCategorySlug: doc.service && doc.service.repairCategorySlug,
-                requiredExpertiseLevel: levelByDefinition.get(doc.service && doc.service.definitionId),
-            })));
-
-            res.send({
-                generatedAt: now,
-                counts: {
-                    overdueWaiting: overdueWaitingTotal,
-                    missedPickups: missedPickupsTotal,
-                    unmatchable: unmatchable.length,
-                    unchosen: unchosen.length,
-                    feeRefunds: feeRefundsTotal,
-                },
-                overdueWaiting: overdueWaiting.map(summarize),
-                missedPickups: missedPickups.map(summarize),
-                unmatchable: unmatchable.slice(0, LIST_LIMIT).map(summarize),
-                unchosen: unchosen.slice(0, LIST_LIMIT).map((doc) => ({
-                    ...summarize(doc),
-                    publishedAt: publishedAt(doc),
-                    postedAt: lastPostedAt(doc),
-                    repostCount: doc.repostCount || 0,
-                    pendingApplications: 0,
-                })),
-                feeRefunds: feeRefunds.map((row) => ({
-                    id: row.requestId,
-                    trackingId: row.trackingId || null,
-                    amount: row.amount,
-                    currency: row.currency || 'BDT',
-                    reason: row.refundReason || null,
-                    paidAt: row.paidAt || null,
-                    lastAttemptAt: row.lastRefundAttemptAt || null,
-                })),
-            });
+            res.send(await this.buildAttention());
         } catch (error) {
             res.status(500).send({ message: 'Error loading requests that need attention', code: 'INTERNAL_ERROR' });
         }

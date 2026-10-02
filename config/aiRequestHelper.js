@@ -63,4 +63,11 @@ function loadAiOfferHelperConfig(env = process.env) {
     return buildAiHelperConfig(env, 'AI_OFFER_HELPER', { maxOutputTokens: 400, timeoutMs: 15000, userDailyLimit: 40 });
 }
 
-module.exports = { DEFAULTS, buildAiHelperConfig, loadAiRequestHelperConfig, loadAiOfferHelperConfig };
+// Admins write a report summary now and then: a longer answer, a few a day.
+function loadAiReportSummaryConfig(env = process.env) {
+    return buildAiHelperConfig(env, 'AI_REPORT_SUMMARY', {
+        maxOutputTokens: 900, timeoutMs: 25000, userShortWindowLimit: 5, userDailyLimit: 20, globalDailyLimit: 50,
+    });
+}
+
+module.exports = { DEFAULTS, buildAiHelperConfig, loadAiRequestHelperConfig, loadAiOfferHelperConfig, loadAiReportSummaryConfig };

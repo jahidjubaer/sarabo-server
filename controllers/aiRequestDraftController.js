@@ -46,9 +46,10 @@ function invalid(res, message) {
 }
 
 class AiRequestDraftController {
-    constructor({ aiRequestDraftService, aiOfferNoteService = null, config }) {
+    constructor({ aiRequestDraftService, aiOfferNoteService = null, aiReportSummaryService = null, config }) {
         this.service = aiRequestDraftService;
         this.offerNoteService = aiOfferNoteService;
+        this.reportSummaryService = aiReportSummaryService;
         this.config = config;
     }
 
@@ -57,6 +58,7 @@ class AiRequestDraftController {
         return res.send({
             requestHelper: this.service.isAvailable(),
             offerHelper: Boolean(this.offerNoteService && this.offerNoteService.isAvailable()),
+            reportSummary: Boolean(this.reportSummaryService && this.reportSummaryService.isAvailable()),
         });
     }
 

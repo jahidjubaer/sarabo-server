@@ -45,6 +45,7 @@ const { runSupportFoundationTests } = require('./tests/supportFoundationTests');
 const { runGeminiSupportProviderTests } = require('./tests/geminiSupportProviderTests');
 const { runAiRequestDraftTests } = require('./tests/aiRequestDraftTests');
 const { runAiOfferHelperTests } = require('./tests/aiOfferHelperTests');
+const { runAiReportSummaryTests } = require('./tests/aiReportSummaryTests');
 const { runFeedbackTests } = require('./tests/feedbackTests');
 const { runProductionMigrationTests } = require('./tests/productionMigrationTests');
 const { runTechnicianAvailabilityTests } = require('./tests/technicianAvailabilityTests');
@@ -13570,6 +13571,7 @@ async function runAllTests() {
     await runGeminiSupportProviderTests({ logTest });
     await runAiRequestDraftTests({ logTest });
     await runAiOfferHelperTests({ logTest });
+    await runAiReportSummaryTests({ logTest });
     await runFeedbackTests({ logTest });
     await runProductionMigrationTests({ logTest });
     await runTechnicianAvailabilityTests({ logTest });

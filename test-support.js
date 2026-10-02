@@ -18,6 +18,7 @@ const { runSupportFoundationTests } = require('./tests/supportFoundationTests');
 const { runGeminiSupportProviderTests } = require('./tests/geminiSupportProviderTests');
 const { runAiRequestDraftTests } = require('./tests/aiRequestDraftTests');
 const { runAiOfferHelperTests } = require('./tests/aiOfferHelperTests');
+const { runAiReportSummaryTests } = require('./tests/aiReportSummaryTests');
 
 let passed = 0;
 let failed = 0;
@@ -37,6 +38,7 @@ function logTest(name, condition, message = '') {
     await runGeminiSupportProviderTests({ logTest });
     await runAiRequestDraftTests({ logTest });
     await runAiOfferHelperTests({ logTest });
+    await runAiReportSummaryTests({ logTest });
 })()
     .then(() => {
         console.log(`\nSupport Tests: ${passed + failed}`);

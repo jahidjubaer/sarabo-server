@@ -245,6 +245,37 @@ class AdminReportController {
         };
     }
 
+    // The whole report for the last `days` days; also used by the AI summary.
+    async buildReport(days) {
+        const to = this.now();
+        const from = new Date(to.getTime() - days * DAY_MS);
+        const previousFrom = new Date(from.getTime() - days * DAY_MS);
+        const technicians = await this.collections.technicians.find(
+            {},
+            { projection: { name: 1, region: 1, status: 1, workStatus: 1, expertise: 1 } }
+        ).toArray();
+
+        const [current, previous, daily, regions, breakdowns, workload, inspectionFees] = await Promise.all([
+            this.periodTotals(from, to),
+            this.periodTotals(previousFrom, from),
+            this.daily(from, to),
+            this.regions(from, to, technicians),
+            this.breakdowns(from, to),
+            this.workload(from, to, technicians),
+            this.inspectionFees(from, to),
+        ]);
+
+        return {
+            range: { days, from, to, timezone: TIMEZONE },
+            overview: { ...current, previous },
+            daily,
+            regions,
+            ...breakdowns,
+            workload,
+            inspectionFees,
+        };
+    }
+
     // GET /admin/reports?days=7|30|90
     async getReport(req, res) {
         try {
@@ -253,33 +284,7 @@ class AdminReportController {
             if (!ALLOWED_DAYS.includes(days)) {
                 return res.status(400).send({ message: `days must be one of ${ALLOWED_DAYS.join(', ')}`, code: 'INVALID_REPORT_RANGE' });
             }
-            const to = this.now();
-            const from = new Date(to.getTime() - days * DAY_MS);
-            const previousFrom = new Date(from.getTime() - days * DAY_MS);
-            const technicians = await this.collections.technicians.find(
-                {},
-                { projection: { name: 1, region: 1, status: 1, workStatus: 1, expertise: 1 } }
-            ).toArray();
-
-            const [current, previous, daily, regions, breakdowns, workload, inspectionFees] = await Promise.all([
-                this.periodTotals(from, to),
-                this.periodTotals(previousFrom, from),
-                this.daily(from, to),
-                this.regions(from, to, technicians),
-                this.breakdowns(from, to),
-                this.workload(from, to, technicians),
-                this.inspectionFees(from, to),
-            ]);
-
-            res.send({
-                range: { days, from, to, timezone: TIMEZONE },
-                overview: { ...current, previous },
-                daily,
-                regions,
-                ...breakdowns,
-                workload,
-                inspectionFees,
-            });
+            res.send(await this.buildReport(days));
         } catch (error) {
             res.status(500).send({ message: 'Error building the report', code: 'INTERNAL_ERROR' });
         }

@@ -49,6 +49,8 @@ const collections = {
     emailLog: db.collection("email_log"),
     turnedAwayRequests: db.collection("turned_away_requests"),
     jobApplications: db.collection("job_applications"),
+    // The last AI summary written for each Reports period (one row per period).
+    aiReportSummaries: db.collection("ai_report_summaries"),
 };
 
 let connectionPromise = null;

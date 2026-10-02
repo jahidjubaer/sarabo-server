@@ -23,6 +23,7 @@ const ServiceAvailabilityController = require('./serviceAvailabilityController')
 const JobPortalController = require('./jobPortalController');
 const InspectionFeeController = require('./inspectionFeeController');
 const AiRequestDraftController = require('./aiRequestDraftController');
+const AdminReportSummaryController = require('./adminReportSummaryController');
 const { loadEmailConfig } = require('../config/email');
 const { createEmailService } = require('../services/emailService');
 const { connectDatabase } = require('../config/database');
@@ -30,7 +31,9 @@ const { loadAiSupportConfig } = require('../config/aiSupport');
 const { createAiSupportService } = require('../services/aiSupportService');
 const { createSupportKnowledgeService } = require('../services/supportKnowledgeService');
 const { createConfiguredGeminiSupportProvider } = require('../services/aiProviders/geminiSupportProvider');
-const { loadAiRequestHelperConfig, loadAiOfferHelperConfig } = require('../config/aiRequestHelper');
+const { loadAiRequestHelperConfig, loadAiOfferHelperConfig, loadAiReportSummaryConfig } = require('../config/aiRequestHelper');
+const { createAiReportSummaryService } = require('../services/aiReportSummaryService');
+const { createConfiguredGeminiReportSummaryProvider } = require('../services/aiProviders/geminiReportSummaryProvider');
 const { createAiOfferNoteService } = require('../services/aiOfferNoteService');
 const { createConfiguredGeminiOfferNoteProvider } = require('../services/aiProviders/geminiOfferNoteProvider');
 const { createAiRequestDraftService } = require('../services/aiRequestDraftService');
@@ -77,8 +80,22 @@ function initializeControllers(models, collections, dependencies = {}) {
         config: aiOfferHelperConfig,
     });
 
+    const aiReportSummaryConfig = dependencies.aiReportSummaryConfig || loadAiReportSummaryConfig();
+    const aiReportSummaryService = dependencies.aiReportSummaryService || createAiReportSummaryService({
+        provider: Object.prototype.hasOwnProperty.call(dependencies, 'aiReportSummaryProvider')
+            ? dependencies.aiReportSummaryProvider
+            : createConfiguredGeminiReportSummaryProvider(aiReportSummaryConfig, {
+                client: dependencies.geminiClient,
+                clientFactory: dependencies.geminiClientFactory,
+            }),
+        config: aiReportSummaryConfig,
+    });
+
     // One email service for the whole app (a no-op unless EMAIL_ENABLED=true).
     const emailService = dependencies.emailService || createEmailService({ config: loadEmailConfig(), collections });
+
+    const adminReport = new AdminReportController(models, collections);
+    const adminAttention = new AdminAttentionController(models, collections);
 
     return {
         user: new UserController(models, collections),
@@ -98,13 +115,16 @@ function initializeControllers(models, collections, dependencies = {}) {
         feedback: new FeedbackController(models, collections),
         pickupSlot: new PickupSlotController(models, collections, { emailService }),
         pickupReminder: new PickupReminderController(models, collections, { emailService }),
-        adminReport: new AdminReportController(models, collections),
-        adminAttention: new AdminAttentionController(models, collections),
+        adminReport,
+        adminAttention,
+        adminReportSummary: new AdminReportSummaryController({
+            collections, reportController: adminReport, attentionController: adminAttention, aiReportSummaryService,
+        }),
         missedPickup: new MissedPickupController(models, collections),
         serviceAvailability: new ServiceAvailabilityController(models, collections),
         jobPortal: new JobPortalController(models, collections, { aiOfferNoteService }),
         inspectionFee: new InspectionFeeController(models, collections),
-        aiRequestDraft: new AiRequestDraftController({ aiRequestDraftService, aiOfferNoteService, config: aiRequestHelperConfig }),
+        aiRequestDraft: new AiRequestDraftController({ aiRequestDraftService, aiOfferNoteService, aiReportSummaryService, config: aiRequestHelperConfig }),
         support: new SupportController({
             aiSupportService,
             supportKnowledgeService,
