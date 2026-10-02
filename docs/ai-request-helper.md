@@ -1,8 +1,9 @@
 # AI request helper ("Describe your problem")
 
 On the create-request form a customer can describe the problem in their own
-words - Bangla, English or Banglish - and AI fills in the form: device, repair,
-brand, model and a clear English description. The customer checks and edits
+words - Bangla, English or Banglish - and/or add a photo of the damage, and AI
+fills in the form: device, repair, brand, model and a clear English
+description. The customer checks and edits
 everything before submitting; Undo puts back what was there.
 
 ## Endpoints
@@ -12,12 +13,25 @@ everything before submitting; Undo puts back what was there.
 | GET | `/ai/status` | anyone | `{ requestHelper: boolean }` - the form hides the helper when false |
 | POST | `/ai/request-draft` | signed-in user | `{ draft }` - see below |
 
-Body: `{ text }`, 5-1500 characters. Text with a card number, password, token
-or tracking code is refused (400) before any AI call.
+Body: `{ text, photo? }`. `text` is 5-1500 characters, or may be empty when a
+photo is sent. Text with a card number, password, token or tracking code is
+refused (400) before any AI call.
+
+`photo` is `{ mimeType, data }`: JPEG, PNG or WebP as base64, at most 1.5 MB
+decoded, and its first bytes must match the type. The form shrinks it to
+1024px JPEG first (a few hundred kB). This route alone accepts a 2.5 MB JSON
+body (`index.js`). The photo goes to Gemini inline with that one call and is
+**not stored** by this endpoint.
 
 `draft`: `productCategorySlug`, `serviceDefinitionId`, `productBrand`,
 `productModel`, `damageDescription`, `confidence` (`high|medium|low`),
-`followUpQuestion`. Any field may be null when the AI could not tell.
+`followUpQuestion`, and `photo` - `{ showsDevice, finding }` when a photo was
+sent, otherwise null. Any field may be null when the AI could not tell.
+
+The form fills nothing unless the device is known, and skips a photo that
+does not show a device. If the photo does show one, the form uploads it to the
+new request through the normal damage-photo upload as soon as the request is
+created, so the customer doesn't pick it twice.
 
 ## Safety
 

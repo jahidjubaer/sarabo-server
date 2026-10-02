@@ -6,6 +6,7 @@ const {
 } = require('../utils/repairRequestV2');
 
 const FOLLOW_UP_MAX_LENGTH = 200;
+const PHOTO_FINDING_MAX_LENGTH = 300;
 const CONFIDENCE_LEVELS = Object.freeze(['high', 'medium', 'low']);
 
 class RequestDraftError extends Error {
@@ -52,7 +53,7 @@ function cleanOptionalText(value, maxLength) {
 // Never trust the model's ids: a service must be in the catalogue sent, and
 // its device category wins over whatever category the model named. Anything
 // out of bounds becomes null, so the customer simply fills that field in.
-function validateDraft(raw, catalogue) {
+function validateDraft(raw, catalogue, { withPhoto = false } = {}) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw unusable();
 
     const service = typeof raw.serviceId === 'string'
@@ -81,13 +82,19 @@ function validateDraft(raw, catalogue) {
         damageDescription,
         confidence: CONFIDENCE_LEVELS.includes(raw.confidence) && service && serviceMatchesCategory ? raw.confidence : 'low',
         followUpQuestion: cleanOptionalText(raw.followUpQuestion, FOLLOW_UP_MAX_LENGTH),
+        // What the AI saw in the photo; null when no photo was sent. A photo
+        // it could not read counts as "doesn't show a device".
+        photo: withPhoto ? {
+            showsDevice: Boolean(raw.photo && raw.photo.showsDevice === true),
+            finding: raw.photo && raw.photo.showsDevice === true ? cleanOptionalText(raw.photo.finding, PHOTO_FINDING_MAX_LENGTH) : null,
+        } : null,
     };
 }
 
 function createAiRequestDraftService({ provider = null, config, serviceDefinitionModel }) {
     const isAvailable = () => Boolean(config && config.enabled && provider && typeof provider.generateDraft === 'function');
 
-    async function draftRequest({ text, requestId }) {
+    async function draftRequest({ text, photo = null, requestId }) {
         if (!isAvailable()) throw unavailable();
         const catalogue = buildCatalogue(await serviceDefinitionModel.findMany({ isActive: true }));
         if (catalogue.services.length === 0) throw unavailable();
@@ -104,7 +111,7 @@ function createAiRequestDraftService({ provider = null, config, serviceDefinitio
         let raw;
         try {
             raw = await Promise.race([
-                Promise.resolve().then(() => provider.generateDraft({ text, catalogue, signal: abortController.signal, requestId })),
+                Promise.resolve().then(() => provider.generateDraft({ text, photo, catalogue, signal: abortController.signal, requestId })),
                 timeout,
             ]);
         } catch (error) {
@@ -115,7 +122,7 @@ function createAiRequestDraftService({ provider = null, config, serviceDefinitio
         } finally {
             clearTimeout(timeoutId);
         }
-        return validateDraft(raw, catalogue);
+        return validateDraft(raw, catalogue, { withPhoto: Boolean(photo) });
     }
 
     return { isAvailable, draftRequest };

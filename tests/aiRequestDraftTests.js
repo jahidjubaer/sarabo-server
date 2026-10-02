@@ -117,6 +117,51 @@ async function runAiRequestDraftTests({ logTest }) {
     makeController(null).status({}, offRes);
     logTest('AI helper: /ai/status says whether the helper can work', res.body.requestHelper === true && offRes.body.requestHelper === false);
 
+    // ---- Photo -------------------------------------------------------------
+    const jpeg = Buffer.concat([Buffer.from([0xFF, 0xD8, 0xFF, 0xE0]), Buffer.alloc(40, 7)]).toString('base64');
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), Buffer.alloc(40, 7)]).toString('base64');
+    const photoAnswer = answer({ photo: { showsDevice: true, finding: 'A cracked screen in the top left corner.' } });
+    seen = null;
+    res = fakeRes();
+    await makeController(providerReturning(photoAnswer, (input) => { seen = input; })).draft({ body: { photo: { mimeType: 'image/jpeg', data: jpeg } } }, res);
+    logTest('AI photo: a photo alone is enough, and it reaches the AI with its type',
+        res.statusCode === 200 && seen.photo.mimeType === 'image/jpeg' && seen.photo.data === jpeg && seen.text === ''
+        && res.body.draft.photo.showsDevice === true && res.body.draft.photo.finding.startsWith('A cracked'));
+
+    res = fakeRes();
+    await makeController(providerReturning(answer({ photo: { showsDevice: false, finding: 'A cat.' } }))).draft({ body: { text: 'phone broken', photo: { mimeType: 'image/png', data: png } } }, res);
+    logTest('AI photo: a photo that shows no device is reported, without a finding',
+        res.statusCode === 200 && res.body.draft.photo.showsDevice === false && res.body.draft.photo.finding === null);
+
+    res = fakeRes();
+    await makeController(providerReturning(answer())).draft({ body: { text: 'phone broken', photo: { mimeType: 'image/png', data: png } } }, res);
+    logTest('AI photo: an AI answer without the photo part counts as "no device"', res.body.draft.photo.showsDevice === false);
+
+    res = fakeRes();
+    await makeController(providerReturning(answer())).draft({ body: { text: 'phone screen broken' } }, res);
+    logTest('AI photo: without a photo the draft has photo: null', res.statusCode === 200 && res.body.draft.photo === null);
+
+    const refusedPhotos = [
+        ['wrong type', { mimeType: 'image/gif', data: jpeg }],
+        ['type does not match the bytes', { mimeType: 'image/png', data: jpeg }],
+        ['not base64', { mimeType: 'image/jpeg', data: 'not base64!' }],
+        ['empty', { mimeType: 'image/jpeg', data: '' }],
+        ['not an object', 'abc'],
+        ['too large', { mimeType: 'image/jpeg', data: Buffer.concat([Buffer.from([0xFF, 0xD8, 0xFF]), Buffer.alloc(AiRequestDraftController.PHOTO_MAX_BYTES)]).toString('base64') }],
+    ];
+    for (const [label, photo] of refusedPhotos) {
+        called = false;
+        res = fakeRes();
+        await makeController(spy).draft({ body: { text: 'phone screen broken', photo } }, res);
+        logTest(`AI photo: refused before any AI call - ${label}`, res.statusCode === 400 && res.body.code === 'AI_HELPER_VALIDATION_ERROR' && !called);
+    }
+
+    const photoContents = buildContents({ text: '', photo: { mimeType: 'image/jpeg', data: jpeg } })[0].parts;
+    logTest('AI photo provider: the photo goes inline after the text, and the answer schema asks about it',
+        photoContents.length === 3 && photoContents[2].inlineData.mimeType === 'image/jpeg'
+        && buildResponseSchema(catalogue, { withPhoto: true }).required.includes('photo')
+        && !buildResponseSchema(catalogue).required.includes('photo'));
+
     // ---- Config, provider shape, limiter wording ---------------------------
     const off = loadAiRequestHelperConfig({ AI_REQUEST_HELPER_ENABLED: 'true' });
     const on = loadAiRequestHelperConfig({ AI_REQUEST_HELPER_ENABLED: 'true', GEMINI_API_KEY: 'test-key' });

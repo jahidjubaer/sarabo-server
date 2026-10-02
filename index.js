@@ -66,6 +66,10 @@ const controllers = initializeControllers(models, collections);
 registerPaymentWebhookRoute(app, controllers);
 
 // Middleware
+// The AI request helper may carry one small photo (base64), so it gets a
+// bigger body limit than the 100 kB default; express.json() below then skips
+// the already-parsed body.
+app.use('/ai/request-draft', express.json({ limit: '2.5mb' }));
 app.use(express.json());
 app.use(cors(corsOptions));
 // Turns a rejected-origin CORS error into a controlled response instead of
