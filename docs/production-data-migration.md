@@ -168,11 +168,17 @@ ALLOW_PROD_BDT_MIGRATION=true node scripts/migrate-service-definitions-to-bdt.js
 
 Decide from the dry runs (steps 4 and 6), after step 3:
 
+The seed holds 45 services: the 16 standard ones the BDT migration knows, plus
+29 more repairs per device (`data/serviceDefinitionSeedExtra.js`). It only ever
+inserts missing rows; a row an admin has changed is reported as `CONFLICT` and
+kept.
+
 | `service_definitions` state | Seed dry run says | BDT dry run says | Action |
 |---|---|---|---|
-| empty (expected for production) | 16 `WOULD CREATE` | NOT OK, 16 `MISSING` (needs the seed) | run step 5 only |
-| 16 standard BDT rows | 16 `IDENTICAL` | 16 `UNCHANGED` | nothing |
-| 16 original USD rows | 16 `CONFLICT` | OK, 16 `WOULD MODIFY` | run step 7 only |
+| empty (expected for production) | 45 `WOULD CREATE` | NOT OK, 16 `MISSING` (needs the seed) | run step 5 only |
+| 16 standard BDT rows | 16 `IDENTICAL`, 29 `WOULD CREATE` | 16 `UNCHANGED` | run step 5 only |
+| all 45 standard BDT rows | 45 `IDENTICAL` | 16 `UNCHANGED` | nothing |
+| 16 original USD rows | 16 `CONFLICT`, 29 `WOULD CREATE` | OK, 16 `WOULD MODIFY` | run step 7, then step 5 |
 | any `CUSTOM`, `DUPLICATE`, or partial set | conflicts | NOT OK | stop - manual review |
 
 ### 8. Post-migration verification
@@ -183,7 +189,7 @@ Rerun the three dry runs - each must now report nothing to do:
 ALLOW_PROD_SCHEMA_MIGRATION=true node scripts/migrate-legacy-schema.js --expect-db=sarabo_production
 #   -> "Dry run: nothing to migrate - every document is already in place."
 ALLOW_PROD_SERVICE_SEED=true node scripts/seed-service-definitions.js --expect-db=sarabo_production
-#   -> "Created:             0 (would create)" and "Skipped (identical): 16"
+#   -> "Created:             0 (would create)" and "Skipped (identical): 45"
 ALLOW_PROD_BDT_MIGRATION=true node scripts/migrate-service-definitions-to-bdt.js --expect-db=sarabo_production
 #   -> "Unchanged:           16" and "Dry run only - no documents were written."
 ```

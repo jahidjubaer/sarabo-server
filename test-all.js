@@ -52,6 +52,7 @@ const { runEmailTests } = require('./tests/emailTests');
 const { runSeedDevPeopleTests } = require('./tests/seedDevPeopleTests');
 const { runSeedDevJobsTests } = require('./tests/seedDevJobsTests');
 const { runPaymentReceiptTests } = require('./tests/paymentReceiptTests');
+const { runServiceCatalogTests } = require('./tests/serviceCatalogTests');
 const { runAdminReportTests } = require('./tests/adminReportTests');
 const { runAdminAttentionTests } = require('./tests/adminAttentionTests');
 const { runMissedPickupTests } = require('./tests/missedPickupTests');
@@ -13572,6 +13573,7 @@ async function runAllTests() {
     await runSeedDevPeopleTests({ logTest });
     await runSeedDevJobsTests({ logTest });
     await runPaymentReceiptTests({ logTest });
+    await runServiceCatalogTests({ logTest });
     await runAdminReportTests({ logTest });
     await runAdminAttentionTests({ logTest });
     await runMissedPickupTests({ logTest });

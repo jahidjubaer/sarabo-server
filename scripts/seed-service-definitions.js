@@ -139,7 +139,8 @@ if (require.main === module) {
     }
 
     const { collections, client } = require('../config/database');
-    const { SERVICE_DEFINITION_SEED } = require('../data/serviceDefinitionSeed');
+    // The canonical 16 plus the extra repairs per device (data/serviceDefinitionSeedExtra.js).
+    const { ALL_SERVICE_DEFINITION_SEED } = require('../data/serviceDefinitionSeedExtra');
 
     const confirmSeed = args.includes('--confirm-seed');
     const explicitDryRun = args.includes('--dry-run');
@@ -153,7 +154,7 @@ if (require.main === module) {
         // server's indexes on first use, and a dry run must write nothing.
         await client.connect();
         const model = new ServiceDefinitionModel(collections.serviceDefinitions);
-        const result = await runSeed({ model, seedRows: SERVICE_DEFINITION_SEED, dryRun: isDryRun });
+        const result = await runSeed({ model, seedRows: ALL_SERVICE_DEFINITION_SEED, dryRun: isDryRun });
 
         for (const detail of result.details) {
             if (detail.action === 'would-create') console.log(`+ WOULD CREATE  ${detail.key}`);
