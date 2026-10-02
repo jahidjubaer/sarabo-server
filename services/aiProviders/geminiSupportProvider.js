@@ -3,7 +3,7 @@ const { logSafeSupportProviderEvent } = require('../../utils/safeLogger');
 const { ESCALATION_REASON_CODES } = require('../aiSupportService');
 
 const GEMINI_PROVIDER_ID = 'gemini';
-const GEMINI_SUPPORT_MODEL = 'gemini-3.8-flash';
+const GEMINI_SUPPORT_MODEL = 'gemini-3.1-flash-lite';
 const SUPPORT_ACTION_IDS = Object.freeze(Object.keys(SUPPORT_ACTIONS));
 const DEFAULT_MAX_ATTEMPTS = 2;
 const DEFAULT_RETRY_BASE_DELAY_MS = 600;

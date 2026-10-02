@@ -168,7 +168,7 @@ async function runGeminiSupportProviderTests({ logTest }) {
         && loadAiSupportConfig({ VITE_GEMINI_API_KEY: 'browser-key' }).apiKey === null
         && loadAiSupportConfig({}).provider === 'gemini'
         && loadAiSupportConfig({}).model === GEMINI_SUPPORT_MODEL
-        && loadAiSupportConfig({}).timeoutMs === 22000
+        && loadAiSupportConfig({}).timeoutMs === 12000
         && loadAiSupportConfig({}).providerMaxAttempts === DEFAULT_MAX_ATTEMPTS
         && loadAiSupportConfig({}).providerRetryBaseDelayMs === DEFAULT_RETRY_BASE_DELAY_MS
         && loadAiSupportConfig({}).providerRetryMaxDelayMs === DEFAULT_RETRY_MAX_DELAY_MS);

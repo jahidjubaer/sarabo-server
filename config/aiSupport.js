@@ -1,9 +1,9 @@
 const DEFAULTS = Object.freeze({
     enabled: false,
     provider: 'gemini',
-    model: 'gemini-3.8-flash',
+    model: 'gemini-3.1-flash-lite',
     apiKey: null,
-    timeoutMs: 22000,
+    timeoutMs: 12000,
     providerMaxAttempts: 2,
     providerRetryBaseDelayMs: 600,
     providerRetryMaxDelayMs: 1000,
