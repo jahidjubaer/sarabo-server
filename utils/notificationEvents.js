@@ -105,10 +105,14 @@ const NOTIFICATION_EVENTS = {
         entityType: 'technician_withdrawal',
         recipientRole: 'rider',
         priority: 'normal',
-        allowedMetadataKeys: ['amount', 'currency'],
+        allowedMetadataKeys: ['amount', 'currency', 'bkashNumber', 'bkashTrxId'],
         requiresMetadata: [],
         title: () => 'Withdrawal paid',
-        message: () => 'Your withdrawal request has been marked as paid.',
+        message: ({ metadata }) => {
+            if (!metadata.bkashTrxId) return 'Your withdrawal request has been marked as paid.';
+            const to = metadata.bkashNumber ? `your bKash ${metadata.bkashNumber}` : 'your bKash';
+            return `Sent to ${to}. bKash TrxID ${metadata.bkashTrxId}.`;
+        },
         actionUrl: () => '/dashboard/wallet',
         deduplicationKey: ({ entityId }) => `withdrawal:${entityId}:paid`,
     },

@@ -36,6 +36,11 @@ class TechnicianWithdrawalModel {
         return await this.collection.findOne({ technicianEmail: email, status: WITHDRAWAL_REQUESTED }, findOptions);
     }
 
+    // Another withdrawal already recorded with this bKash TrxID, if any.
+    async findByPayoutReference(payoutReference) {
+        return await this.collection.findOne({ payoutReference }, { projection: { _id: 1 } });
+    }
+
     async findById(id) {
         if (!ObjectId.isValid(id)) return null;
         return await this.collection.findOne({ _id: new ObjectId(id) });
@@ -72,13 +77,13 @@ class TechnicianWithdrawalModel {
     // mark-paid (or a mark-paid racing a reject) matches zero documents and is
     // reported as a conflict rather than overwriting processedAt/processedBy.
     // This is what makes double-payment impossible, not the read above it.
-    async processFromRequested({ id, status, processedBy, processedAt, note }) {
+    async processFromRequested({ id, status, processedBy, processedAt, note, payoutReference = null }) {
         if (status !== WITHDRAWAL_PAID && status !== WITHDRAWAL_REJECTED) {
             throw Object.assign(new Error(`invalid terminal withdrawal status: ${status}`), { code: 'INVALID_WITHDRAWAL_STATUS' });
         }
         return await this.collection.updateOne(
             { _id: new ObjectId(id), status: WITHDRAWAL_REQUESTED },
-            { $set: { status, processedBy, processedAt, note } }
+            { $set: { status, processedBy, processedAt, note, payoutReference } }
         );
     }
 }

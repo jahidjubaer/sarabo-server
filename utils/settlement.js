@@ -63,6 +63,61 @@ const WITHDRAWAL_STATUSES = Object.freeze([WITHDRAWAL_REQUESTED, WITHDRAWAL_PAID
 
 const WITHDRAWAL_NOTE_MAX = 500;
 
+// Payouts are made by hand with bKash "Send Money" to the technician's personal
+// bKash number - free, no merchant account. The technician gives the number
+// with each request; the admin records the bKash transaction id (TrxID) when
+// marking it paid.
+const PAYOUT_METHOD_BKASH = 'bkash';
+const BKASH_ACCOUNT_NAME_MAX = 60;
+// bKash TrxIDs are short upper-case letters and digits (usually 10). A little
+// leeway either side so an unusual id is never refused.
+const BKASH_TRX_ID_PATTERN = /^[A-Z0-9]{8,12}$/;
+
+// Accepts 01XXXXXXXXX, +8801XXXXXXXXX or 8801XXXXXXXXX, with spaces or dashes,
+// and returns the local 11-digit form - or null if it is not a Bangladeshi
+// mobile number.
+function normalizeBkashNumber(raw) {
+    if (typeof raw !== 'string') return null;
+    let digits = raw.replace(/[\s-]/g, '');
+    if (digits.startsWith('+880')) digits = `0${digits.slice(4)}`;
+    else if (digits.startsWith('880')) digits = `0${digits.slice(3)}`;
+    return /^01[3-9]\d{8}$/.test(digits) ? digits : null;
+}
+
+function validatePayoutDetails(body) {
+    if (body.payoutMethod !== undefined && body.payoutMethod !== PAYOUT_METHOD_BKASH) {
+        return { valid: false, code: 'INVALID_PAYOUT_METHOD', message: 'withdrawals are paid by bKash only' };
+    }
+    const accountNumber = normalizeBkashNumber(body.bkashNumber);
+    if (!accountNumber) {
+        return { valid: false, code: 'INVALID_BKASH_NUMBER', message: 'enter a valid bKash number, like 01XXXXXXXXX' };
+    }
+    const rawName = body.bkashAccountName;
+    if (rawName !== undefined && rawName !== null && (typeof rawName !== 'string' || rawName.trim().length > BKASH_ACCOUNT_NAME_MAX)) {
+        return { valid: false, code: 'INVALID_BKASH_ACCOUNT_NAME', message: `account name must be at most ${BKASH_ACCOUNT_NAME_MAX} characters` };
+    }
+    const accountName = typeof rawName === 'string' && rawName.trim() ? rawName.trim() : null;
+    return { valid: true, payout: { method: PAYOUT_METHOD_BKASH, accountNumber, accountName } };
+}
+
+// The TrxID an admin types when marking a bKash withdrawal paid. Required for
+// bKash withdrawals so every payout can be matched to the bKash statement;
+// optional for old withdrawals made before payout details existed.
+function validatePayoutReference(body, withdrawal) {
+    const raw = body && typeof body === 'object' ? body.bkashTrxId : undefined;
+    const required = withdrawal?.payout?.method === PAYOUT_METHOD_BKASH;
+    if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) {
+        return required
+            ? { valid: false, code: 'BKASH_TRX_ID_REQUIRED', message: 'enter the bKash transaction id (TrxID) of the payment you sent' }
+            : { valid: true, normalized: { payoutReference: null } };
+    }
+    const trxId = typeof raw === 'string' ? raw.trim().toUpperCase() : '';
+    if (!BKASH_TRX_ID_PATTERN.test(trxId)) {
+        return { valid: false, code: 'INVALID_BKASH_TRX_ID', message: 'a bKash TrxID is 8-12 letters and digits, like 9A7B6C5D4E' };
+    }
+    return { valid: true, normalized: { payoutReference: trxId } };
+}
+
 function isWholeTaka(value) {
     return typeof value === 'number' && Number.isInteger(value) && value >= 0;
 }
@@ -255,7 +310,7 @@ function validateWithdrawalRequest(body, { availableBalance, hasOpenWithdrawal }
     // Rejected loudly rather than stripped, the same stance utils/quote.js
     // takes on server-owned fields: a client trying to set its own receivable
     // or commission is an obvious error, never a silent no-op.
-    for (const forbidden of ['technicianEmail', 'technicianId', 'status', 'commissionRate', 'technicianReceivable', 'processedAt', 'processedBy']) {
+    for (const forbidden of ['technicianEmail', 'technicianId', 'status', 'commissionRate', 'technicianReceivable', 'processedAt', 'processedBy', 'payout', 'payoutReference']) {
         if (Object.prototype.hasOwnProperty.call(body, forbidden)) {
             return { valid: false, code: 'INVALID_WITHDRAWAL', message: `client-supplied field "${forbidden}" is not allowed on a withdrawal request` };
         }
@@ -266,22 +321,26 @@ function validateWithdrawalRequest(body, { availableBalance, hasOpenWithdrawal }
     if (body.amount <= 0) {
         return { valid: false, code: 'INVALID_WITHDRAWAL_AMOUNT', message: 'amount must be greater than zero' };
     }
+    const payout = validatePayoutDetails(body);
+    if (!payout.valid) return payout;
     if (hasOpenWithdrawal) {
         return { valid: false, code: 'WITHDRAWAL_ALREADY_OPEN', message: 'you already have a withdrawal request awaiting processing' };
     }
     if (body.amount > availableBalance) {
         return { valid: false, code: 'WITHDRAWAL_EXCEEDS_AVAILABLE', message: 'amount is greater than your available balance' };
     }
-    return { valid: true, normalized: { amount: body.amount } };
+    return { valid: true, normalized: { amount: body.amount, payout: payout.payout } };
 }
 
-function buildWithdrawalDocument({ technicianId, technicianEmail, amount, now }) {
+function buildWithdrawalDocument({ technicianId, technicianEmail, amount, payout = null, now }) {
     return {
         technicianId,
         technicianEmail,
         amount,
         currency: SETTLEMENT_CURRENCY,
         status: WITHDRAWAL_REQUESTED,
+        payout,
+        payoutReference: null,
         requestedAt: now,
         processedAt: null,
         processedBy: null,
@@ -338,6 +397,10 @@ function buildWithdrawalView(withdrawal) {
         requestedAt: withdrawal.requestedAt ?? null,
         processedAt: withdrawal.processedAt ?? null,
         note: withdrawal.note ?? null,
+        payout: withdrawal.payout
+            ? { method: withdrawal.payout.method, accountNumber: withdrawal.payout.accountNumber, accountName: withdrawal.payout.accountName ?? null }
+            : null,
+        payoutReference: withdrawal.payoutReference ?? null,
     };
 }
 
@@ -356,6 +419,9 @@ module.exports = {
     WITHDRAWAL_REJECTED,
     WITHDRAWAL_STATUSES,
     WITHDRAWAL_NOTE_MAX,
+    PAYOUT_METHOD_BKASH,
+    normalizeBkashNumber,
+    validatePayoutReference,
     calculateSettlement,
     buildSettlementDocument,
     isLegacyAlreadyPaid,

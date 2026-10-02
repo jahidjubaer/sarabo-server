@@ -58,6 +58,7 @@ const { runPaymentReceiptTests } = require('./tests/paymentReceiptTests');
 const { runServiceCatalogTests } = require('./tests/serviceCatalogTests');
 const { runLateMatchAnnouncementTests } = require('./tests/lateMatchAnnouncementTests');
 const { runCustomerMoneyViewTests } = require('./tests/customerMoneyViewTests');
+const { runBkashWithdrawalTests } = require('./tests/bkashWithdrawalTests');
 const { runAdminReportTests } = require('./tests/adminReportTests');
 const { runAdminAttentionTests } = require('./tests/adminAttentionTests');
 const { runMissedPickupTests } = require('./tests/missedPickupTests');
@@ -13584,6 +13585,7 @@ async function runAllTests() {
     await runServiceCatalogTests({ logTest });
     await runLateMatchAnnouncementTests({ logTest });
     await runCustomerMoneyViewTests({ logTest });
+    await runBkashWithdrawalTests({ logTest });
     await runAdminReportTests({ logTest });
     await runAdminAttentionTests({ logTest });
     await runMissedPickupTests({ logTest });
@@ -14820,6 +14822,8 @@ async function testTechnicianFinancialSystem() {
         WITHDRAWAL_REQUESTED, WITHDRAWAL_PAID, WITHDRAWAL_REJECTED,
         calculateSettlement, calculateWallet, validateWithdrawalRequest, isLegacyAlreadyPaid,
     } = settlementModule;
+    // Every withdrawal request now carries the technician's bKash number.
+    const BKASH = '01712345678';
 
     const quote = (partsAmount, laborAmount, additionalCharges = 0) => ({
         partsAmount, laborAmount, additionalCharges,
@@ -14911,11 +14915,11 @@ async function testTechnicianFinancialSystem() {
     // --- 7. cannot withdraw above available -------------------------------
     {
         const w = calculateWallet({ repairRequests: [settled(5400, SETTLEMENT_AVAILABLE)], withdrawals: [] });
-        const over = validateWithdrawalRequest({ amount: 5401 }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
-        const exact = validateWithdrawalRequest({ amount: 5400 }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
-        const zero = validateWithdrawalRequest({ amount: 0 }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
-        const negative = validateWithdrawalRequest({ amount: -100 }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
-        const fractional = validateWithdrawalRequest({ amount: 100.5 }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
+        const over = validateWithdrawalRequest({ amount: 5401, bkashNumber: BKASH }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
+        const exact = validateWithdrawalRequest({ amount: 5400, bkashNumber: BKASH }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
+        const zero = validateWithdrawalRequest({ amount: 0, bkashNumber: BKASH }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
+        const negative = validateWithdrawalRequest({ amount: -100, bkashNumber: BKASH }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
+        const fractional = validateWithdrawalRequest({ amount: 100.5, bkashNumber: BKASH }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
         logTest('Phase 9: withdrawal above availableBalance is refused, exactly-available is allowed',
             over.valid === false && over.code === 'WITHDRAWAL_EXCEEDS_AVAILABLE' && exact.valid === true,
             '5401 -> ' + over.code + ', 5400 -> ' + (exact.valid ? 'allowed' : 'refused'));
@@ -14930,7 +14934,7 @@ async function testTechnicianFinancialSystem() {
             repairRequests: [settled(5400, SETTLEMENT_PENDING), settled(900, SETTLEMENT_AVAILABLE)],
             withdrawals: [],
         });
-        const reachPending = validateWithdrawalRequest({ amount: 1000 }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
+        const reachPending = validateWithdrawalRequest({ amount: 1000, bkashNumber: BKASH }, { availableBalance: w.availableBalance, hasOpenWithdrawal: false });
         logTest('Phase 9: pending (unconfirmed) money is unreachable - only the confirmed 900 can be withdrawn',
             w.pendingBalance === 5400 && w.availableBalance === 900 && reachPending.valid === false,
             'pending=' + w.pendingBalance + ' available=' + w.availableBalance + ' request(1000) -> ' + reachPending.code);
@@ -14938,7 +14942,7 @@ async function testTechnicianFinancialSystem() {
 
     // --- 9. only one open withdrawal --------------------------------------
     {
-        const second = validateWithdrawalRequest({ amount: 100 }, { availableBalance: 5000, hasOpenWithdrawal: true });
+        const second = validateWithdrawalRequest({ amount: 100, bkashNumber: BKASH }, { availableBalance: 5000, hasOpenWithdrawal: true });
         logTest('Phase 9: a second withdrawal is refused while one is still open',
             second.valid === false && second.code === 'WITHDRAWAL_ALREADY_OPEN', 'code=' + second.code);
     }
@@ -14959,7 +14963,7 @@ async function testTechnicianFinancialSystem() {
         const repairRequests = [settled(5400, SETTLEMENT_AVAILABLE)];
         const paidOnce = calculateWallet({ repairRequests, withdrawals: [{ amount: 5400, status: WITHDRAWAL_PAID }] });
         const paidTwice = calculateWallet({ repairRequests, withdrawals: [{ amount: 5400, status: WITHDRAWAL_PAID }, { amount: 5400, status: WITHDRAWAL_PAID }] });
-        const afterPayout = validateWithdrawalRequest({ amount: 1 }, { availableBalance: paidOnce.availableBalance, hasOpenWithdrawal: false });
+        const afterPayout = validateWithdrawalRequest({ amount: 1, bkashNumber: BKASH }, { availableBalance: paidOnce.availableBalance, hasOpenWithdrawal: false });
         logTest('Phase 9: a paid withdrawal leaves nothing withdrawable, and double-counting cannot drive the balance negative',
             paidOnce.withdrawnBalance === 5400 && paidOnce.availableBalance === 0
             && paidTwice.availableBalance === 0 && afterPayout.valid === false,
@@ -15021,7 +15025,7 @@ async function testTechnicianFinancialSystem() {
     {
         const fields = ['technicianEmail', 'technicianId', 'status', 'commissionRate', 'technicianReceivable', 'processedBy'];
         const attempts = fields.map((field) => validateWithdrawalRequest(
-            { amount: 100, [field]: 'x' },
+            { amount: 100, bkashNumber: BKASH, [field]: 'x' },
             { availableBalance: 5000, hasOpenWithdrawal: false }
         ));
         logTest('Phase 9: a client cannot supply identity, status, commissionRate or receivable on a withdrawal',

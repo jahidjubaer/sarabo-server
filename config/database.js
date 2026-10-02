@@ -266,6 +266,17 @@ async function connectDatabase() {
                     { technicianEmail: 1, requestedAt: -1 },
                     { name: 'technicianWithdrawals_technicianEmail_requestedAt' }
                 );
+                // One bKash TrxID can settle only one withdrawal, so the same
+                // payment is never recorded twice. Partial: older rows have no
+                // reference.
+                await collections.technicianWithdrawals.createIndex(
+                    { payoutReference: 1 },
+                    {
+                        unique: true,
+                        partialFilterExpression: { payoutReference: { $type: 'string' } },
+                        name: 'technicianWithdrawals_payoutReference_unique',
+                    }
+                );
                 // Admin queue - "all withdrawals in this status, newest first".
                 await collections.technicianWithdrawals.createIndex(
                     { status: 1, requestedAt: -1 },

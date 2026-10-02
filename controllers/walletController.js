@@ -5,7 +5,7 @@ const {
     PLATFORM_COMMISSION_RATE, SETTLEMENT_CURRENCY,
     WITHDRAWAL_REQUESTED, WITHDRAWAL_PAID, WITHDRAWAL_REJECTED, WITHDRAWAL_STATUSES,
     calculateWallet, validateWithdrawalRequest, buildWithdrawalDocument,
-    validateProcessingNote, buildSettlementView, buildWithdrawalView,
+    validateProcessingNote, validatePayoutReference, buildSettlementView, buildWithdrawalView,
 } = require('../utils/settlement');
 const { inspectionFeeSettlementView } = require('../utils/inspectionFee');
 
@@ -17,10 +17,10 @@ const ADMIN_LIST_MAX_LIMIT = 50;
 // Technician wallet + withdrawal accounting, and the admin queue that processes
 // withdrawals (Phase 9).
 //
-// THIS IS MANUAL PAYOUT ACCOUNTING. Nothing here moves real money. "Mark paid"
-// records that an admin has settled a withdrawal out of band; there is no
-// bKash, Nagad, bank or Stripe Connect integration behind any of it, and no
-// transfer id is invented to imply otherwise.
+// THIS IS MANUAL PAYOUT ACCOUNTING. Nothing here moves real money. The
+// technician gives a personal bKash number with each request; an admin sends
+// the money by hand with bKash "Send Money" and then marks it paid here with the
+// bKash TrxID they got back. There is no bKash API behind any of it.
 //
 // EVERY NUMBER IS SERVER-DERIVED. Balances, commission, and receivables are
 // computed here from persisted settlement snapshots and withdrawal rows on
@@ -80,6 +80,8 @@ class WalletController {
                 .slice(0, WALLET_SETTLEMENT_LIMIT);
 
             const openWithdrawal = withdrawals.find((w) => w.status === WITHDRAWAL_REQUESTED) || null;
+            // Pre-fills the next request with the bKash number used last time.
+            const lastWithPayout = withdrawals.find((w) => w.payout && w.payout.accountNumber) || null;
 
             return res.send({
                 ...wallet,
@@ -89,6 +91,7 @@ class WalletController {
                 currency: SETTLEMENT_CURRENCY,
                 hasOpenWithdrawal: !!openWithdrawal,
                 openWithdrawal: buildWithdrawalView(openWithdrawal),
+                lastPayout: lastWithPayout ? buildWithdrawalView(lastWithPayout).payout : null,
                 settlements,
                 withdrawals: withdrawals.slice(0, WALLET_WITHDRAWAL_LIMIT).map(buildWithdrawalView),
             });
@@ -131,6 +134,7 @@ class WalletController {
                 technicianId: technicianRecord ? technicianRecord._id.toString() : null,
                 technicianEmail,
                 amount: validation.normalized.amount,
+                payout: validation.normalized.payout,
                 now: new Date(),
             });
 
@@ -245,15 +249,38 @@ class WalletController {
                 });
             }
 
+            let payoutReference = null;
+            if (targetStatus === WITHDRAWAL_PAID) {
+                const reference = validatePayoutReference(req.body, withdrawal);
+                if (!reference.valid) {
+                    return res.status(400).send({ message: reference.message, code: reference.code });
+                }
+                payoutReference = reference.normalized.payoutReference;
+                if (payoutReference && await this.TechnicianWithdrawal.findByPayoutReference(payoutReference)) {
+                    return res.status(409).send({ message: 'this bKash TrxID is already recorded on another withdrawal', code: 'BKASH_TRX_ID_ALREADY_USED' });
+                }
+            }
+
             const now = new Date();
             const adminEmail = normalize(req.decoded_email);
-            const updateResult = await this.TechnicianWithdrawal.processFromRequested({
-                id,
-                status: targetStatus,
-                processedBy: adminEmail,
-                processedAt: now,
-                note: noteValidation.normalized.note,
-            });
+            let updateResult;
+            try {
+                updateResult = await this.TechnicianWithdrawal.processFromRequested({
+                    id,
+                    status: targetStatus,
+                    processedBy: adminEmail,
+                    processedAt: now,
+                    note: noteValidation.normalized.note,
+                    payoutReference,
+                });
+            } catch (error) {
+                // Two admins recording the same TrxID at once - the unique index
+                // lets only one through.
+                if (error.code === 11000) {
+                    return res.status(409).send({ message: 'this bKash TrxID is already recorded on another withdrawal', code: 'BKASH_TRX_ID_ALREADY_USED' });
+                }
+                throw error;
+            }
 
             if (updateResult.matchedCount === 0) {
                 const latest = await this.TechnicianWithdrawal.findById(id);
@@ -274,7 +301,14 @@ class WalletController {
                     type: targetStatus === WITHDRAWAL_PAID ? 'withdrawal_paid' : 'withdrawal_rejected',
                     entityType: 'technician_withdrawal',
                     entityId: id,
-                    metadata: { amount: withdrawal.amount, currency: withdrawal.currency || SETTLEMENT_CURRENCY },
+                    // Notification metadata values must be strings - a numeric
+                    // amount made every withdrawal notification fail.
+                    metadata: {
+                        amount: String(withdrawal.amount),
+                        currency: withdrawal.currency || SETTLEMENT_CURRENCY,
+                        ...(payoutReference ? { bkashTrxId: payoutReference } : {}),
+                        ...(payoutReference && withdrawal.payout?.accountNumber ? { bkashNumber: withdrawal.payout.accountNumber } : {}),
+                    },
                     actorEmail: adminEmail,
                 });
             } catch (notifyError) {
@@ -284,7 +318,7 @@ class WalletController {
             return res.status(200).send({
                 message: targetStatus === WITHDRAWAL_PAID ? 'withdrawal marked as paid' : 'withdrawal rejected',
                 withdrawal: buildWithdrawalView({
-                    ...withdrawal, status: targetStatus, processedAt: now, note: noteValidation.normalized.note,
+                    ...withdrawal, status: targetStatus, processedAt: now, note: noteValidation.normalized.note, payoutReference,
                 }),
             });
         } catch (error) {
