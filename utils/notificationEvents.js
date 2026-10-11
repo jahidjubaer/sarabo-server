@@ -101,9 +101,12 @@ const NOTIFICATION_EVENTS = {
     // by controllers/walletController.js but had no definition here, so every
     // call threw 'Unknown notification type' into that controller's non-fatal
     // catch - technicians silently never heard that they had been paid.
+    // A removed technician's final payout is settled through these same two
+    // events, but by then their role is 'user' and they have no wallet page -
+    // so 'user' is allowed and points at notifications instead.
     withdrawal_paid: {
         entityType: 'technician_withdrawal',
-        recipientRole: 'rider',
+        recipientRoles: ['rider', 'user'],
         priority: 'normal',
         allowedMetadataKeys: ['amount', 'currency', 'bkashNumber', 'bkashTrxId'],
         requiresMetadata: [],
@@ -113,19 +116,36 @@ const NOTIFICATION_EVENTS = {
             const to = metadata.bkashNumber ? `your bKash ${metadata.bkashNumber}` : 'your bKash';
             return `Sent to ${to}. bKash TrxID ${metadata.bkashTrxId}.`;
         },
-        actionUrl: () => '/dashboard/wallet',
+        actionUrl: ({ recipientRole }) => (recipientRole === 'rider' ? '/dashboard/wallet' : '/dashboard/notifications'),
         deduplicationKey: ({ entityId }) => `withdrawal:${entityId}:paid`,
     },
     withdrawal_rejected: {
         entityType: 'technician_withdrawal',
-        recipientRole: 'rider',
+        recipientRoles: ['rider', 'user'],
         priority: 'normal',
         allowedMetadataKeys: ['amount', 'currency'],
         requiresMetadata: [],
         title: () => 'Withdrawal request declined',
-        message: () => 'Your withdrawal request was declined. The amount is available to request again.',
-        actionUrl: () => '/dashboard/wallet',
+        message: ({ recipientRole }) => (recipientRole === 'rider'
+            ? 'Your withdrawal request was declined. The amount is available to request again.'
+            : 'Your final payout was declined. Please contact Sarabo support about your balance.'),
+        actionUrl: ({ recipientRole }) => (recipientRole === 'rider' ? '/dashboard/wallet' : '/dashboard/notifications'),
         deduplicationKey: ({ entityId }) => `withdrawal:${entityId}:rejected`,
+    },
+    // An admin removed this technician and their available balance was put
+    // in the payout queue for their bKash number
+    // (services/technicianRemovalPayout.js). Addressed to 'user' - the role
+    // they hold from that same transaction on.
+    technician_removed_final_payout: {
+        entityType: 'technician_withdrawal',
+        recipientRole: 'user',
+        priority: 'normal',
+        allowedMetadataKeys: ['amount', 'currency', 'bkashNumber'],
+        requiresMetadata: ['amount', 'bkashNumber'],
+        title: () => 'Your final payout is on its way',
+        message: ({ metadata }) => `Your technician account was closed. Your balance of ${metadata.currency || 'BDT'} ${metadata.amount} will be sent to your bKash ${metadata.bkashNumber}.`,
+        actionUrl: () => '/dashboard/notifications',
+        deduplicationKey: ({ entityId }) => `withdrawal:${entityId}:final_payout`,
     },
     technician_application_submitted: {
         entityType: 'technician',

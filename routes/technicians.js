@@ -24,6 +24,8 @@ function technicianRoutes(app, controllers) {
     // Update technician status (admin only)
     app.patch('/technicians/:id', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => technicianController.updateTechnicianStatus(req, res));
     // Admin: recheck a technician's availability against their real assignments.
+    // Admin: what removing this technician would pay out to their bKash.
+    app.get('/technicians/:id/final-payout', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => technicianController.getFinalPayoutPreview(req, res));
     app.post('/technicians/:id/recheck-availability', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => technicianController.recheckTechnicianAvailability(req, res));
 
     // Replace a technician's expertise (self or admin only - see

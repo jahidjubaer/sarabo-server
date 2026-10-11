@@ -59,6 +59,7 @@ const { runServiceCatalogTests } = require('./tests/serviceCatalogTests');
 const { runLateMatchAnnouncementTests } = require('./tests/lateMatchAnnouncementTests');
 const { runCustomerMoneyViewTests } = require('./tests/customerMoneyViewTests');
 const { runBkashWithdrawalTests } = require('./tests/bkashWithdrawalTests');
+const { runTechnicianRemovalPayoutTests } = require('./tests/technicianRemovalPayoutTests');
 const { runAdminReportTests } = require('./tests/adminReportTests');
 const { runAdminAttentionTests } = require('./tests/adminAttentionTests');
 const { runMissedPickupTests } = require('./tests/missedPickupTests');
@@ -4646,10 +4647,12 @@ async function testNotificationFoundation() {
             // Inspection-fee outcomes.
             'booking_cancelled_by_customer',
             // Declined-quote follow-through.
-            'declined_request_closed', 'declined_request_auto_closed'
+            'declined_request_closed', 'declined_request_auto_closed',
+            // Final payout when an admin removes a technician.
+            'technician_removed_final_payout'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 40 event types exist', actualTypes.length === 40 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 41 event types exist', actualTypes.length === 41 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -5075,7 +5078,10 @@ async function testNotificationFoundation() {
             // Inspection fee: tells the request's owner their fee is refunded.
             'inspection_fee_refunded',
             // Declined-quote follow-through: tells the owner it closed itself.
-            'declined_request_auto_closed'];
+            'declined_request_auto_closed',
+            // Withdrawal outcomes: also reach a technician an admin removed
+            // (now role 'user') whose final payout is settled.
+            'withdrawal_paid', 'withdrawal_rejected'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -13586,6 +13592,7 @@ async function runAllTests() {
     await runLateMatchAnnouncementTests({ logTest });
     await runCustomerMoneyViewTests({ logTest });
     await runBkashWithdrawalTests({ logTest });
+    await runTechnicianRemovalPayoutTests({ logTest });
     await runAdminReportTests({ logTest });
     await runAdminAttentionTests({ logTest });
     await runMissedPickupTests({ logTest });
@@ -15843,8 +15850,14 @@ async function testWorkflowStabilization() {
         logTest('9.2-50: their entity type is allowed, so creation cannot throw',
             ENTITY_TYPES.includes('technician_withdrawal')
             && NOTIFICATION_EVENTS.withdrawal_paid.entityType === 'technician_withdrawal');
+        // A removed technician (role 'user') is paid through the same events,
+        // but has no wallet page, so their link goes to notifications.
         logTest('9.2-51: both are addressed to the technician and link to the wallet',
-            NOTIFICATION_EVENTS.withdrawal_paid.recipientRole === 'rider'
-            && NOTIFICATION_EVENTS.withdrawal_paid.actionUrl() === '/dashboard/wallet');
+            NOTIFICATION_EVENTS.withdrawal_paid.recipientRoles.includes('rider')
+            && NOTIFICATION_EVENTS.withdrawal_paid.actionUrl({ recipientRole: 'rider' }) === '/dashboard/wallet'
+            && NOTIFICATION_EVENTS.withdrawal_rejected.actionUrl({ recipientRole: 'rider' }) === '/dashboard/wallet');
+        logTest('9.2-51b: a removed technician (user) is linked to notifications, not the wallet',
+            NOTIFICATION_EVENTS.withdrawal_paid.recipientRoles.includes('user')
+            && NOTIFICATION_EVENTS.withdrawal_paid.actionUrl({ recipientRole: 'user' }) === '/dashboard/notifications');
     }
 }

@@ -6,6 +6,11 @@ const { announceOpenJobsToTechnician } = require('../services/jobAnnouncements')
 const { REQUESTABLE_STATUSES, ROLE_FOR_STATUS, isValidTechnicianTransition } = require('../utils/technicianStatus');
 const { ACTIVE_STATUSES } = require('../utils/repairRequestStatus');
 const { validateTechnicianExpertise, normalizeTechnicianExpertise } = require('../utils/technicianExpertise');
+const { applyRemovalPayout, previewRemovalPayout } = require('../services/technicianRemovalPayout');
+
+// Refusals from the final-payout step that abort a removal with a clear 409
+// instead of a generic 500 (services/technicianRemovalPayout.js).
+const FINAL_PAYOUT_ERROR_CODES = ['BKASH_NUMBER_REQUIRED', 'INVALID_BKASH_NUMBER', 'FINAL_PAYOUT_CONFLICT'];
 
 // Explicit allow-list for the (unauthenticated) technician-application body
 // (Phase 8.7A mass-assignment protection). ONLY these applicant-supplied
@@ -348,6 +353,27 @@ class TechnicianController {
         }
     }
 
+    // GET /technicians/:id/final-payout (admin). What removing this technician
+    // would pay out, and to which bKash number - shown in the removal dialog
+    // before the admin confirms. Read-only.
+    async getFinalPayoutPreview(req, res) {
+        try {
+            if (!ObjectId.isValid(req.params.id)) {
+                return res.status(400).send({ message: 'invalid technician id', code: 'INVALID_TECHNICIAN_ID' });
+            }
+            const technician = await this.collections.technicians.findOne(
+                { _id: new ObjectId(req.params.id) },
+                { projection: { email: 1, phone: 1 } }
+            );
+            if (!technician || !normalize(technician.email)) {
+                return res.status(404).send({ message: 'technician not found', code: 'TECHNICIAN_NOT_FOUND' });
+            }
+            return res.send(await previewRemovalPayout(this.collections, technician));
+        } catch (error) {
+            return res.status(500).send({ message: 'Error loading final payout', code: 'FINAL_PAYOUT_PREVIEW_FAILED' });
+        }
+    }
+
     // Admin-only technician approval/rejection. The application's status and
     // the linked user's role are one transactionally consistent operation -
     // both commit together or neither does. Previously these were two
@@ -538,6 +564,35 @@ class TechnicianController {
                         );
                     }
 
+                    // Removing a technician pays out their wallet: the whole
+                    // available balance goes into the withdrawal queue for
+                    // their bKash number, in this same transaction - so a
+                    // technician is never removed with money left stranded,
+                    // and a payout that cannot be raised (no bKash number)
+                    // aborts the removal too. See
+                    // services/technicianRemovalPayout.js.
+                    let finalPayout = null;
+                    if (requestedStatus === 'rejected') {
+                        finalPayout = await applyRemovalPayout(this.collections, technician, {
+                            session: mongoSession,
+                            adminEmail: normalize(req.decoded_email),
+                            adminBkashNumber: req.body.bkashNumber,
+                        });
+                        if (finalPayout.action !== 'none') {
+                            await this.notifications.createNotification({
+                                session: mongoSession,
+                                recipientEmail: email,
+                                recipientRole: 'user',
+                                type: 'technician_removed_final_payout',
+                                entityType: 'technician_withdrawal',
+                                entityId: finalPayout.withdrawalId,
+                                actorEmail: req.decoded_email,
+                                actorRole: 'admin',
+                                metadata: { amount: String(finalPayout.amount), currency: 'BDT', bkashNumber: finalPayout.bkashNumber },
+                            });
+                        }
+                    }
+
                     // Notification joins this same transaction (Strategy A) -
                     // a failure here aborts the technician-status and
                     // linked-user-role updates above exactly like any other
@@ -571,7 +626,7 @@ class TechnicianController {
                         });
                     }
 
-                    outcome = { success: true };
+                    outcome = { success: true, finalPayout };
                 });
             } finally {
                 await mongoSession.endSession();
@@ -581,7 +636,18 @@ class TechnicianController {
                 return res.send({ message: 'technician status already set', status: requestedStatus, alreadyConsistent: true });
             }
             if (outcome.success) {
-                res.send({ message: 'technician status updated', status: requestedStatus, alreadyConsistent: false });
+                res.send({
+                    message: 'technician status updated', status: requestedStatus, alreadyConsistent: false,
+                    ...(outcome.finalPayout ? {
+                        finalPayout: {
+                            action: outcome.finalPayout.action,
+                            amount: outcome.finalPayout.amount,
+                            bkashNumber: outcome.finalPayout.bkashNumber ?? null,
+                            withdrawalId: outcome.finalPayout.withdrawalId ?? null,
+                            pendingBalance: outcome.finalPayout.pendingBalance,
+                        },
+                    } : {}),
+                });
                 // A newly approved technician hears about the open jobs they
                 // can take (after the response; never throws).
                 if (requestedStatus === 'approved') {
@@ -591,6 +657,12 @@ class TechnicianController {
             }
             return res.status(outcome.httpStatus).send({ message: outcome.message, code: outcome.code });
         } catch (error) {
+            if (FINAL_PAYOUT_ERROR_CODES.includes(error.code)) {
+                return res.status(error.httpStatus || 409).send({
+                    message: error.message, code: error.code,
+                    ...(error.availableBalance !== undefined ? { availableBalance: error.availableBalance } : {}),
+                });
+            }
             const failureCode = requestedStatus === 'approved' ? 'TECHNICIAN_APPROVAL_FAILED' : 'TECHNICIAN_REJECTION_FAILED';
             if (error.code === 'TECHNICIAN_APPROVAL_FAILED' || error.code === 'TECHNICIAN_REJECTION_FAILED') {
                 console.error('Technician status transaction aborted:', error.code);

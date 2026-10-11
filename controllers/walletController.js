@@ -295,9 +295,12 @@ class WalletController {
             // Best-effort - never roll back an authoritative settlement
             // decision because a notification failed.
             try {
+                // A technician removed by an admin is now a plain 'user' and is
+                // paid their final balance through this same queue.
+                const recipient = await this.User.findByEmail(withdrawal.technicianEmail);
                 await this.notifications.createNotification({
                     recipientEmail: withdrawal.technicianEmail,
-                    recipientRole: 'rider',
+                    recipientRole: recipient?.role === 'rider' ? 'rider' : 'user',
                     type: targetStatus === WITHDRAWAL_PAID ? 'withdrawal_paid' : 'withdrawal_rejected',
                     entityType: 'technician_withdrawal',
                     entityId: id,

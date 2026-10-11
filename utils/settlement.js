@@ -63,6 +63,12 @@ const WITHDRAWAL_STATUSES = Object.freeze([WITHDRAWAL_REQUESTED, WITHDRAWAL_PAID
 
 const WITHDRAWAL_NOTE_MAX = 500;
 
+// Why a withdrawal exists. A technician's own request carries no reason; the
+// one the server raises when an admin removes a technician (their whole
+// available balance, see services/technicianRemovalPayout.js) is tagged so the
+// admin queue can show it as a final payout.
+const WITHDRAWAL_REASON_TECHNICIAN_REMOVED = 'technician_removed';
+
 // Payouts are made by hand with bKash "Send Money" to the technician's personal
 // bKash number - free, no merchant account. The technician gives the number
 // with each request; the admin records the bKash transaction id (TrxID) when
@@ -332,8 +338,8 @@ function validateWithdrawalRequest(body, { availableBalance, hasOpenWithdrawal }
     return { valid: true, normalized: { amount: body.amount, payout: payout.payout } };
 }
 
-function buildWithdrawalDocument({ technicianId, technicianEmail, amount, payout = null, now }) {
-    return {
+function buildWithdrawalDocument({ technicianId, technicianEmail, amount, payout = null, now, reason = null, createdBy = null }) {
+    const document = {
         technicianId,
         technicianEmail,
         amount,
@@ -346,6 +352,13 @@ function buildWithdrawalDocument({ technicianId, technicianEmail, amount, payout
         processedBy: null,
         note: null,
     };
+    // Only set on server-raised withdrawals, so a technician's own request
+    // keeps exactly the shape it always had.
+    if (reason) {
+        document.reason = reason;
+        document.createdBy = createdBy;
+    }
+    return document;
 }
 
 // Admin-facing note / rejection reason. Optional in both cases - a rejection
@@ -401,6 +414,7 @@ function buildWithdrawalView(withdrawal) {
             ? { method: withdrawal.payout.method, accountNumber: withdrawal.payout.accountNumber, accountName: withdrawal.payout.accountName ?? null }
             : null,
         payoutReference: withdrawal.payoutReference ?? null,
+        reason: withdrawal.reason ?? null,
     };
 }
 
@@ -419,6 +433,7 @@ module.exports = {
     WITHDRAWAL_REJECTED,
     WITHDRAWAL_STATUSES,
     WITHDRAWAL_NOTE_MAX,
+    WITHDRAWAL_REASON_TECHNICIAN_REMOVED,
     PAYOUT_METHOD_BKASH,
     normalizeBkashNumber,
     validatePayoutReference,
