@@ -6,6 +6,8 @@ const {
 } = require('../services/aiSupportService');
 const {
     GEMINI_SUPPORT_MODEL,
+    GEMINI_SUPPORT_FALLBACK_MODEL,
+    GEMINI_SUPPORTED_MODELS,
     DEFAULT_MAX_ATTEMPTS,
     DEFAULT_RETRY_BASE_DELAY_MS,
     DEFAULT_RETRY_MAX_DELAY_MS,
@@ -229,7 +231,7 @@ async function runGeminiSupportProviderTests({ logTest }) {
     logTest('Gemini request selects the approved model with concise low-thinking output',
         capturedRequest.model === GEMINI_SUPPORT_MODEL
         && capturedRequest.config.maxOutputTokens === 400
-        && capturedRequest.config.thinkingConfig.thinkingLevel === 'LOW'
+        && capturedRequest.config.thinkingConfig.thinkingLevel === 'MINIMAL'
         && capturedRequest.config.thinkingConfig.includeThoughts === false);
     logTest('Gemini request enables no tools, grounding, browsing, code, files, or functions',
         !Object.prototype.hasOwnProperty.call(capturedRequest.config, 'tools')
@@ -360,6 +362,61 @@ async function runGeminiSupportProviderTests({ logTest }) {
         && retry503Failure.code === 'PROVIDER_UNAVAILABLE'
         && retry503Failure.failureClass === 'unavailable'
         && retry503Failure.attempts === 2);
+
+    const fallbackModels = [];
+    const fallbackDelays = [];
+    const fallbackProvider = createProvider(createMockClient(async (request) => {
+        fallbackModels.push(request.model);
+        if (request.model === GEMINI_SUPPORT_MODEL) throw providerHttpError(503);
+        return completedResponse(validPayload());
+    }), {
+        fallbackModel: GEMINI_SUPPORT_FALLBACK_MODEL,
+        wait: async (delayMs) => fallbackDelays.push(delayMs),
+    });
+    const fallbackResult = await fallbackProvider.generateReply({
+        messages: TEST_MESSAGES,
+        knowledge: TEST_KNOWLEDGE,
+        signal: new AbortController().signal,
+    });
+    logTest('A failed first model is followed at once by the fallback model',
+        fallbackModels.length === 2
+        && fallbackModels[0] === GEMINI_SUPPORT_MODEL
+        && fallbackModels[1] === GEMINI_SUPPORT_FALLBACK_MODEL
+        && fallbackDelays.length === 0
+        && fallbackResult.reply.includes('itemised quotation'));
+
+    const slowFirstModels = [];
+    const slowFirstProvider = createProvider(createMockClient((request) => {
+        slowFirstModels.push(request.model);
+        if (request.model !== GEMINI_SUPPORT_MODEL) return Promise.resolve(completedResponse(validPayload()));
+        return new Promise((resolve, reject) => {
+            request.config.abortSignal.addEventListener('abort', () => reject(new Error('raw SDK abort')), { once: true });
+        });
+    }), {
+        fallbackModel: GEMINI_SUPPORT_FALLBACK_MODEL,
+        firstAttemptTimeoutMs: 20,
+    });
+    const slowFirstController = new AbortController();
+    const slowFirstResult = await slowFirstProvider.generateReply({
+        messages: TEST_MESSAGES,
+        knowledge: TEST_KNOWLEDGE,
+        signal: slowFirstController.signal,
+    });
+    logTest('A first model that is too slow is given up early and the fallback model answers',
+        slowFirstModels.length === 2
+        && slowFirstModels[1] === GEMINI_SUPPORT_FALLBACK_MODEL
+        && slowFirstController.signal.aborted === false
+        && slowFirstResult.reply.includes('itemised quotation'));
+
+    logTest('Either supported model may be configured; anything else stays unavailable',
+        GEMINI_SUPPORTED_MODELS.every((model) => createConfiguredGeminiSupportProvider(
+            { ...loadAiSupportConfig({}), enabled: true, apiKey: 'test-only-api-key', model },
+            { client: createMockClient(async () => completedResponse(validPayload())) }
+        ) !== null)
+        && createConfiguredGeminiSupportProvider(
+            { ...loadAiSupportConfig({}), enabled: true, apiKey: 'test-only-api-key', model: 'gemini-3.8-flash' },
+            { client: createMockClient(async () => completedResponse(validPayload())) }
+        ) === null);
 
     let retry429SuccessCalls = 0;
     const retry429SuccessProvider = createProvider(createMockClient(async () => {

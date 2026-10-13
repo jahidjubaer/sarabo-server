@@ -3,7 +3,17 @@ const { logSafeSupportProviderEvent } = require('../../utils/safeLogger');
 const { ESCALATION_REASON_CODES } = require('../aiSupportService');
 
 const GEMINI_PROVIDER_ID = 'gemini';
-const GEMINI_SUPPORT_MODEL = 'gemini-3.1-flash-lite';
+const GEMINI_SUPPORT_MODEL = 'gemini-3.5-flash-lite';
+// Used for the second attempt, so one slow or overloaded model does not fail
+// the whole answer. AI_SUPPORT_MODEL may name either model; the other one
+// then becomes the fallback.
+const GEMINI_SUPPORT_FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+const GEMINI_SUPPORTED_MODELS = Object.freeze([GEMINI_SUPPORT_MODEL, GEMINI_SUPPORT_FALLBACK_MODEL]);
+
+function fallbackModelFor(model) {
+    if (!GEMINI_SUPPORTED_MODELS.includes(model)) return null;
+    return GEMINI_SUPPORTED_MODELS.find((supported) => supported !== model) || null;
+}
 const SUPPORT_ACTION_IDS = Object.freeze(Object.keys(SUPPORT_ACTIONS));
 const DEFAULT_MAX_ATTEMPTS = 2;
 const DEFAULT_RETRY_BASE_DELAY_MS = 600;
@@ -260,6 +270,27 @@ function waitForRetry(delayMs, signal) {
     });
 }
 
+// A signal that aborts when `signal` does, or by itself after `timeoutMs`.
+function startAttemptTimer(signal, timeoutMs) {
+    const controller = new AbortController();
+    let timedOut = false;
+    const onOuterAbort = () => controller.abort();
+    const timeoutId = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+    }, timeoutMs);
+    if (signal && signal.aborted) controller.abort();
+    else if (signal) signal.addEventListener('abort', onOuterAbort, { once: true });
+    return {
+        signal: controller.signal,
+        timedOut: () => timedOut,
+        stop() {
+            clearTimeout(timeoutId);
+            if (signal) signal.removeEventListener('abort', onOuterAbort);
+        },
+    };
+}
+
 function safeProviderMessage(classification) {
     if (classification.code === 'PROVIDER_TIMEOUT') {
         return 'The support provider took too long to respond.';
@@ -283,6 +314,8 @@ function createGeminiSupportProvider({
     maxAttempts = DEFAULT_MAX_ATTEMPTS,
     retryBaseDelayMs = DEFAULT_RETRY_BASE_DELAY_MS,
     retryMaxDelayMs = DEFAULT_RETRY_MAX_DELAY_MS,
+    fallbackModel = null,
+    firstAttemptTimeoutMs = 0,
     client,
     clientFactory = createGeminiClient,
     diagnosticLogger = logSafeSupportProviderEvent,
@@ -306,7 +339,7 @@ function createGeminiSupportProvider({
                     responseJsonSchema: SUPPORT_RESPONSE_SCHEMA,
                     maxOutputTokens,
                     thinkingConfig: {
-                        thinkingLevel: 'LOW',
+                        thinkingLevel: 'MINIMAL',
                         includeThoughts: false,
                     },
                     abortSignal: signal,
@@ -321,7 +354,7 @@ function createGeminiSupportProvider({
             }) => diagnosticLogger({
                 requestId,
                 provider: GEMINI_PROVIDER_ID,
-                model,
+                model: attempt > 1 && fallbackModel ? fallbackModel : model,
                 attempt,
                 outcome,
                 failureClass,
@@ -338,12 +371,26 @@ function createGeminiSupportProvider({
                     );
                 }
 
+                // With a fallback model waiting, the first attempt is given up
+                // early so the second one still fits inside the caller's
+                // overall timeout.
+                const attemptModel = attempt > 1 && fallbackModel ? fallbackModel : model;
+                const cutShort = attempt === 1 && attemptLimit > 1 && Boolean(fallbackModel) && firstAttemptTimeoutMs > 0;
+                const attemptTimer = cutShort ? startAttemptTimer(signal, firstAttemptTimeoutMs) : null;
+                const attemptSignal = attemptTimer ? attemptTimer.signal : signal;
+
                 const startedAt = now();
                 let response;
                 try {
-                    response = await geminiClient.models.generateContent(request);
+                    response = await geminiClient.models.generateContent(attemptModel === model && attemptSignal === signal
+                        ? request
+                        : { ...request, model: attemptModel, config: { ...request.config, abortSignal: attemptSignal } });
                 } catch (error) {
-                    const classification = classifyGeminiError(error, signal);
+                    if (attemptTimer) attemptTimer.stop();
+                    const gaveUpEarly = Boolean(attemptTimer) && attemptTimer.timedOut() && !(signal && signal.aborted);
+                    const classification = gaveUpEarly
+                        ? { code: 'PROVIDER_TIMEOUT', failureClass: 'timeout', retryable: true }
+                        : classifyGeminiError(error, signal);
                     const durationMs = Math.max(0, now() - startedAt);
                     const canRetry = classification.retryable && attempt < attemptLimit;
                     writeDiagnostic({
@@ -353,12 +400,16 @@ function createGeminiSupportProvider({
                         durationMs,
                     });
                     if (canRetry) {
-                        const delayMs = calculateRetryDelayMs({
-                            baseDelayMs: retryBaseDelayMs,
-                            maxDelayMs: retryMaxDelayMs,
-                            random,
-                        });
-                        await wait(delayMs, signal);
+                        // A different model has its own capacity, so there is
+                        // nothing to wait for before trying it.
+                        if (!fallbackModel) {
+                            const delayMs = calculateRetryDelayMs({
+                                baseDelayMs: retryBaseDelayMs,
+                                maxDelayMs: retryMaxDelayMs,
+                                random,
+                            });
+                            await wait(delayMs, signal);
+                        }
                         continue;
                     }
                     throw new SupportProviderError(
@@ -371,6 +422,7 @@ function createGeminiSupportProvider({
                     );
                 }
 
+                if (attemptTimer) attemptTimer.stop();
                 const durationMs = Math.max(0, now() - startedAt);
                 if (!response || typeof response.text !== 'string' || response.text.trim().length === 0) {
                     writeDiagnostic({
@@ -417,7 +469,7 @@ function createConfiguredGeminiSupportProvider(config, { client, clientFactory }
         config.enabled !== true ||
         config.provider !== GEMINI_PROVIDER_ID ||
         !config.apiKey ||
-        config.model !== GEMINI_SUPPORT_MODEL
+        !GEMINI_SUPPORTED_MODELS.includes(config.model)
     ) {
         return null;
     }
@@ -429,6 +481,8 @@ function createConfiguredGeminiSupportProvider(config, { client, clientFactory }
             maxAttempts: config.providerMaxAttempts,
             retryBaseDelayMs: config.providerRetryBaseDelayMs,
             retryMaxDelayMs: config.providerRetryMaxDelayMs,
+            fallbackModel: fallbackModelFor(config.model),
+            firstAttemptTimeoutMs: config.providerFirstAttemptTimeoutMs,
             client,
             clientFactory,
         });
@@ -440,6 +494,9 @@ function createConfiguredGeminiSupportProvider(config, { client, clientFactory }
 module.exports = {
     GEMINI_PROVIDER_ID,
     GEMINI_SUPPORT_MODEL,
+    GEMINI_SUPPORT_FALLBACK_MODEL,
+    GEMINI_SUPPORTED_MODELS,
+    fallbackModelFor,
     DEFAULT_MAX_ATTEMPTS,
     DEFAULT_RETRY_BASE_DELAY_MS,
     DEFAULT_RETRY_MAX_DELAY_MS,

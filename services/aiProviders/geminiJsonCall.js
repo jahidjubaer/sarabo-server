@@ -3,11 +3,14 @@ const {
     classifyGeminiError,
     calculateRetryDelayMs,
     waitForRetry,
+    fallbackModelFor,
 } = require('./geminiSupportProvider');
 const { logSafeSupportProviderEvent } = require('../../utils/safeLogger');
 
 // One Gemini call that must answer JSON, with at most one retry on a
-// temporary failure (rate limit, 5xx, network). Shared by the AI helpers.
+// temporary failure (rate limit, 5xx, network). The retry goes to the fallback
+// model when there is one, since each model has its own capacity and limits.
+// Shared by the AI helpers.
 // Throws SupportProviderError with a PROVIDER_* code; never returns raw text.
 async function callGeminiJson({
     client,
@@ -16,6 +19,7 @@ async function callGeminiJson({
     signal,
     requestId,
     maxAttempts = 2,
+    fallbackModel = fallbackModelFor(model),
     retryBaseDelayMs = 600,
     retryMaxDelayMs = 1000,
     diagnosticLogger = logSafeSupportProviderEvent,
@@ -24,10 +28,11 @@ async function callGeminiJson({
 }) {
     const attemptLimit = Math.min(2, Math.max(1, maxAttempts));
     const overallStartedAt = now();
+    const modelFor = (attempt) => (attempt > 1 && fallbackModel ? fallbackModel : model);
     const log = (attempt, outcome, failureClass, startedAt) => diagnosticLogger({
         requestId,
         provider: 'gemini',
-        model,
+        model: modelFor(attempt),
         attempt,
         outcome,
         failureClass,
@@ -39,13 +44,13 @@ async function callGeminiJson({
         const startedAt = now();
         let response;
         try {
-            response = await client.models.generateContent({ ...request, model, config: { ...request.config, abortSignal: signal } });
+            response = await client.models.generateContent({ ...request, model: modelFor(attempt), config: { ...request.config, abortSignal: signal } });
         } catch (error) {
             const classification = classifyGeminiError(error, signal);
             const canRetry = classification.retryable && attempt < attemptLimit;
             log(attempt, canRetry ? 'retrying' : 'failed', classification.failureClass, startedAt);
             if (canRetry) {
-                await wait(calculateRetryDelayMs({ baseDelayMs: retryBaseDelayMs, maxDelayMs: retryMaxDelayMs }), signal);
+                if (!fallbackModel) await wait(calculateRetryDelayMs({ baseDelayMs: retryBaseDelayMs, maxDelayMs: retryMaxDelayMs }), signal);
                 continue;
             }
             throw new SupportProviderError(classification.code, 'The AI provider request failed.', {

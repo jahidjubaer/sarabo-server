@@ -1,12 +1,14 @@
 const DEFAULTS = Object.freeze({
     enabled: false,
     provider: 'gemini',
-    model: 'gemini-3.1-flash-lite',
+    model: 'gemini-3.5-flash-lite',
     apiKey: null,
     timeoutMs: 12000,
     providerMaxAttempts: 2,
     providerRetryBaseDelayMs: 600,
     providerRetryMaxDelayMs: 1000,
+    // How long the first model may take before the fallback model is tried.
+    providerFirstAttemptTimeoutMs: 5000,
     maxOutputTokens: 400,
     messageMaxChars: 1500,
     historyMaxMessages: 8,
@@ -65,6 +67,11 @@ function loadAiSupportConfig(env = process.env) {
             env.AI_SUPPORT_RETRY_MAX_DELAY_MS,
             DEFAULTS.providerRetryMaxDelayMs,
             { min: 100, max: 2000 }
+        ),
+        providerFirstAttemptTimeoutMs: readPositiveInteger(
+            env.AI_SUPPORT_FIRST_ATTEMPT_TIMEOUT_MS,
+            DEFAULTS.providerFirstAttemptTimeoutMs,
+            { min: 500, max: 30000 }
         ),
         maxOutputTokens: readPositiveInteger(
             env.AI_SUPPORT_MAX_OUTPUT_TOKENS,

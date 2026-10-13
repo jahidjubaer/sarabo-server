@@ -182,6 +182,20 @@ async function runAiRequestDraftTests({ logTest }) {
     logTest('AI helper provider: sends JSON mode with the catalogue in the system instruction and parses the answer',
         draft.serviceId === 'a1' && request.config.responseMimeType === 'application/json' && request.config.systemInstruction.includes('Screen replacement'));
 
+    const triedModels = [];
+    const fallbackProvider = createGeminiRequestDraftProvider({
+        apiKey: 'k', model: 'gemini-3.5-flash-lite', maxOutputTokens: 700, diagnosticLogger: () => {},
+        wait: async () => { throw new Error('no wait is expected before the fallback model'); },
+        client: { models: { generateContent: async (r) => {
+            triedModels.push(r.model);
+            if (triedModels.length === 1) throw Object.assign(new Error('rate limited'), { status: 429 });
+            return { text: JSON.stringify(answer()) };
+        } } },
+    });
+    const fallbackDraft = await fallbackProvider.generateDraft({ text: 'screen broken', catalogue });
+    logTest('AI helper provider: a rate-limited model is followed at once by the fallback model',
+        fallbackDraft.serviceId === 'a1' && JSON.stringify(triedModels) === JSON.stringify(['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']));
+
     const limiter = createSupportRateLimit({ ...config, authenticatedShortWindowLimit: 1 }, { storeFactory: () => new MemoryStore(), label: 'AI helper' });
     const req = { supportAuth: { authenticated: true, uid: 'a@test.local' }, ip: '1.2.3.4', headers: {}, method: 'POST', app: { get: () => false } };
     const pass = fakeRes();

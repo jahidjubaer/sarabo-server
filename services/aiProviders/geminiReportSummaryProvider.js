@@ -37,7 +37,7 @@ function createGeminiReportSummaryProvider({ apiKey, model, maxOutputTokens, max
                         responseMimeType: 'application/json',
                         responseJsonSchema: REPORT_SUMMARY_SCHEMA,
                         maxOutputTokens,
-                        thinkingConfig: { thinkingLevel: 'LOW', includeThoughts: false },
+                        thinkingConfig: { thinkingLevel: 'MINIMAL', includeThoughts: false },
                     },
                 },
             });

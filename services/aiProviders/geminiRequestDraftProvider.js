@@ -106,7 +106,7 @@ function createGeminiRequestDraftProvider({
                         responseMimeType: 'application/json',
                         responseJsonSchema: buildResponseSchema(catalogue, { withPhoto: Boolean(photo) }),
                         maxOutputTokens,
-                        thinkingConfig: { thinkingLevel: 'LOW', includeThoughts: false },
+                        thinkingConfig: { thinkingLevel: 'MINIMAL', includeThoughts: false },
                     },
                 },
             });

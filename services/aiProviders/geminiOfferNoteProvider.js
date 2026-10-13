@@ -55,7 +55,7 @@ function createGeminiOfferNoteProvider({ apiKey, model, maxOutputTokens, maxAtte
                         responseMimeType: 'application/json',
                         responseJsonSchema: OFFER_NOTE_SCHEMA,
                         maxOutputTokens,
-                        thinkingConfig: { thinkingLevel: 'LOW', includeThoughts: false },
+                        thinkingConfig: { thinkingLevel: 'MINIMAL', includeThoughts: false },
                     },
                 },
             });
