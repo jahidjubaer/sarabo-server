@@ -5,6 +5,11 @@
 // requests snapshot the new fee. Existing requests are not touched - the job
 // portal already applies the floor to them (utils/jobPortal.js).
 //
+// Waiting offers (job applications still 'pending') sent before the floor are
+// raised to their request's floor too, so stored offers match what the
+// customer is shown and charged. Accepting one also raises it
+// (jobPortalController.accept), so this is tidy-up, not the only guard.
+//
 // Usage:
 //   node scripts/migrate-inspection-fee-floor.js             (dry-run, writes nothing)
 //   node scripts/migrate-inspection-fee-floor.js --confirm   (writes)
@@ -13,7 +18,9 @@
 //
 // runMigration() has no console/process side effects, so the test suite runs
 // the same logic.
+const { ObjectId } = require('mongodb');
 const { minimumInspectionFee } = require('../utils/inspectionFee');
+const { minInspectionFee } = require('../utils/jobPortal');
 
 const PRODUCTION_OVERRIDE_VAR = 'ALLOW_PROD_FEE_FLOOR_MIGRATION';
 
@@ -50,6 +57,40 @@ async function runMigration({ collection, dryRun, now = new Date() }) {
     };
 }
 
+// Raises waiting offers below their request's floor. Closed offers (accepted,
+// declined, withdrawn, not chosen) are history and stay as they were.
+async function runOfferMigration({ applications, requests, dryRun, now = new Date() }) {
+    const pending = await applications.find({ status: 'pending' }, { projection: { requestId: 1, inspectionFee: 1 } }).toArray();
+    const requestIds = [...new Set(pending.map((a) => a.requestId).filter((id) => ObjectId.isValid(id)))];
+    const docs = requestIds.length
+        ? await requests.find({ _id: { $in: requestIds.map((id) => new ObjectId(id)) } }, { projection: { pricing: 1 } }).toArray()
+        : [];
+    const requestById = new Map(docs.map((r) => [r._id.toString(), r]));
+    const details = [];
+    for (const offer of pending) {
+        const request = requestById.get(String(offer.requestId));
+        if (!request) continue;
+        const floor = minInspectionFee(request);
+        const fee = Number(offer.inspectionFee) || 0;
+        if (fee >= floor) continue;
+        const detail = { id: offer._id.toString(), requestId: String(offer.requestId), action: dryRun ? 'would-raise' : 'raised', from: fee, to: floor };
+        if (!dryRun) {
+            const result = await applications.updateOne(
+                { _id: offer._id, status: 'pending', inspectionFee: offer.inspectionFee },
+                { $set: { inspectionFee: floor, inspectionFeeRaisedFrom: offer.inspectionFee, updatedAt: now } }
+            );
+            if (result.modifiedCount === 0) detail.action = 'changed-since-read';
+        }
+        details.push(detail);
+    }
+    return {
+        pending: pending.length,
+        raised: details.filter((d) => d.action === (dryRun ? 'would-raise' : 'raised')).length,
+        changedSinceRead: details.filter((d) => d.action === 'changed-since-read').length,
+        details,
+    };
+}
+
 if (require.main === module) {
     require('dotenv').config();
     const { isProductionEnvironment } = require('../config/siteOrigin');
@@ -82,10 +123,13 @@ if (require.main === module) {
             console.log(`${d.action.padEnd(18)} ${d.key}  ${d.from ?? '-'} -> ${d.to} BDT`);
         }
         console.log(`\nServices: ${result.total}, ${dryRun ? 'would raise' : 'raised'}: ${result.raised}, already at or above the floor: ${result.unchanged}${result.changedSinceRead ? `, changed by someone else meanwhile (skipped): ${result.changedSinceRead}` : ''}`);
+        const offers = await runOfferMigration({ applications: collections.jobApplications, requests: collections.repairRequests, dryRun });
+        for (const d of offers.details) console.log(`${d.action.padEnd(18)} offer ${d.id} (request ${d.requestId})  ${d.from} -> ${d.to} BDT`);
+        console.log(`Waiting offers: ${offers.pending}, ${dryRun ? 'would raise' : 'raised'}: ${offers.raised}${offers.changedSinceRead ? `, changed meanwhile (skipped): ${offers.changedSinceRead}` : ''}`);
         if (dryRun) console.log('Dry run only - re-run with --confirm to apply.');
     })()
         .catch((error) => { console.error('Migration failed:', error.message); process.exitCode = 1; })
         .finally(() => client.close().catch(() => {}));
 }
 
-module.exports = { runMigration, PRODUCTION_OVERRIDE_VAR };
+module.exports = { runMigration, runOfferMigration, PRODUCTION_OVERRIDE_VAR };

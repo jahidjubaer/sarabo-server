@@ -3,7 +3,7 @@ const { client } = require('../config/database');
 const { createNotificationService } = require('../services/notificationService');
 const { canTechnicianEverTakeRequest } = require('../services/technicianEligibilityService');
 const {
-    isOpenForApplications, publishedAt, lastPostedAt, canReoffer, maxInspectionFee, minInspectionFee, validateApplicationInput, validateDeclineInput,
+    isOpenForApplications, publishedAt, lastPostedAt, canReoffer, maxInspectionFee, minInspectionFee, offerInspectionFee, validateApplicationInput, validateDeclineInput,
     OPEN_REQUEST_FILTER,
 } = require('../utils/jobPortal');
 const { bookApplication, notifyBooking } = require('../services/jobBooking');
@@ -254,7 +254,7 @@ class JobPortalController {
                         otherApplications: Math.max((countByRequest.get(r._id.toString()) || 0) - (application && application.status === 'pending' ? 1 : 0), 0),
                         myApplication: application ? {
                             id: application._id.toString(), status: application.status, estimateMin: application.estimateMin,
-                            estimateMax: application.estimateMax, inspectionFee: application.inspectionFee, note: application.note,
+                            estimateMax: application.estimateMax, inspectionFee: offerInspectionFee(application, r), note: application.note,
                             revised: !!application.revisedAfterDecline,
                             declineReason: application.status === 'declined' ? application.declineReason || null : null,
                             declineNote: application.status === 'declined' ? application.declineNote || '' : '',
@@ -432,7 +432,7 @@ class JobPortalController {
                     const rating = ratingOf(a.technicianId);
                     const past = history.get(a.technicianId) || { noShows: 0, medianResponseMinutes: null };
                     return {
-                        id: a._id.toString(), estimateMin: a.estimateMin, estimateMax: a.estimateMax, inspectionFee: a.inspectionFee, createdAt: a.createdAt,
+                        id: a._id.toString(), estimateMin: a.estimateMin, estimateMax: a.estimateMax, inspectionFee: offerInspectionFee(a, request), createdAt: a.createdAt,
                         technician: {
                             district: t.district || null, averageRating: rating.averageRating, reviewCount: rating.reviewCount,
                             completedRepairs: completedById.get(a.technicianId) || 0, noShows: past.noShows, medianResponseMinutes: past.medianResponseMinutes,
@@ -459,7 +459,7 @@ class JobPortalController {
                         status: a.status,
                         estimateMin: a.estimateMin,
                         estimateMax: a.estimateMax,
-                        inspectionFee: a.inspectionFee,
+                        inspectionFee: offerInspectionFee(a, request),
                         note: a.note || '',
                         createdAt: a.createdAt,
                         revised: !!a.revisedAfterDecline,
@@ -531,7 +531,7 @@ class JobPortalController {
             const caller = normalize(req.decoded_email);
             if (!request || normalize(request.senderEmail) !== caller) return refuse(res, 404, 'REQUEST_NOT_FOUND', 'repair request not found');
             if (!ObjectId.isValid(req.params.applicationId)) return refuse(res, 404, 'APPLICATION_NOT_FOUND', 'application not found');
-            const application = await this.collections.jobApplications.findOne({ _id: new ObjectId(req.params.applicationId), requestId: request._id.toString() });
+            let application = await this.collections.jobApplications.findOne({ _id: new ObjectId(req.params.applicationId), requestId: request._id.toString() });
             if (!application) return refuse(res, 404, 'APPLICATION_NOT_FOUND', 'application not found');
             if (application.status !== 'pending') return refuse(res, 409, 'APPLICATION_NOT_PENDING', 'this application is no longer open');
             if (!isOpenForApplications(request)) return refuse(res, 409, 'JOB_NOT_OPEN', 'a technician has already been chosen for this request');
@@ -545,6 +545,20 @@ class JobPortalController {
             }
             if (technician.workStatus !== 'available') {
                 return refuse(res, 409, 'TECHNICIAN_BUSY', 'this technician is on another job right now - choose another or try later');
+            }
+
+            // An offer sent before the fee floor existed is raised to it here and
+            // saved, so the checkout, the payment webhook and the booking all
+            // see the same fee. Guarded on the old value: a concurrent re-offer wins.
+            const fee = offerInspectionFee(application, request);
+            if (fee !== application.inspectionFee) {
+                const updated = await this.collections.jobApplications.findOneAndUpdate(
+                    { _id: application._id, status: 'pending', inspectionFee: application.inspectionFee },
+                    { $set: { inspectionFee: fee, inspectionFeeRaisedFrom: application.inspectionFee, updatedAt: this.now() } },
+                    { returnDocument: 'after' }
+                );
+                if (!updated) return refuse(res, 409, 'APPLICATION_CHANGED', 'this offer was just changed - reload and try again');
+                application = updated;
             }
 
             if (application.inspectionFee > 0) return this.startFeeCheckout(req, res, { request, application, technician });

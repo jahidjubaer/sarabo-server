@@ -1,4 +1,5 @@
 const { getProductCategoryBySlug } = require('../utils/productCategory');
+const { withMinimumInspectionFee } = require('../utils/inspectionFee');
 
 const STATIC_SUPPORT_KNOWLEDGE = Object.freeze({
     identity: 'Sarabo is an electronics and appliance repair service-management platform.',
@@ -60,7 +61,8 @@ function safeEstimate(pricingRule) {
     ) {
         return null;
     }
-    return { currency, min: baseMin, max: baseMax, inspectionFee };
+    // The fee customers are actually charged, never below the floor.
+    return { currency, min: baseMin, max: baseMax, inspectionFee: withMinimumInspectionFee(inspectionFee, baseMax) };
 }
 
 function serializeLiveServiceDefinitions(documents) {

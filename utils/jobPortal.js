@@ -90,6 +90,15 @@ function isWholeAmount(value, min, max) {
     return Number.isInteger(value) && value >= min && value <= max;
 }
 
+// The fee a waiting offer charges. An offer sent before the fee floor existed
+// may be below it; it is charged (and shown) at the floor. Closed offers keep
+// what they were.
+function offerInspectionFee(application, request) {
+    const fee = Number(application && application.inspectionFee) || 0;
+    if (!application || application.status !== 'pending') return fee;
+    return Math.max(fee, minInspectionFee(request));
+}
+
 // { valid, normalized } or { valid: false, code, message }.
 function validateApplicationInput(body, { maxFee, minFee = 0 }) {
     if (typeof body !== 'object' || body === null || Array.isArray(body)) {
@@ -128,6 +137,7 @@ module.exports = {
     canReoffer,
     maxInspectionFee,
     minInspectionFee,
+    offerInspectionFee,
     validateApplicationInput,
     validateDeclineInput,
 };

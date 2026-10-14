@@ -227,6 +227,28 @@ async function runInspectionFeeTests({ logTest }) {
         logTest('Open jobs: a payment that still arrives for a rejected offer is refunded and books no one',
             late.code === 'INSPECTION_FEE_REFUNDED' && refunds.length === 2 && refunds[1].paymentIntentId === `pi_${sessionD.id}`
             && !afterLate.technicianId && afterLate.deliveryStatus === 'pending-pickup');
+
+        // ---- an offer sent before the fee floor (fee 0) ----
+        const echo = await insertTech('echo');
+        const id4 = await insertRequest();
+        await apply(echo, id4, 250);
+        await c.jobApplications.updateOne({ requestId: id4, technicianId: echo.id }, { $set: { inspectionFee: 0 } });
+        const shown = await call('listForRequest', CUSTOMER, { params: { id: id4 } });
+        logTest('Fee floor: an old 0-fee offer is shown to the customer at the 200 BDT floor',
+            shown.statusCode === 200 && shown.body.applications[0].inspectionFee === 200);
+        const createdBefore = stripe.created.length;
+        const chooseOld = await accept(echo, id4);
+        const sessionE = stripe.created[createdBefore];
+        const raisedOffer = await appOf(echo, id4);
+        logTest('Fee floor: accepting it opens a checkout for the floor instead of booking for free',
+            chooseOld.statusCode === 200 && !!chooseOld.body.checkoutUrl && !chooseOld.body.booked
+            && sessionE && sessionE.params.line_items[0].price_data.unit_amount === 200 * 100
+            && raisedOffer.inspectionFee === 200 && raisedOffer.inspectionFeeRaisedFrom === 0);
+        const paidOld = await processPayment({ session: stripe.paidSession(sessionE.id), source: 'webhook' });
+        const bookedOld = await c.repairRequests.findOne({ _id: new ObjectId(id4) });
+        logTest('Fee floor: paying the raised fee books the technician with that fee',
+            paidOld.code === 'OK' && paidOld.booked === true && bookedOld.technicianId === echo.id
+            && bookedOld.inspectionPayment.amount === 200 && bookedOld.acceptedApplication.inspectionFee === 200);
     } finally {
         const ids = requestIds.map(String);
         await c.payments.deleteMany({ requestId: { $in: ids } });
@@ -243,4 +265,4 @@ async function runInspectionFeeTests({ logTest }) {
     }
 }
 
-module.exports = { runInspectionFeeTests };
+module.exports = { runInspectionFeeTests, createFakeStripe };

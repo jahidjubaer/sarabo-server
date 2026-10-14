@@ -35,7 +35,13 @@ async function runJobPortalTests({ logTest }) {
     const requestIds = [];
     const technicianIds = [];
 
-    const portal = new JobPortalController(models, c);
+    // Every offer carries an inspection fee, so booking goes through a checkout.
+    const { createFakeStripe } = require('./inspectionFeeTests');
+    const { createPaymentProcessor } = require('../services/paymentProcessor');
+    const { createNotificationService } = require('../services/notificationService');
+    const stripe = createFakeStripe(runId);
+    const portal = new JobPortalController(models, c, { stripeClient: stripe, siteOrigin: 'https://app.example.test' });
+    const processPayment = createPaymentProcessor(models, c, createNotificationService(models), { refundPayment: async () => 're_portal' });
     const call = async (method, email, req = {}) => {
         const res = fakeRes();
         await portal[method]({ decoded_email: email, params: {}, query: {}, body: {}, ...req }, res);
@@ -71,9 +77,8 @@ async function runJobPortalTests({ logTest }) {
         requestIds.push(insertedId);
         return insertedId.toString();
     };
-    // Offers charge the 200 BDT floor. The accept tests below use an offer made
-    // before the floor (fee 0), which books straight away; the paid-fee flow is
-    // covered in tests/inspectionFeeTests.js.
+    // Offers charge the 200 BDT floor; the fee details are covered in
+    // tests/inspectionFeeTests.js.
     const good = { estimateMin: 1200, estimateMax: 2500, inspectionFee: 200, note: 'Screen connector, likely.' };
 
     try {
@@ -152,16 +157,17 @@ async function runJobPortalTests({ logTest }) {
         const busyApp = await c.jobApplications.findOne({ requestId: open, technicianId: busyTech.id });
         logTest('Job portal: a technician on another job cannot be accepted right now',
             (await call('accept', CUSTOMER, { params: { id: open, applicationId: busyApp._id.toString() } })).body.code === 'TECHNICIAN_BUSY');
-        await c.jobApplications.updateMany({ requestId: open }, { $set: { inspectionFee: 0 } });
         const alphaDoc = await c.jobApplications.findOne({ requestId: open, technicianId: alpha.id });
         logTest('Job portal: only the owner can accept',
             (await call('accept', `stranger-${runId}@example.test`, { params: { id: open, applicationId: alphaDoc._id.toString() } })).statusCode === 404);
-        const accepted = await call('accept', CUSTOMER, { params: { id: open, applicationId: alphaDoc._id.toString() } });
+        const chosen = await call('accept', CUSTOMER, { params: { id: open, applicationId: alphaDoc._id.toString() } });
+        const accepted = await processPayment({ session: stripe.paidSession(stripe.created[stripe.created.length - 1].id), source: 'webhook' });
         const bookedRequest = await c.repairRequests.findOne({ _id: new ObjectId(open) });
         const alphaTech = await c.technicians.findOne({ _id: new ObjectId(alpha.id) });
         logTest('Job portal: accepting books the technician for the request',
-            accepted.statusCode === 200 && bookedRequest.deliveryStatus === 'driver_assigned' && bookedRequest.technicianId === alpha.id
-            && accepted.body.booked === true && alphaTech.workStatus === 'in_delivery' && bookedRequest.acceptedApplication.inspectionFee === 0
+            chosen.statusCode === 200 && !!chosen.body.checkoutUrl && accepted.code === 'OK' && accepted.booked === true
+            && bookedRequest.deliveryStatus === 'driver_assigned' && bookedRequest.technicianId === alpha.id
+            && alphaTech.workStatus === 'in_delivery' && bookedRequest.acceptedApplication.inspectionFee === 200
             && bookedRequest.assignmentHistory.slice(-1)[0].decision === 'accepted' && bookedRequest.assignmentHistory.slice(-1)[0].source === 'job_portal');
         const statuses = Object.fromEntries((await c.jobApplications.find({ requestId: open }).toArray()).map((a) => [a.technicianId, a.status]));
         logTest('Job portal: the chosen application is accepted and the other pending ones are closed',
@@ -265,6 +271,8 @@ async function runJobPortalTests({ logTest }) {
             && find('POST', '/admin/repair-requests/:id/invite').handlers.includes(verifyAdmin));
     } finally {
         const ids = requestIds.map(String);
+        await c.payments.deleteMany({ requestId: { $in: ids } });
+        await c.checkoutSessions.deleteMany({ requestId: { $in: ids } });
         await c.jobApplications.deleteMany({ requestId: { $in: ids } });
         await c.notifications.deleteMany({ entityId: { $in: ids } });
         if (requestIds.length) {

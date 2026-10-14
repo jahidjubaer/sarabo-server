@@ -17,7 +17,7 @@ async function runInspectionFeeFloorTests({ logTest }) {
     const { maxInspectionFee, minInspectionFee, validateApplicationInput } = require('../utils/jobPortal');
     const { getPricingEstimate } = require('../services/pricingService');
     const { ALL_SERVICE_DEFINITION_SEED } = require('../data/serviceDefinitionSeedExtra');
-    const { runMigration } = require('../scripts/migrate-inspection-fee-floor');
+    const { runMigration, runOfferMigration } = require('../scripts/migrate-inspection-fee-floor');
 
     // ---- pure rules ----
     logTest('Fee floor: 100 BDT up to a 1,000 BDT estimate, 200 BDT above, 200 BDT when unknown',
@@ -56,6 +56,7 @@ async function runInspectionFeeFloorTests({ logTest }) {
     const ADMIN = 'fee-floor-admin@example.test';
     const call = async (method, req) => { const res = fakeRes(); await admin[method]({ decoded_email: ADMIN, params: {}, query: {}, body: {}, ...req }, res); return res; };
     const createdIds = [];
+    const requestIds = [];
 
     try {
         const listed = await call('list', {});
@@ -101,7 +102,35 @@ async function runInspectionFeeFloorTests({ logTest }) {
         logTest('Fee floor migration: raises the fee, bumps the pricing version, and is idempotent',
             real.raised === 1 && after.pricingRule.inspectionFee === 200 && after.pricingRule.version === before.pricingRule.version + 1
             && again.raised === 0 && again.unchanged === 1);
+
+        // Waiting offers sent before the floor: only pending ones are raised.
+        const { insertedId: smallJob } = await c.repairRequests.insertOne({
+            schemaVersion: 2, trackingId: `FLOOR-${Date.now()}`, deliveryStatus: 'pending-pickup', createdAt: new Date(),
+            pricing: { currency: 'BDT', estimateMin: 300, estimateMax: 800, inspectionFee: 0 },
+        });
+        requestIds.push(smallJob);
+        const requestId = smallJob.toString();
+        await c.jobApplications.insertMany([
+            { requestId, technicianId: 'floor-a', status: 'pending', inspectionFee: 0, createdAt: new Date() },
+            { requestId, technicianId: 'floor-b', status: 'pending', inspectionFee: 150, createdAt: new Date() },
+            { requestId, technicianId: 'floor-c', status: 'declined', inspectionFee: 0, createdAt: new Date() },
+        ]);
+        const offersScoped = {
+            find: (query, options) => c.jobApplications.find({ ...query, requestId }, options),
+            updateOne: (filter, update) => c.jobApplications.updateOne({ ...filter, requestId }, update),
+        };
+        const offerDry = await runOfferMigration({ applications: offersScoped, requests: c.repairRequests, dryRun: true });
+        const offerReal = await runOfferMigration({ applications: offersScoped, requests: c.repairRequests, dryRun: false });
+        const fees = Object.fromEntries((await c.jobApplications.find({ requestId }).toArray()).map((a) => [a.technicianId, a]));
+        const offerAgain = await runOfferMigration({ applications: offersScoped, requests: c.repairRequests, dryRun: false });
+        logTest('Fee floor migration: waiting offers below the floor are raised, others and closed offers are left alone',
+            offerDry.raised === 1 && offerReal.raised === 1 && fees['floor-a'].inspectionFee === 100 && fees['floor-a'].inspectionFeeRaisedFrom === 0
+            && fees['floor-b'].inspectionFee === 150 && fees['floor-c'].inspectionFee === 0 && offerAgain.raised === 0);
     } finally {
+        if (requestIds.length) {
+            await c.jobApplications.deleteMany({ requestId: { $in: requestIds.map(String) } });
+            await c.repairRequests.deleteMany({ _id: { $in: requestIds } });
+        }
         if (createdIds.length) await c.serviceDefinitions.deleteMany({ _id: { $in: createdIds } });
     }
 }
