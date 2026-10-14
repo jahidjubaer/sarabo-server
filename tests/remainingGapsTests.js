@@ -106,6 +106,9 @@ async function runRemainingGapsTests({ logTest }) {
         await closeUnpaidRequest({ collections: c, notifications, User: models.User, mongoClient: client, request: await load(closing), reason: 'not_repairable', closedBy: 'technician', actorEmail: TECH });
         logTest('Gap B: cancelling after pickup records that the device must go back',
             (await load(closing)).deviceReturn?.required === true);
+        const activeIds = async () => (await call(repairRequests, 'getTechnicianRepairRequests', TECH, { query: {} })).body.map((r) => String(r._id));
+        logTest('Gap B: the technician still sees the cancelled job in their active jobs until the device is back',
+            (await activeIds()).includes(closing));
         logTest('Gap B: someone else cannot confirm the return',
             (await wf('confirmReturn', STRANGER, { params: { id: closing } })).statusCode === 404);
         const markedCancelled = await wf('markReturned', TECH, { params: { id: closing } });
@@ -114,6 +117,8 @@ async function runRemainingGapsTests({ logTest }) {
         const confirmed = await wf('confirmReturn', CUSTOMER, { params: { id: closing } });
         logTest('Gap B: the customer confirms they got it back; the technician is told',
             confirmed.statusCode === 200 && !!(await load(closing)).deviceReturn.confirmedAt && (await notified(TECH, 'repair_update_technician', 'return_confirmed')) >= 1);
+        logTest('Gap B: once the return is confirmed the job leaves the active list of the technician',
+            !(await activeIds()).includes(closing));
         logTest('Gap B: a confirmed return cannot be confirmed or disputed again',
             (await wf('confirmReturn', CUSTOMER, { params: { id: closing } })).body.code === 'NOT_RETURNABLE'
             && (await wf('disputeReceipt', CUSTOMER, { params: { id: closing } })).body.code === 'NOT_DISPUTABLE');

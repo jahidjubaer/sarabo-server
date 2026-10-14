@@ -196,7 +196,12 @@ class RepairRequestController {
                 // untouched.
                 query.deliveryStatus = { $in: ['repair_completed', 'parcel_delivered'] };
             } else if (deliveryStatus !== 'parcel_delivered') {
-                query.deliveryStatus = { $nin: ['parcel_delivered', 'repair_completed', 'cancelled'] };
+                // Active jobs - plus a job cancelled after pickup whose device
+                // the technician still has to return (workflow review).
+                query.$or = [
+                    { deliveryStatus: { $nin: ['parcel_delivered', 'repair_completed', 'cancelled'] } },
+                    { deliveryStatus: 'cancelled', 'deviceReturn.required': true, 'deviceReturn.confirmedAt': { $exists: false } },
+                ];
             } else {
                 query.deliveryStatus = deliveryStatus;
             }
