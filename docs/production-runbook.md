@@ -5,7 +5,7 @@ referenced, only its variable name is given.
 
 ## Production URLs
 
-- Client: `https://sarabo-jahid.web.app`
+- Client: `https://sarabo-client-six.vercel.app` (Vercel project `sarabo-client`, deploys on push to `main`). The old Firebase site `https://sarabo-jahid.web.app` is no longer updated.
 - Server: `https://sarabo-server.vercel.app`
 
 ## Deployed commit hashes (as of Phase 5.9)
@@ -22,7 +22,7 @@ referenced, only its variable name is given.
 | `FB_SERVICE_KEY` | Base64-encoded Firebase Admin service account JSON |
 | `STRIPE_SECRET` | Stripe secret key (currently test-mode, `sk_test_...`) |
 | `STRIPE_WEBHOOK_SECRET` | Signing secret for the active Stripe webhook endpoint |
-| `SITE_DOMAIN` | Must be the exact production client origin, `https://sarabo-jahid.web.app`, https only, no path/query/fragment |
+| `SITE_DOMAIN` | Must be the exact production client origin, `https://sarabo-client-six.vercel.app`, https only, no path/query/fragment |
 
 Verify presence and Production-only scope with `vercel env ls production` /
 `vercel env ls preview` / `vercel env ls development` - these list names and
@@ -185,12 +185,11 @@ as "Not available" with the reason.
 4. This does not require a git revert - the prior deployment's build
    artifact is reused as-is.
 
-## Firebase Hosting rollback procedure
+## Client rollback procedure
 
-1. `firebase hosting:channel:list` / Firebase Console -> Hosting -> release
-   history for `sarabo-jahid`.
-2. Use the Console's "Rollback" action on the prior release, or
-   `firebase hosting:clone <source-site>:<source-version> <target-site>:live`.
+1. Vercel Dashboard -> project `sarabo-client` -> Deployments.
+2. On the last good deployment, choose "Promote to Production" (Instant
+   Rollback). No rebuild or git revert is needed.
 3. Confirm the client loads and successfully calls the server's `GET /`.
 
 ## Stripe webhook verification steps
