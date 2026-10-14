@@ -18,6 +18,10 @@ function technicianRoutes(app, controllers) {
     // technician can never read another's profile through this endpoint.
     app.get('/technicians/me', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => technicianController.getMyTechnicianProfile(req, res));
 
+    // The technician edits their own profile. Also before /technicians/:id,
+    // which is admin-only and would otherwise treat 'me' as an id.
+    app.patch('/technicians/me', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => technicianController.updateMyTechnicianProfile(req, res));
+
     // Create new technician application
     app.post('/technicians', ensureDatabaseReady, (req, res) => technicianController.createTechnicianApplication(req, res));
 

@@ -29,6 +29,12 @@ const APPLICATION_ALLOWED_FIELDS = ['name', 'email', 'phone', 'region', 'distric
 // expertise array - see services/technicianEligibilityService.js).
 const REQUIRED_APPLICATION_FIELDS = ['name', 'email', 'region', 'district'];
 
+// Fields a technician may change on their own record (PATCH /technicians/me).
+// Email and NID are identity checks the admin approved, so they stay fixed.
+const SELF_EDITABLE_FIELDS = ['name', 'phone', 'region', 'district', 'address'];
+const SELF_EDIT_MAX_LENGTH = { name: 80, phone: 20, region: 60, district: 60, address: 300 };
+const PHONE_PATTERN = /^\+?[0-9][0-9\s-]{5,18}$/;
+
 function isNonEmptyString(value) {
     return typeof value === 'string' && value.trim().length > 0;
 }
@@ -254,6 +260,70 @@ class TechnicianController {
             });
         } catch (error) {
             return res.status(500).send({ message: 'Error loading technician profile', code: 'TECHNICIAN_PROFILE_FAILED' });
+        }
+    }
+
+    // PATCH /technicians/me
+    //
+    // The technician edits their own name, phone, service area and address.
+    // Identity is the verified token only, the same as GET /technicians/me.
+    // Region and district are required on every technician (matching needs
+    // them), so they can be changed but never cleared, and always together.
+    // The service area is locked while a repair is active: the device was
+    // booked for pickup in the old area.
+    async updateMyTechnicianProfile(req, res) {
+        try {
+            const email = normalize(req.decoded_email);
+            const body = req.body || {};
+            const update = {};
+            for (const field of SELF_EDITABLE_FIELDS) {
+                if (body[field] === undefined) continue;
+                if (typeof body[field] !== 'string') {
+                    return res.status(400).send({ message: `${field} must be text`, code: 'INVALID_PROFILE_FIELD', field });
+                }
+                const value = body[field].trim();
+                if (value.length > SELF_EDIT_MAX_LENGTH[field]) {
+                    return res.status(400).send({ message: `${field} is too long`, code: 'INVALID_PROFILE_FIELD', field });
+                }
+                update[field] = value;
+            }
+            if (Object.keys(update).length === 0) {
+                return res.status(400).send({ message: 'nothing to update', code: 'NO_PROFILE_CHANGES' });
+            }
+            for (const field of ['name', 'region', 'district']) {
+                if (update[field] !== undefined && !update[field]) {
+                    return res.status(400).send({ message: `${field} is required`, code: 'INVALID_PROFILE_FIELD', field });
+                }
+            }
+            if ((update.region === undefined) !== (update.district === undefined)) {
+                return res.status(400).send({ message: 'region and district must be changed together', code: 'INVALID_PROFILE_FIELD', field: 'district' });
+            }
+            if (update.phone && !PHONE_PATTERN.test(update.phone)) {
+                return res.status(400).send({ message: 'phone number is not valid', code: 'INVALID_PROFILE_FIELD', field: 'phone' });
+            }
+
+            const technician = await this.collections.technicians.findOne({ email });
+            if (!technician) {
+                return res.status(404).send({ message: 'no technician profile found for this account', code: 'TECHNICIAN_PROFILE_NOT_FOUND' });
+            }
+
+            const areaChanged = update.region !== undefined
+                && (update.region !== technician.region || update.district !== technician.district);
+            if (areaChanged && await this.hasActiveAssignment(technician._id)) {
+                return res.status(409).send({
+                    message: 'service area cannot change while a repair is active',
+                    code: 'TECHNICIAN_HAS_ACTIVE_ASSIGNMENT',
+                });
+            }
+
+            await this.collections.technicians.updateOne({ _id: technician._id }, { $set: { ...update, updatedAt: new Date() } });
+            res.send({ message: 'technician profile updated', profile: update });
+            // A new area can match open jobs there; ones already announced are not repeated.
+            if (areaChanged) {
+                await announceOpenJobsToTechnician({ collections: this.collections, notifications: this.notifications, technicianId: technician._id });
+            }
+        } catch (error) {
+            res.status(500).send({ message: 'Error updating technician profile', code: 'TECHNICIAN_PROFILE_UPDATE_FAILED' });
         }
     }
 
