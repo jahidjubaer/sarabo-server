@@ -23,6 +23,7 @@ const ServiceAvailabilityController = require('./serviceAvailabilityController')
 const JobPortalController = require('./jobPortalController');
 const InspectionFeeController = require('./inspectionFeeController');
 const WarrantyController = require('./warrantyController');
+const WorkflowController = require('./workflowController');
 const AiRequestDraftController = require('./aiRequestDraftController');
 const AdminReportSummaryController = require('./adminReportSummaryController');
 const { loadEmailConfig } = require('../config/email');
@@ -126,6 +127,7 @@ function initializeControllers(models, collections, dependencies = {}) {
         jobPortal: new JobPortalController(models, collections, { aiOfferNoteService }),
         inspectionFee: new InspectionFeeController(models, collections),
         warranty: new WarrantyController(models, collections),
+        workflow: new WorkflowController(models, collections),
         aiRequestDraft: new AiRequestDraftController({ aiRequestDraftService, aiOfferNoteService, aiReportSummaryService, config: aiRequestHelperConfig }),
         support: new SupportController({
             aiSupportService,

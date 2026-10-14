@@ -34,6 +34,11 @@ const DESCRIPTION_MAX = 1000;
 const NOTE_MAX = 500;
 // A re-inspection visit must be booked within this many days.
 const MAX_VISIT_AHEAD_DAYS = 14;
+// Technician deadlines (workflow review): after these an admin is alerted and
+// can take the claim over.
+const BOOK_WITHIN_DAYS = 3; // book the re-inspection after the claim is opened
+const DECIDE_WITHIN_DAYS = 3; // decide after the booked visit time
+const REREPAIR_WITHIN_DAYS = 7; // repair again after the claim became covered
 
 const CLAIM_KINDS = Object.freeze(['same_fault', 'part_failed']);
 const NOT_COVERED_REASONS = Object.freeze(['new_damage', 'water_damage', 'drop_damage', 'other']);
@@ -84,6 +89,29 @@ function isClaimOpen(claim, now) {
         return !!deadline && now <= deadline;
     }
     return true;
+}
+
+// When the claim's current technician step was due, or null if it has no
+// deadline right now. { reason: not_booked | not_decided | not_repaired, dueAt }.
+function technicianDeadline(claim) {
+    if (!claim) return null;
+    const plus = (date, days) => {
+        const start = validDate(date);
+        return start ? new Date(start.getTime() + days * DAY_MS) : null;
+    };
+    if (claim.status === STATUS.SUBMITTED) return { reason: 'not_booked', dueAt: plus(claim.createdAt, BOOK_WITHIN_DAYS) };
+    if (claim.status === STATUS.INSPECTION_SCHEDULED) return { reason: 'not_decided', dueAt: plus(claim.inspection && claim.inspection.visitAt, DECIDE_WITHIN_DAYS) };
+    if (claim.status === STATUS.COVERED) {
+        const becameCovered = [...(claim.history || [])].reverse().find((h) => h.status === STATUS.COVERED);
+        return { reason: 'not_repaired', dueAt: plus(becameCovered ? becameCovered.at : claim.updatedAt, REREPAIR_WITHIN_DAYS) };
+    }
+    return null;
+}
+
+// The overdue technician step, or null when nothing is late.
+function overdueStep(claim, now) {
+    const deadline = technicianDeadline(claim);
+    return deadline && deadline.dueAt && now > deadline.dueAt ? deadline : null;
 }
 
 // Can the customer open a claim on this repair now? { ok, code?, window }.
@@ -213,9 +241,9 @@ function generateClaimPhotoStorageKey(requestId, mimeType, uploadId) {
 
 module.exports = {
     WARRANTY_DAYS, REVIEW_WINDOW_DAYS, MAX_CLAIMS_PER_REPAIR, MAX_CLAIM_PHOTOS, DESCRIPTION_MIN, DESCRIPTION_MAX, NOTE_MAX,
-    MAX_VISIT_AHEAD_DAYS, CLAIM_KINDS, NOT_COVERED_REASONS, STATUS, CLAIM_STATUSES, FINAL_STATUSES,
+    MAX_VISIT_AHEAD_DAYS, BOOK_WITHIN_DAYS, DECIDE_WITHIN_DAYS, REREPAIR_WITHIN_DAYS, CLAIM_KINDS, NOT_COVERED_REASONS, STATUS, CLAIM_STATUSES, FINAL_STATUSES,
     ALLOWED_IMAGE_MIME_TYPES, MAX_IMAGE_SIZE_BYTES,
-    warrantyWindow, reviewDeadline, isClaimOpen, claimEligibility,
+    warrantyWindow, reviewDeadline, isClaimOpen, claimEligibility, technicianDeadline, overdueStep,
     validateClaimInput, validateScheduleInput, validateDecisionInput, validateRerepairInput, validateConfirmInput, validateReviewDecision,
     refundPlan, generateClaimPhotoStorageKey,
 };

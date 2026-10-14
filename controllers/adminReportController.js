@@ -87,12 +87,13 @@ class AdminReportController {
                     technicianShare: { $sum: '$inspectionFeeSettlement.technicianReceivable' },
                     saraboShare: { $sum: '$inspectionFeeSettlement.platformCommission' },
                     declined: { $sum: { $cond: [{ $eq: ['$inspectionFeeSettlement.reason', 'quote_declined'] }, 1, 0] } },
+                    late: { $sum: { $cond: [{ $eq: ['$inspectionFeeSettlement.reason', 'late_cancellation'] }, 1, 0] } },
                 } },
             ]).toArray(),
         ]);
         const kept = keptRows[0]
-            ? { count: keptRows[0].count, amount: keptRows[0].amount, technicianShare: keptRows[0].technicianShare, saraboShare: keptRows[0].saraboShare, quoteDeclined: keptRows[0].declined, lateCancellations: keptRows[0].count - keptRows[0].declined }
-            : { count: 0, amount: 0, technicianShare: 0, saraboShare: 0, quoteDeclined: 0, lateCancellations: 0 };
+            ? { count: keptRows[0].count, amount: keptRows[0].amount, technicianShare: keptRows[0].technicianShare, saraboShare: keptRows[0].saraboShare, quoteDeclined: keptRows[0].declined, lateCancellations: keptRows[0].late, closedAfterInspection: keptRows[0].count - keptRows[0].declined - keptRows[0].late }
+            : { count: 0, amount: 0, technicianShare: 0, saraboShare: 0, quoteDeclined: 0, lateCancellations: 0, closedAfterInspection: 0 };
         return { currency: 'BDT', paid, refunded, kept, refundPending };
     }
 

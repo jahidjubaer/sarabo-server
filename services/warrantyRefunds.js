@@ -7,8 +7,10 @@
 //    writes the plan on it, and reverses the technician's settlement for the
 //    repair (utils/settlement.js SETTLEMENT_REVERSED).
 // 2. sendWarrantyRefund, after commit, asks Stripe (test mode) to refund each
-//    part. The idempotency key is per claim and part, so a retry can never
-//    refund twice. A failed part stays pending and the admin can retry.
+//    part (services/refundParts.js). The idempotency key is per claim and
+//    part, so a retry can never refund twice. A failed part stays pending and
+//    the admin can retry.
+const { refundParts, markPaymentRowsRefunded } = require('./refundParts');
 
 // { refunded, parts, code? } - never throws for a Stripe failure.
 async function sendWarrantyRefund({ collections, refundPayment, claim, now = new Date() }) {
@@ -16,31 +18,8 @@ async function sendWarrantyRefund({ collections, refundPayment, claim, now = new
     if (!refund || !Array.isArray(refund.parts)) return { refunded: false, code: 'NO_REFUND_PENDING' };
     if (!refundPayment) return { refunded: false, code: 'REFUND_UNAVAILABLE' };
 
-    const parts = [];
-    for (const part of refund.parts) {
-        if (part.status === 'refunded') {
-            parts.push(part);
-            continue;
-        }
-        let paymentIntentId = part.paymentIntentId || null;
-        if (!paymentIntentId && part.sessionId) {
-            const row = await collections.payments.findOne({ sessionId: part.sessionId }, { projection: { transactionId: 1 } });
-            paymentIntentId = row ? row.transactionId : null;
-        }
-        if (!paymentIntentId) {
-            parts.push({ ...part, status: 'failed', lastError: 'payment not found' });
-            continue;
-        }
-        try {
-            const refundId = await refundPayment({ paymentIntentId, idempotencyKey: `warranty-refund-${claim._id}-${part.purpose}` });
-            parts.push({ ...part, paymentIntentId, status: 'refunded', refundId, refundedAt: now, lastError: null });
-        } catch (error) {
-            console.error('Warranty refund failed (stays pending):', error.message);
-            parts.push({ ...part, paymentIntentId, status: 'failed', lastError: String(error.message || 'refund failed').slice(0, 200) });
-        }
-    }
-
-    const refunded = parts.every((p) => p.status === 'refunded');
+    const { parts, refunded } = await refundParts({ collections, refundPayment, parts: refund.parts, keyPrefix: `warranty-refund-${claim._id}`, now });
+    await markPaymentRowsRefunded({ collections, parts, reason: 'warranty_refund', now });
     await collections.warrantyClaims.updateOne(
         { _id: claim._id, status: 'refund_pending' },
         {

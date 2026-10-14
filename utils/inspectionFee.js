@@ -39,7 +39,9 @@ function amountDueForQuote(request) {
 //   customer cancels later                     -> kept, 90/10
 //   customer declines the final price          -> kept, 90/10
 const LATE_CANCEL_WINDOW_MS = 2 * 60 * 60 * 1000;
-const FEE_KEPT_REASONS = Object.freeze(['quote_declined', 'late_cancellation']);
+// The last three close an unpaid request after the device was collected and
+// inspected (services/requestClosure.js).
+const FEE_KEPT_REASONS = Object.freeze(['quote_declined', 'late_cancellation', 'payment_not_made', 'customer_cancelled_unpaid', 'not_repairable']);
 const FEE_REFUND_REASONS = Object.freeze(['booking_failed', 'technician_no_show', 'customer_cancelled']);
 
 // What cancelling a booked visit now would do with the fee: 'refund', 'kept',

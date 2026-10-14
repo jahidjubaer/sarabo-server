@@ -5,6 +5,7 @@ const { createNotificationService } = require('../services/notificationService')
 const { announceOpenJobsToTechnician } = require('../services/jobAnnouncements');
 const { REQUESTABLE_STATUSES, ROLE_FOR_STATUS, isValidTechnicianTransition } = require('../utils/technicianStatus');
 const { ACTIVE_STATUSES } = require('../utils/repairRequestStatus');
+const { isClaimOpen, FINAL_STATUSES: FINAL_WARRANTY_STATUSES } = require('../utils/warranty');
 const { validateTechnicianExpertise, normalizeTechnicianExpertise } = require('../utils/technicianExpertise');
 const { applyRemovalPayout, previewRemovalPayout } = require('../services/technicianRemovalPayout');
 
@@ -304,6 +305,17 @@ class TechnicianController {
         return !!activeRepairRequest;
     }
 
+    // Whether any warranty claim on this technician's repairs still needs
+    // someone to act (utils/warranty.js isClaimOpen).
+    async hasOpenWarrantyClaim(technician, session) {
+        const claims = await this.collections.warrantyClaims.find(
+            { technicianId: technician._id.toString(), status: { $nin: FINAL_WARRANTY_STATUSES } },
+            { session, projection: { status: 1, decision: 1 } }
+        ).toArray();
+        const now = new Date();
+        return claims.some((claim) => isClaimOpen(claim, now));
+    }
+
     // Clears a stale "busy" state: an APPROVED technician still marked
     // in_delivery although no active repair names them (left behind by older
     // data or an interrupted flow) can never be matched again, because matching
@@ -521,6 +533,16 @@ class TechnicianController {
                         outcome = {
                             httpStatus: 409, code: 'TECHNICIAN_HAS_ACTIVE_ASSIGNMENT',
                             message: 'technician has an active repair assignment and cannot be rejected'
+                        };
+                        return;
+                    }
+                    // Open warranty claims need their technician (or an admin
+                    // taking them over first); removal also pays out the whole
+                    // wallet, which a later warranty refund could not recover.
+                    if (requestedStatus === 'rejected' && await this.hasOpenWarrantyClaim(technician, mongoSession)) {
+                        outcome = {
+                            httpStatus: 409, code: 'TECHNICIAN_HAS_OPEN_WARRANTY_CLAIMS',
+                            message: 'technician has open warranty claims - resolve or take them over first'
                         };
                         return;
                     }

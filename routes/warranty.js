@@ -20,6 +20,9 @@ function warrantyRoutes(app, controllers) {
 
     app.get('/admin/warranty-claims', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => c.listForAdmin(req, res));
     app.post('/admin/warranty-claims/:claimId/review', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => c.adminReview(req, res));
+    // Taking over a technician step that is late (or whose technician left).
+    app.post('/admin/warranty-claims/:claimId/decision', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => c.adminDecide(req, res));
+    app.post('/admin/warranty-claims/:claimId/cannot-fix', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => c.adminCannotFix(req, res));
     app.post('/admin/warranty-claims/:claimId/refund', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => c.adminRefund(req, res));
 }
 

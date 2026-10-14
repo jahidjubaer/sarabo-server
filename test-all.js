@@ -68,6 +68,7 @@ const { runMatchGateTests } = require('./tests/matchGateTests');
 const { runJobPortalTests } = require('./tests/jobPortalTests');
 const { runOfferRankingTests } = require('./tests/offerRankingTests');
 const { runWarrantyTests } = require('./tests/warrantyTests');
+const { runWorkflowFixesTests } = require('./tests/workflowFixesTests');
 const { runInspectionFeeTests } = require('./tests/inspectionFeeTests');
 const { runInspectionFeeOutcomeTests } = require('./tests/inspectionFeeOutcomeTests');
 const { runDeclinedQuoteCloseTests } = require('./tests/declinedQuoteCloseTests');
@@ -4653,10 +4654,12 @@ async function testNotificationFoundation() {
             // Final payout when an admin removes a technician.
             'technician_removed_final_payout',
             // Repair warranty.
-            'warranty_update', 'warranty_update_technician', 'warranty_admin_action'
+            'warranty_update', 'warranty_update_technician', 'warranty_admin_action',
+            // Workflow review fixes.
+            'repair_update', 'repair_update_technician', 'repair_needs_admin'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 44 event types exist', actualTypes.length === 44 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 47 event types exist', actualTypes.length === 47 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -5087,7 +5090,9 @@ async function testNotificationFoundation() {
             // (now role 'user') whose final payout is settled.
             'withdrawal_paid', 'withdrawal_rejected',
             // Repair warranty: the customer's updates go to the request's owner.
-            'warranty_update'];
+            'warranty_update',
+            // Workflow fixes: the customer's updates go to the request's owner.
+            'repair_update'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -13610,6 +13615,8 @@ async function runAllTests() {
     await runInspectionFeeTests({ logTest });
     await runInspectionFeeOutcomeTests({ logTest });
     await runDeclinedQuoteCloseTests({ logTest });
+    // Last: its daily job looks at the whole test database.
+    await runWorkflowFixesTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing

@@ -8,7 +8,7 @@ const { SETTLEMENT_REVERSED } = require('../utils/settlement');
 const { isValidFileName, generateUploadSessionId } = require('../utils/damageUpload');
 const {
     WARRANTY_DAYS, MAX_CLAIM_PHOTOS, STATUS, CLAIM_STATUSES, ALLOWED_IMAGE_MIME_TYPES, MAX_IMAGE_SIZE_BYTES,
-    warrantyWindow, reviewDeadline, isClaimOpen, claimEligibility,
+    warrantyWindow, reviewDeadline, isClaimOpen, claimEligibility, technicianDeadline, overdueStep,
     validateClaimInput, validateScheduleInput, validateDecisionInput, validateRerepairInput, validateConfirmInput, validateReviewDecision,
     refundPlan, generateClaimPhotoStorageKey,
 } = require('../utils/warranty');
@@ -25,6 +25,8 @@ const PHOTO_UPLOAD_TTL_MS = 20 * 60 * 1000;
 const PHOTO_READ_URL_TTL_MS = 5 * 60 * 1000;
 const LIST_LIMIT = 100;
 const NEEDS_ADMIN = [STATUS.REVIEW_REQUESTED, STATUS.REFUND_PENDING];
+// Technician steps an admin can see as overdue and take over.
+const TECHNICIAN_STEPS = [STATUS.SUBMITTED, STATUS.INSPECTION_SCHEDULED, STATUS.COVERED];
 
 function normalize(value) {
     return typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -101,6 +103,10 @@ class WarrantyController {
             decision: claim.decision || null,
             canRequestReview: audience === 'customer' && claim.status === STATUS.NOT_COVERED && !!deadline && now <= deadline,
             reviewDeadline: claim.status === STATUS.NOT_COVERED ? deadline : null,
+            // The technician's next step and when it is due; admins also see
+            // whether it is late (they can then take the claim over).
+            ...(audience !== 'customer' ? { technicianDue: technicianDeadline(claim) } : {}),
+            ...(audience === 'admin' ? { overdue: overdueStep(claim, now) } : {}),
             review: claim.review || null,
             rerepair: claim.rerepair || null,
             confirmation: claim.confirmation || null,
@@ -141,7 +147,7 @@ class WarrantyController {
         });
     }
 
-    async notifyAdmins(claim, step) {
+    async notifyAdmins(claim, step, type = 'warranty_admin_action') {
         let admins = [];
         try {
             admins = await this.User.findEmailsByRole('admin');
@@ -149,7 +155,7 @@ class WarrantyController {
             console.error('Admin lookup for a warranty notification failed (non-fatal):', error.message);
         }
         await Promise.all(admins.map((email) => this.notify({
-            recipientEmail: email, recipientRole: 'admin', type: 'warranty_admin_action',
+            recipientEmail: email, recipientRole: 'admin', type,
             entityId: claim.requestId, metadata: { trackingId: claim.trackingId, occurrence: claim._id.toString(), step },
         })));
     }
@@ -211,11 +217,15 @@ class WarrantyController {
         try {
             const wanted = typeof req.query?.status === 'string' ? req.query.status : 'needs_action';
             let filter;
-            if (wanted === 'needs_action') filter = { status: { $in: NEEDS_ADMIN } };
+            if (wanted === 'needs_action') filter = { status: { $in: [...NEEDS_ADMIN, ...TECHNICIAN_STEPS] } };
             else if (wanted === 'all') filter = {};
             else if (CLAIM_STATUSES.includes(wanted)) filter = { status: wanted };
             else return refuse(res, 400, 'INVALID_STATUS', 'unknown status filter');
-            const claims = await this.collections.warrantyClaims.find(filter).sort({ updatedAt: -1 }).limit(LIST_LIMIT).toArray();
+            const now = this.now();
+            let claims = await this.collections.warrantyClaims.find(filter).sort({ updatedAt: -1 }).limit(LIST_LIMIT * 3).toArray();
+            // "Needs an admin": waiting for a review or refund, or a technician step that is late.
+            if (wanted === 'needs_action') claims = claims.filter((c) => NEEDS_ADMIN.includes(c.status) || overdueStep(c, now));
+            claims = claims.slice(0, LIST_LIMIT);
             res.send({ claims: await Promise.all(claims.map((c) => this.claimView(c, 'admin'))) });
         } catch (error) {
             res.status(500).send({ message: 'Error loading warranty claims', code: 'INTERNAL_ERROR' });
@@ -509,6 +519,66 @@ class WarrantyController {
         } catch (error) {
             res.status(500).send({ message: 'Error saving the review', code: 'INTERNAL_ERROR' });
         }
+    }
+
+    // POST /admin/warranty-claims/:claimId/decision  { covered, reason?, note }
+    // An admin takes over the technician's decision (the technician is late,
+    // or was removed). Allowed before a decision exists.
+    async adminDecide(req, res) {
+        try {
+            const check = validateDecisionInput(req.body);
+            if (!check.valid) return refuse(res, 400, check.code, check.message);
+            const claim = await this.loadClaim(req.params.claimId);
+            if (!claim) return refuse(res, 404, 'CLAIM_NOT_FOUND', 'warranty claim not found');
+            const { covered, reason, note } = check.normalized;
+            const updated = await this.advance(claim, {
+                from: [STATUS.SUBMITTED, STATUS.INSPECTION_SCHEDULED],
+                to: covered ? STATUS.COVERED : STATUS.NOT_COVERED,
+                set: { decision: { covered, reason, note, decidedAt: this.now(), decidedByAdmin: normalize(req.decoded_email) } },
+                by: 'admin',
+            });
+            if (!updated) return refuse(res, 409, 'CLAIM_ALREADY_DECIDED', 'this claim has already been decided');
+            await this.notifyCustomer(updated, covered ? 'covered' : 'not_covered');
+            await this.notifyTechnician(updated, covered ? 'review_overturned' : 'review_upheld');
+            res.send({ claim: await this.claimView(updated, 'admin') });
+        } catch (error) {
+            res.status(500).send({ message: 'Error saving the decision', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // POST /admin/warranty-claims/:claimId/cannot-fix  { note? }
+    // A covered claim the technician has not repaired: the admin moves it to
+    // a refund (an admin cannot report a repair as done).
+    async adminCannotFix(req, res) {
+        try {
+            const note = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
+            if (note.length > 500) return refuse(res, 400, 'INVALID_NOTE', 'the note must be at most 500 characters');
+            const claim = await this.loadClaim(req.params.claimId);
+            if (!claim) return refuse(res, 404, 'CLAIM_NOT_FOUND', 'warranty claim not found');
+            const updated = await this.advance(claim, {
+                from: [STATUS.COVERED],
+                to: STATUS.REFUND_PENDING,
+                set: { rerepair: { outcome: 'cannot_fix', note, reportedAt: this.now(), reportedByAdmin: normalize(req.decoded_email) } },
+                by: 'admin',
+            });
+            if (!updated) return refuse(res, 409, 'CLAIM_NOT_COVERED', 'only a covered claim can be moved to a refund');
+            await this.notifyCustomer(updated, 'cannot_fix');
+            res.send({ claim: await this.claimView(updated, 'admin') });
+        } catch (error) {
+            res.status(500).send({ message: 'Error saving the change', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // Daily job: tells admins about each technician step that became late,
+    // once per claim and step. Resolves to { found }.
+    async alertOverdueClaims() {
+        const now = this.now();
+        const open = await this.collections.warrantyClaims.find({ status: { $in: TECHNICIAN_STEPS } }).limit(1000).toArray();
+        const overdue = open.filter((c) => overdueStep(c, now));
+        for (const claim of overdue) {
+            await this.notifyAdmins({ ...claim, _id: `${claim._id}-${claim.status}` }, 'warranty_overdue', 'repair_needs_admin');
+        }
+        return { found: overdue.length };
     }
 
     // POST /admin/warranty-claims/:claimId/refund

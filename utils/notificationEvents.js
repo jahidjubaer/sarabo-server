@@ -710,6 +710,81 @@ const NOTIFICATION_EVENTS = {
         actionUrl: () => '/dashboard/warranty-claims',
         deduplicationKey: ({ entityId, metadata, recipientEmail }) => `warranty:${entityId}:${metadata.occurrence || 'claim'}:${metadata.step || 'action'}:${recipientEmail}`,
     },
+    // Workflow fixes (services/requestClosure.js, services/receiptConfirmation.js,
+    // controllers/workflowController.js): requests that could get stuck now
+    // close or move on. One type per audience, `step` says what happened.
+    repair_update: {
+        // To the customer who owns the request.
+        entityType: 'repair_request',
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'occurrence', 'step'],
+        requiresMetadata: ['trackingId'],
+        title: ({ metadata }) => ({
+            payment_not_made: 'Repair closed - not paid in time',
+            not_repairable: 'Repair closed - cannot be repaired',
+            paid_repair_cancelled: 'Repair cancelled and refunded',
+            device_returned: 'Your device is back - please confirm',
+            receipt_auto_confirmed: 'Device receipt confirmed',
+            receipt_confirmed_by_admin: 'Device receipt confirmed by an admin',
+        }[metadata.step] || 'Repair update'),
+        message: ({ metadata }) => ({
+            payment_not_made: `Repair ${metadata.trackingId} was closed because the approved price was not paid within 3 days. Your technician will return your device.`,
+            not_repairable: `Repair ${metadata.trackingId} was closed because the device cannot be repaired. Your technician will return your device.`,
+            paid_repair_cancelled: `Repair ${metadata.trackingId} was cancelled by an admin and your payment is being refunded.`,
+            device_returned: `Your technician says the device for repair ${metadata.trackingId} is back with you. Please confirm within 3 days, or tell us if you have not received it.`,
+            receipt_auto_confirmed: `Receipt of your device for repair ${metadata.trackingId} was confirmed automatically after 3 days. Your 30-day warranty has started.`,
+            receipt_confirmed_by_admin: `An admin confirmed you received your device for repair ${metadata.trackingId}. Your 30-day warranty has started.`,
+        }[metadata.step] || `There is an update on repair ${metadata.trackingId}.`),
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId, metadata }) => `workflow:${entityId}:${metadata.occurrence || 'once'}:${metadata.step || 'update'}:customer`,
+    },
+    repair_update_technician: {
+        // To the request's technician.
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'occurrence', 'step'],
+        requiresMetadata: ['trackingId'],
+        title: ({ metadata }) => ({
+            payment_not_made: 'Job closed - customer did not pay',
+            customer_cancelled_unpaid: 'Job closed by the customer',
+            not_repairable: 'Job closed - cannot be repaired',
+            paid_repair_cancelled: 'Job cancelled by an admin',
+            receipt_disputed: 'Customer says the device was not received',
+            receipt_confirmed_by_admin: 'Device receipt confirmed',
+        }[metadata.step] || 'Job update'),
+        message: ({ metadata }) => ({
+            payment_not_made: `The customer did not pay the approved price for repair ${metadata.trackingId} within 3 days, so it was closed. Please return the device.`,
+            customer_cancelled_unpaid: `The customer closed repair ${metadata.trackingId} before paying. Please return the device.`,
+            not_repairable: `Repair ${metadata.trackingId} was closed as not repairable. Please return the device.`,
+            paid_repair_cancelled: `An admin cancelled repair ${metadata.trackingId} and refunded the customer. Please return the device.`,
+            receipt_disputed: `The customer of repair ${metadata.trackingId} says they have not received the device. An admin will look into it.`,
+            receipt_confirmed_by_admin: `An admin confirmed the customer received the device for repair ${metadata.trackingId}.`,
+        }[metadata.step] || `There is an update on repair ${metadata.trackingId}.`),
+        actionUrl: () => '/dashboard/assigned-jobs',
+        deduplicationKey: ({ entityId, metadata }) => `workflow:${entityId}:${metadata.occurrence || 'once'}:${metadata.step || 'update'}:technician`,
+    },
+    repair_needs_admin: {
+        // To every admin (fanned out - the key includes the recipient).
+        entityType: 'repair_request',
+        recipientRole: 'admin',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'occurrence', 'step'],
+        requiresMetadata: ['trackingId'],
+        title: ({ metadata }) => ({
+            cannot_complete: 'Technician cannot finish a paid repair',
+            receipt_disputed: 'Customer says the device was not returned',
+            warranty_overdue: 'Warranty claim overdue',
+        }[metadata.step] || 'A repair needs an admin'),
+        message: ({ metadata }) => ({
+            cannot_complete: `The technician says paid repair ${metadata.trackingId} cannot be finished. Decide whether to cancel and refund it.`,
+            receipt_disputed: `The customer of repair ${metadata.trackingId} says they have not received the device.`,
+            warranty_overdue: `The technician has not acted on a warranty claim for repair ${metadata.trackingId} in time. You can take it over.`,
+        }[metadata.step] || `Repair ${metadata.trackingId} needs an admin.`),
+        actionUrl: ({ entityId, metadata }) => (metadata.step === 'warranty_overdue' ? '/dashboard/warranty-claims' : `/dashboard/manage-repair-requests/${entityId}`),
+        deduplicationKey: ({ entityId, metadata, recipientEmail }) => `workflow:${entityId}:${metadata.occurrence || 'once'}:${metadata.step || 'action'}:${recipientEmail}`,
+    },
 };
 
 module.exports = { NOTIFICATION_EVENTS, ENTITY_TYPES, ROLES, PRIORITIES };

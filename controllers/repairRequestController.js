@@ -30,7 +30,9 @@ const { getPricingEstimate } = require('../services/pricingService');
 const PickupSlotController = require('./pickupSlotController');
 const { isMatchGateSkipped, hasTechnicianFor, recordTurnedAway } = require('../services/technicianMatchGate');
 const { createDisabledEmailService } = require('../services/emailService');
-const { SETTLEMENT_PENDING, SETTLEMENT_AVAILABLE, buildSettlementView } = require('../utils/settlement');
+const { buildSettlementView } = require('../utils/settlement');
+const { confirmReceiptOnce } = require('../services/receiptConfirmation');
+const { isNotRepairable, UNPAID_APPROVED_CLOSE_MS } = require('../services/requestClosure');
 const { inspectionPaymentView, inspectionFeeSettlementView } = require('../utils/inspectionFee');
 const { isRepairRequestPaid, buildPaymentStateMatch } = require('../utils/paymentState');
 const {
@@ -250,8 +252,22 @@ class RepairRequestController {
             // isPaid. The raw settlement is also stripped because it carries
             // technician identity; assigned Technician/Admin viewers get the
             // safe buildSettlementView projection below.
-            const { inspection, quote, repair, assignmentHistory, payment, technicianSettlement, feedbackRevision, inspectionPayment, inspectionFeeSettlement, ...safeRepairRequest } = repairRequest;
+            const { inspection, quote, repair, assignmentHistory, payment, technicianSettlement, feedbackRevision, inspectionPayment, inspectionFeeSettlement, cancellationRefund, ...safeRepairRequest } = repairRequest;
             safeRepairRequest.isPaid = isRepairRequestPaid(repairRequest);
+            // Workflow fixes: safe facts the screens need without the full
+            // inspection/quote - whether the request can be closed as not
+            // repairable, when an approved quote must be paid, and a paid
+            // cancellation's refund (never its Stripe ids).
+            safeRepairRequest.notRepairable = isNotRepairable(repairRequest);
+            if (repairRequest.deliveryStatus === QUOTE_APPROVED && quote && quote.decidedAt) {
+                safeRepairRequest.paymentDueAt = new Date(new Date(quote.decidedAt).getTime() + UNPAID_APPROVED_CLOSE_MS);
+            }
+            if (cancellationRefund) {
+                safeRepairRequest.cancellationRefund = {
+                    total: cancellationRefund.total, currency: cancellationRefund.currency, refundedAt: cancellationRefund.refundedAt || null,
+                    ...(isAdmin ? { parts: (cancellationRefund.parts || []).map((p) => ({ purpose: p.purpose, amount: p.amount, status: p.status, lastError: p.lastError || null })) } : {}),
+                };
+            }
             // Job-portal phases C/D: the inspection fee without its Stripe ids;
             // a kept fee's split only for its technician and admins.
             safeRepairRequest.inspectionPayment = inspectionPaymentView(repairRequest);
@@ -1935,45 +1951,11 @@ class RepairRequestController {
 
             const now = new Date();
             const ownerEmail = normalize(repairRequest.senderEmail);
-            // Atomic single-winner guard: the update only matches when the
-            // repair is completed AND not already confirmed. This is the real
-            // race-resolver (two concurrent confirms produce exactly one
-            // winner), so the tracking event + notification below fire exactly
-            // once and never duplicate.
-            const updateResult = await this.collections.repairRequests.updateOne(
-                {
-                    _id: repairRequest._id,
-                    deliveryStatus: REPAIR_COMPLETED,
-                    $or: [
-                        { customerReceiptConfirmation: { $exists: false } },
-                        { 'customerReceiptConfirmation.status': { $ne: 'confirmed' } },
-                    ],
-                },
-                // The technician's settlement becomes withdrawable at exactly
-                // this moment, and in exactly this update - receipt
-                // confirmation is the single event that releases it, so
-                // payment alone can never make money available. Written with
-                // the confirmation itself rather than afterwards, so the
-                // single winner releases the money exactly once and a failure
-                // cannot leave a confirmed repair with a still-pending
-                // settlement.
-                //
-                // A dotted path is used rather than replacing the sub-document,
-                // so the frozen snapshot (amounts, commission, receivable) is
-                // untouched - only its status and availability timestamp move.
-                // Repairs with no current pending settlement are unaffected;
-                // legacy work is never backfilled here.
-                {
-                    $set: {
-                        deliveryStatus: 'parcel_delivered',
-                        customerReceiptConfirmation: { status: 'confirmed', confirmedAt: now, confirmedBy: ownerEmail },
-                        ...(repairRequest.technicianSettlement?.status === SETTLEMENT_PENDING
-                            ? { 'technicianSettlement.status': SETTLEMENT_AVAILABLE, 'technicianSettlement.availableAt': now }
-                            : {}),
-                        updatedAt: now,
-                    },
-                }
-            );
+            // Atomic single-winner guard, shared with the automatic and admin
+            // confirmations (services/receiptConfirmation.js): it releases the
+            // technician's settlement in the same update, exactly once.
+            const confirmation = await confirmReceiptOnce({ collections: this.collections, request: repairRequest, method: 'customer', now });
+            const updateResult = { matchedCount: confirmation ? 1 : 0 };
 
             if (updateResult.matchedCount === 0) {
                 const latest = await this.RepairRequest.findById(id);

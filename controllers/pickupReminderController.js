@@ -3,6 +3,7 @@ const { SLOT_HOLDING_STATUSES, dhakaDateString } = require('../utils/pickupSlots
 const { formatPickupForEmail } = require('../utils/emailTemplates');
 const { createNotificationService } = require('../services/notificationService');
 const { closeStaleDeclinedRequests } = require('../services/declinedQuoteClose');
+const { closeUnpaidApprovedQuotes } = require('../services/requestClosure');
 const { client } = require('../config/database');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -24,8 +25,13 @@ function secretMatches(provided, expected) {
 // the route refuses every call. Safe to run more than once: the email log
 // allows one reminder per request per pickup slot.
 class PickupReminderController {
-    constructor(models, collections, { emailService, now = () => new Date(), env = process.env, mongoClient = client } = {}) {
+    constructor(models, collections, { emailService, now = () => new Date(), env = process.env, mongoClient = client, workflow = null, warranty = null, expireCheckout = null } = {}) {
+        this.models = models;
         this.collections = collections;
+        // The workflow and warranty jobs below (created on first use; tests inject them).
+        this.workflow = workflow;
+        this.warranty = warranty;
+        this.expireCheckout = expireCheckout;
         this.mongoClient = mongoClient;
         this.emailService = emailService;
         this.notifications = createNotificationService(models);
@@ -74,10 +80,36 @@ class PickupReminderController {
                 console.error('Closing stale declined quotes failed:', error.message);
                 declinedClosed = { error: true };
             }
-            res.send({ date: tomorrow, found: requests.length, inApp, ...email, emailEnabled: this.emailService.enabled, declinedClosed });
+            const { unpaidClosed, receiptsConfirmed, warrantyOverdue } = await this.runWorkflowJobs();
+            res.send({ date: tomorrow, found: requests.length, inApp, ...email, emailEnabled: this.emailService.enabled, declinedClosed, unpaidClosed, receiptsConfirmed, warrantyOverdue });
         } catch (error) {
             res.status(500).send({ message: 'Error sending reminders', code: 'INTERNAL_ERROR' });
         }
+    }
+
+    // Workflow review fixes, in the same daily run: approved quotes unpaid for
+    // 3 days are closed, receipts the technician marked returned 3 days ago
+    // are confirmed, and admins hear about late warranty steps. Each job is
+    // independent - one failing never stops the others.
+    async runWorkflowJobs() {
+        if (!this.workflow) this.workflow = new (require('./workflowController'))(this.models, this.collections, { now: this.now, mongoClient: this.mongoClient });
+        if (!this.warranty) this.warranty = new (require('./warrantyController'))(this.models, this.collections, { now: this.now, mongoClient: this.mongoClient });
+        const expireCheckout = this.expireCheckout || ((sessionId) => require('stripe')(this.env.STRIPE_SECRET).checkout.sessions.expire(sessionId));
+        const attempt = async (label, job) => {
+            try {
+                return await job();
+            } catch (error) {
+                console.error(`${label} failed (will retry tomorrow):`, error.message);
+                return { error: true };
+            }
+        };
+        return {
+            unpaidClosed: await attempt('Closing unpaid approved quotes', () => closeUnpaidApprovedQuotes({
+                collections: this.collections, notifications: this.notifications, User: this.User, mongoClient: this.mongoClient, now: this.now(), expireCheckout,
+            })),
+            receiptsConfirmed: await attempt('Auto-confirming receipts', () => this.workflow.autoConfirmReceipts()),
+            warrantyOverdue: await attempt('Warranty overdue alerts', () => this.warranty.alertOverdueClaims()),
+        };
     }
 
     // In-app reminders for the customer and, when one is assigned, the technician.

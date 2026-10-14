@@ -22,6 +22,9 @@ const { isOpenForApplications, publishedAt, lastPostedAt, CHOOSE_WITHIN_MS } = r
 //                   (job-portal phase D) - an admin retries it from the
 //                   request page. Read from the payments rows, which are what
 //                   gets refunded.
+// - blockedRepairs  the technician says a paid repair cannot be finished - an
+//                   admin cancels and refunds it (controllers/workflowController.js).
+// - receiptDisputes the customer says the repaired device was not returned.
 // A request can be in more than one list; each list is independent.
 const WAITING = 'pending-pickup';
 const ASSIGNED_NOT_COLLECTED = ['assignment_pending', 'driver_assigned', 'rider_arriving'];
@@ -70,7 +73,9 @@ class AdminAttentionController {
             pickupRescheduleRequestedAt: { $exists: false },
         };
         const refundFilter = { purpose: 'inspection_fee', refundStatus: 'pending' };
-        const [overdueWaiting, overdueWaitingTotal, missedPickups, missedPickupsTotal, waiting, technicians, definitions, feeRefunds, feeRefundsTotal] = await Promise.all([
+        const blockedFilter = { deliveryStatus: { $in: ['payment_completed', 'repair_in_progress'] }, repairBlocked: { $exists: true } };
+        const disputeFilter = { deliveryStatus: 'repair_completed', 'deviceReturn.disputedAt': { $exists: true } };
+        const [overdueWaiting, overdueWaitingTotal, missedPickups, missedPickupsTotal, waiting, technicians, definitions, feeRefunds, feeRefundsTotal, blockedRepairs, receiptDisputes] = await Promise.all([
             // Longest overdue first.
             rr.find({ deliveryStatus: WAITING, 'pickupSlot.startsAt': { $lte: now } }, { projection: SUMMARY_PROJECTION })
                 .sort({ 'pickupSlot.startsAt': 1 }).limit(LIST_LIMIT).toArray(),
@@ -86,6 +91,8 @@ class AdminAttentionController {
             this.collections.payments.find(refundFilter, { projection: { requestId: 1, trackingId: 1, amount: 1, currency: 1, refundReason: 1, paidAt: 1, lastRefundAttemptAt: 1 } })
                 .sort({ paidAt: 1 }).limit(LIST_LIMIT).toArray(),
             this.collections.payments.countDocuments(refundFilter),
+            rr.find(blockedFilter, { projection: { ...SUMMARY_PROJECTION, repairBlocked: 1 } }).sort({ 'repairBlocked.reportedAt': 1 }).limit(LIST_LIMIT).toArray(),
+            rr.find(disputeFilter, { projection: { ...SUMMARY_PROJECTION, deviceReturn: 1 } }).sort({ 'deviceReturn.disputedAt': 1 }).limit(LIST_LIMIT).toArray(),
         ]);
 
         const levelByDefinition = new Map(definitions.map((d) => [d._id.toString(), d.requiredExpertiseLevel]));
@@ -118,6 +125,8 @@ class AdminAttentionController {
                 unmatchable: unmatchable.length,
                 unchosen: unchosen.length,
                 feeRefunds: feeRefundsTotal,
+                blockedRepairs: blockedRepairs.length,
+                receiptDisputes: receiptDisputes.length,
             },
             overdueWaiting: overdueWaiting.map(summarize),
             missedPickups: missedPickups.map(summarize),
@@ -129,6 +138,8 @@ class AdminAttentionController {
                 repostCount: doc.repostCount || 0,
                 pendingApplications: 0,
             })),
+            blockedRepairs: blockedRepairs.map((doc) => ({ ...summarize(doc), reason: doc.repairBlocked.reason, reportedAt: doc.repairBlocked.reportedAt })),
+            receiptDisputes: receiptDisputes.map((doc) => ({ ...summarize(doc), note: doc.deviceReturn.disputeNote || '', disputedAt: doc.deviceReturn.disputedAt })),
             feeRefunds: feeRefunds.map((row) => ({
                 id: row.requestId,
                 trackingId: row.trackingId || null,
