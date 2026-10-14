@@ -49,6 +49,10 @@ const collections = {
     emailLog: db.collection("email_log"),
     turnedAwayRequests: db.collection("turned_away_requests"),
     jobApplications: db.collection("job_applications"),
+    // Repair warranty claims (utils/warranty.js) and the photos customers
+    // upload with them.
+    warrantyClaims: db.collection("warranty_claims"),
+    warrantyPhotoUploads: db.collection("warranty_photo_uploads"),
     // The last AI summary written for each Reports period (one row per period).
     aiReportSummaries: db.collection("ai_report_summaries"),
 };
@@ -303,6 +307,13 @@ async function connectDatabase() {
                     { name: 'jobApplications_request_technician_unique', unique: true }
                 );
                 await collections.jobApplications.createIndex({ technicianId: 1, status: 1 }, { name: 'jobApplications_technician_status' });
+                // Warranty claims: by repair, by technician, and the admin queue.
+                await collections.warrantyClaims.createIndex({ requestId: 1, createdAt: 1 }, { name: 'warrantyClaims_request' });
+                await collections.warrantyClaims.createIndex({ technicianId: 1, status: 1 }, { name: 'warrantyClaims_technician_status' });
+                await collections.warrantyClaims.createIndex({ status: 1, updatedAt: -1 }, { name: 'warrantyClaims_status' });
+                // An unused claim photo upload expires; attaching it to a claim
+                // removes expiresAt so it is kept.
+                await collections.warrantyPhotoUploads.createIndex({ expiresAt: 1 }, { name: 'warrantyPhotoUploads_expiresAt_ttl', expireAfterSeconds: 0 });
                 // Refused requests (services/technicianMatchGate.js) expire after
                 // 180 days; reports read them by day.
                 await collections.turnedAwayRequests.createIndex(

@@ -54,6 +54,11 @@ const SETTLEMENT_VERSION = 1;
 // ever has to be re-written when a withdrawal is raised, paid or rejected.
 const SETTLEMENT_PENDING = 'pending';
 const SETTLEMENT_AVAILABLE = 'available';
+// Taken back because the customer was refunded under the repair warranty
+// (services/warrantyRefunds.js). A reversed settlement is no longer earned:
+// it counts toward no balance, so money already withdrawn against it is
+// netted from the technician's future earnings.
+const SETTLEMENT_REVERSED = 'reversed';
 
 // Withdrawal lifecycle. 'requested' is the only open state.
 const WITHDRAWAL_REQUESTED = 'requested';
@@ -258,6 +263,7 @@ function calculateWallet({ repairRequests = [], withdrawals = [] } = {}) {
         if (!settlement) continue;
         if (isLegacyAlreadyPaid(repairRequest)) continue;
         if (!isWholeTaka(settlement.technicianReceivable)) continue;
+        if (settlement.status === SETTLEMENT_REVERSED) continue;
 
         settlementCount += 1;
         lifetimeReceivable += settlement.technicianReceivable;
@@ -292,11 +298,15 @@ function calculateWallet({ repairRequests = [], withdrawals = [] } = {}) {
     }
 
     const availableBalance = Math.max(0, grossAvailableBalance - reservedBalance - withdrawnBalance);
+    // What the technician owes after a warranty refund took back money they had
+    // already been paid; new earnings cover it before anything is withdrawable.
+    const owedBalance = Math.max(0, reservedBalance + withdrawnBalance - grossAvailableBalance);
 
     return {
         pendingBalance,
         grossAvailableBalance,
         availableBalance,
+        owedBalance,
         reservedBalance,
         withdrawnBalance,
         lifetimeReceivable,
@@ -428,6 +438,7 @@ module.exports = {
     SETTLEMENT_VERSION,
     SETTLEMENT_PENDING,
     SETTLEMENT_AVAILABLE,
+    SETTLEMENT_REVERSED,
     WITHDRAWAL_REQUESTED,
     WITHDRAWAL_PAID,
     WITHDRAWAL_REJECTED,

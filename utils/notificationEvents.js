@@ -634,6 +634,82 @@ const NOTIFICATION_EVENTS = {
         actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
         deduplicationKey: ({ entityId }) => `repair:${entityId}:repair_finished`,
     },
+    // Repair warranty (utils/warranty.js). Three types, one per audience; the
+    // `step` says what happened, so each claim step is its own notification
+    // (dedup per claim + step). Copy never includes amounts or private notes.
+    warranty_update: {
+        // To the customer who owns the repair.
+        entityType: 'repair_request',
+        recipientRoles: ['user', 'rider', 'admin'],
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'occurrence', 'step'],
+        requiresMetadata: ['trackingId'],
+        title: ({ metadata }) => ({
+            inspection_scheduled: 'Warranty re-inspection booked',
+            covered: 'Warranty claim accepted',
+            not_covered: 'Warranty claim not covered',
+            fixed: 'Warranty repair done - please confirm',
+            cannot_fix: 'Warranty refund on its way',
+            review_upheld: 'Warranty review decided',
+            review_overturned: 'Warranty claim accepted on review',
+            refunded: 'Warranty refund sent',
+        }[metadata.step] || 'Warranty claim update'),
+        message: ({ metadata }) => ({
+            inspection_scheduled: `Your technician booked a free re-inspection for repair ${metadata.trackingId}.`,
+            covered: `Your warranty claim for repair ${metadata.trackingId} is covered. Your technician will repair it again for free.`,
+            not_covered: `Your technician found the problem with repair ${metadata.trackingId} is not covered. You can ask an admin to review this within 7 days.`,
+            fixed: `Your technician says repair ${metadata.trackingId} is fixed. Please confirm whether it works.`,
+            cannot_fix: `Your technician could not fix repair ${metadata.trackingId} again. An admin will refund the repair amount.`,
+            review_upheld: `An admin reviewed your warranty claim for repair ${metadata.trackingId} and agreed it is not covered.`,
+            review_overturned: `An admin reviewed your warranty claim for repair ${metadata.trackingId}: it is covered, and your technician will repair it again for free.`,
+            refunded: `The repair amount for ${metadata.trackingId} has been refunded.`,
+        }[metadata.step] || `There is an update on your warranty claim for repair ${metadata.trackingId}.`),
+        actionUrl: ({ entityId }) => `/dashboard/my-requests/${entityId}`,
+        deduplicationKey: ({ entityId, metadata }) => `warranty:${entityId}:${metadata.occurrence || 'claim'}:${metadata.step || 'update'}:customer`,
+    },
+    warranty_update_technician: {
+        // To the technician who did the repair.
+        entityType: 'repair_request',
+        recipientRole: 'rider',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'occurrence', 'step'],
+        requiresMetadata: ['trackingId'],
+        title: ({ metadata }) => ({
+            opened: 'New warranty claim',
+            confirmed_fixed: 'Warranty claim closed',
+            not_fixed: 'Warranty claim: customer says not fixed',
+            review_requested: 'Warranty decision sent to admin review',
+            review_upheld: 'Warranty review decided',
+            review_overturned: 'Warranty claim accepted on review',
+            refunded: 'Warranty refund made',
+        }[metadata.step] || 'Warranty claim update'),
+        message: ({ metadata }) => ({
+            opened: `A customer opened a warranty claim on repair ${metadata.trackingId}. Please book a free re-inspection.`,
+            confirmed_fixed: `The customer confirmed repair ${metadata.trackingId} is fixed. The warranty claim is closed.`,
+            not_fixed: `The customer says repair ${metadata.trackingId} is still not fixed. An admin will refund the repair amount.`,
+            review_requested: `The customer asked an admin to review your "not covered" decision on repair ${metadata.trackingId}.`,
+            review_upheld: `An admin agreed the warranty claim on repair ${metadata.trackingId} is not covered.`,
+            review_overturned: `An admin decided the warranty claim on repair ${metadata.trackingId} is covered. Please repair it again for free.`,
+            refunded: `The customer of repair ${metadata.trackingId} was refunded under the warranty. Your share of that repair was taken back from your wallet.`,
+        }[metadata.step] || `There is an update on a warranty claim for repair ${metadata.trackingId}.`),
+        actionUrl: () => '/dashboard/warranty-claims',
+        deduplicationKey: ({ entityId, metadata }) => `warranty:${entityId}:${metadata.occurrence || 'claim'}:${metadata.step || 'update'}:technician`,
+    },
+    warranty_admin_action: {
+        // To every admin: a review to decide, or a refund to make. Fanned out,
+        // so the key includes the recipient (see repair_request_created).
+        entityType: 'repair_request',
+        recipientRole: 'admin',
+        priority: 'normal',
+        allowedMetadataKeys: ['trackingId', 'occurrence', 'step'],
+        requiresMetadata: ['trackingId'],
+        title: ({ metadata }) => (metadata.step === 'refund_needed' ? 'Warranty refund needed' : 'Warranty review requested'),
+        message: ({ metadata }) => (metadata.step === 'refund_needed'
+            ? `Repair ${metadata.trackingId} could not be fixed under warranty. Please refund the repair amount.`
+            : `A customer asked for a review of a "not covered" warranty decision on repair ${metadata.trackingId}.`),
+        actionUrl: () => '/dashboard/warranty-claims',
+        deduplicationKey: ({ entityId, metadata, recipientEmail }) => `warranty:${entityId}:${metadata.occurrence || 'claim'}:${metadata.step || 'action'}:${recipientEmail}`,
+    },
 };
 
 module.exports = { NOTIFICATION_EVENTS, ENTITY_TYPES, ROLES, PRIORITIES };

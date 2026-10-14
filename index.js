@@ -32,6 +32,7 @@ const adminReportRoutes = require('./routes/adminReports');
 const missedPickupRoutes = require('./routes/missedPickups');
 const jobPortalRoutes = require('./routes/jobPortal');
 const inspectionFeeRoutes = require('./routes/inspectionFee');
+const warrantyRoutes = require('./routes/warranty');
 const aiRequestDraftRoutes = require('./routes/aiRequestDraft');
 const { isEmailVerificationSkipped } = require('./middleware/auth');
 
@@ -107,6 +108,7 @@ adminReportRoutes(app, controllers);
 missedPickupRoutes(app, controllers);
 jobPortalRoutes(app, controllers);
 inspectionFeeRoutes(app, controllers);
+warrantyRoutes(app, controllers);
 aiRequestDraftRoutes(app, controllers);
 repairRequestRoutes(app, controllers);
 paymentRoutes(app, controllers);

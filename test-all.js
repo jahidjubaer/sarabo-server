@@ -67,6 +67,7 @@ const { runInAppReminderTests } = require('./tests/inAppReminderTests');
 const { runMatchGateTests } = require('./tests/matchGateTests');
 const { runJobPortalTests } = require('./tests/jobPortalTests');
 const { runOfferRankingTests } = require('./tests/offerRankingTests');
+const { runWarrantyTests } = require('./tests/warrantyTests');
 const { runInspectionFeeTests } = require('./tests/inspectionFeeTests');
 const { runInspectionFeeOutcomeTests } = require('./tests/inspectionFeeOutcomeTests');
 const { runDeclinedQuoteCloseTests } = require('./tests/declinedQuoteCloseTests');
@@ -4650,10 +4651,12 @@ async function testNotificationFoundation() {
             // Declined-quote follow-through.
             'declined_request_closed', 'declined_request_auto_closed',
             // Final payout when an admin removes a technician.
-            'technician_removed_final_payout'
+            'technician_removed_final_payout',
+            // Repair warranty.
+            'warranty_update', 'warranty_update_technician', 'warranty_admin_action'
         ];
         const actualTypes = Object.keys(NOTIFICATION_EVENTS);
-        logTest('1. All 41 event types exist', actualTypes.length === 41 && expectedTypes.every(t => actualTypes.includes(t)));
+        logTest('1. All 44 event types exist', actualTypes.length === 44 && expectedTypes.every(t => actualTypes.includes(t)));
 
         let allHaveTitleMessage = true;
         let allHaveValidEntityType = true;
@@ -5082,7 +5085,9 @@ async function testNotificationFoundation() {
             'declined_request_auto_closed',
             // Withdrawal outcomes: also reach a technician an admin removed
             // (now role 'user') whose final payout is settled.
-            'withdrawal_paid', 'withdrawal_rejected'];
+            'withdrawal_paid', 'withdrawal_rejected',
+            // Repair warranty: the customer's updates go to the request's owner.
+            'warranty_update'];
         const actualMultiRoleTypes = actualTypes.filter(t => Object.prototype.hasOwnProperty.call(NOTIFICATION_EVENTS[t], 'recipientRoles'));
         logTest(
             '59. Only the approved owner-facing events are multi-role',
@@ -13601,6 +13606,7 @@ async function runAllTests() {
     await runMatchGateTests({ logTest });
     await runJobPortalTests({ logTest });
     await runOfferRankingTests({ logTest });
+    await runWarrantyTests({ logTest });
     await runInspectionFeeTests({ logTest });
     await runInspectionFeeOutcomeTests({ logTest });
     await runDeclinedQuoteCloseTests({ logTest });

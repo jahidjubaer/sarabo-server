@@ -22,6 +22,7 @@ const MissedPickupController = require('./missedPickupController');
 const ServiceAvailabilityController = require('./serviceAvailabilityController');
 const JobPortalController = require('./jobPortalController');
 const InspectionFeeController = require('./inspectionFeeController');
+const WarrantyController = require('./warrantyController');
 const AiRequestDraftController = require('./aiRequestDraftController');
 const AdminReportSummaryController = require('./adminReportSummaryController');
 const { loadEmailConfig } = require('../config/email');
@@ -124,6 +125,7 @@ function initializeControllers(models, collections, dependencies = {}) {
         serviceAvailability: new ServiceAvailabilityController(models, collections),
         jobPortal: new JobPortalController(models, collections, { aiOfferNoteService }),
         inspectionFee: new InspectionFeeController(models, collections),
+        warranty: new WarrantyController(models, collections),
         aiRequestDraft: new AiRequestDraftController({ aiRequestDraftService, aiOfferNoteService, aiReportSummaryService, config: aiRequestHelperConfig }),
         support: new SupportController({
             aiSupportService,
