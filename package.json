@@ -13,7 +13,8 @@
     "dev": "node index.js",
     "seed:service-definitions": "node scripts/seed-service-definitions.js",
     "seed:qa-repair-requests": "node scripts/seed-qa-repair-requests.js",
-    "seed:dev-jobs": "node scripts/seed-dev-jobs.js"
+    "seed:dev-jobs": "node scripts/seed-dev-jobs.js",
+    "migrate:inspection-fee-floor": "node scripts/migrate-inspection-fee-floor.js"
   },
   "keywords": [],
   "author": "",

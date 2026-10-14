@@ -43,7 +43,8 @@ async function runJobPortalTests({ logTest }) {
     };
     const definition = await c.serviceDefinitions.findOne({ isActive: true, 'pricingRule.inspectionFee': { $gt: 0 } })
         || await c.serviceDefinitions.findOne({ isActive: true });
-    const cap = Math.floor(definition.pricingRule.inspectionFee || 0);
+    // At least the 200 BDT floor for these 3,000 BDT estimates (utils/inspectionFee.js).
+    const cap = Math.max(Math.floor(definition.pricingRule.inspectionFee || 0), 200);
     const insertTech = async (name, overrides = {}) => {
         const email = `portal-${name}-${runId}@example.test`;
         emails.push(email);
@@ -70,9 +71,10 @@ async function runJobPortalTests({ logTest }) {
         requestIds.push(insertedId);
         return insertedId.toString();
     };
-    // A zero inspection fee books straight away; the paid-fee flow is covered
-    // in tests/inspectionFeeTests.js.
-    const good = { estimateMin: 1200, estimateMax: 2500, inspectionFee: 0, note: 'Screen connector, likely.' };
+    // Offers charge the 200 BDT floor. The accept tests below use an offer made
+    // before the floor (fee 0), which books straight away; the paid-fee flow is
+    // covered in tests/inspectionFeeTests.js.
+    const good = { estimateMin: 1200, estimateMax: 2500, inspectionFee: 200, note: 'Screen connector, likely.' };
 
     try {
         await c.users.insertMany([{ email: CUSTOMER, role: 'user', createdAt: new Date() }, { email: ADMIN, role: 'admin', createdAt: new Date() }]);
@@ -150,6 +152,7 @@ async function runJobPortalTests({ logTest }) {
         const busyApp = await c.jobApplications.findOne({ requestId: open, technicianId: busyTech.id });
         logTest('Job portal: a technician on another job cannot be accepted right now',
             (await call('accept', CUSTOMER, { params: { id: open, applicationId: busyApp._id.toString() } })).body.code === 'TECHNICIAN_BUSY');
+        await c.jobApplications.updateMany({ requestId: open }, { $set: { inspectionFee: 0 } });
         const alphaDoc = await c.jobApplications.findOne({ requestId: open, technicianId: alpha.id });
         logTest('Job portal: only the owner can accept',
             (await call('accept', `stranger-${runId}@example.test`, { params: { id: open, applicationId: alphaDoc._id.toString() } })).statusCode === 404);

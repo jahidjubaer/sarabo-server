@@ -1,6 +1,8 @@
 // The full repair-service seed (data/serviceDefinitionSeedExtra.js): every
 // product/repair pair the taxonomy allows has exactly one valid BDT service,
 // the canonical 16 are untouched, and the seed only inserts what is missing.
+const { minimumInspectionFee } = require('../utils/inspectionFee');
+
 async function runServiceCatalogTests({ logTest }) {
     const { connectDatabase, collections: c, client } = require('../config/database');
     const { SERVICE_DEFINITION_SEED } = require('../data/serviceDefinitionSeed');
@@ -24,12 +26,12 @@ async function runServiceCatalogTests({ logTest }) {
             && validateProductRepairPair(r.productCategorySlug, r.repairCategorySlug).valid
             && r.pricingRule.currency === 'BDT' && r.pricingRule.baseMin % 100 === 0 && r.pricingRule.baseMax % 100 === 0
             && r.pricingRule.baseMin <= r.pricingRule.baseMax && r.pricingRule.inspectionFee % 100 === 0));
-    logTest('Service catalogue: inspection and photo hints follow the repair category, and only an inspection carries a fee',
+    logTest('Service catalogue: inspection and photo hints follow the repair category, and every service carries at least the fee floor',
         EXTRA_SERVICE_DEFINITION_SEED.every((r) => {
             const category = getRepairCategoryBySlug(r.repairCategorySlug);
             return r.inspectionRequired === category.inspectionNormallyRequired
                 && r.imageRequirements.recommended === category.imageEvidenceUseful
-                && (r.inspectionRequired ? r.pricingRule.inspectionFee > 0 : r.pricingRule.inspectionFee === 0);
+                && r.pricingRule.inspectionFee >= minimumInspectionFee(r.pricingRule.baseMax);
         }));
     logTest('Service catalogue: a mobile phone now offers 8 repairs', ALL_SERVICE_DEFINITION_SEED.filter((r) => r.productCategorySlug === 'smartphone').length === 8);
 

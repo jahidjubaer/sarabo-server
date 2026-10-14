@@ -3,7 +3,7 @@ const { client } = require('../config/database');
 const { createNotificationService } = require('../services/notificationService');
 const { canTechnicianEverTakeRequest } = require('../services/technicianEligibilityService');
 const {
-    isOpenForApplications, publishedAt, lastPostedAt, canReoffer, maxInspectionFee, validateApplicationInput, validateDeclineInput,
+    isOpenForApplications, publishedAt, lastPostedAt, canReoffer, maxInspectionFee, minInspectionFee, validateApplicationInput, validateDeclineInput,
     OPEN_REQUEST_FILTER,
 } = require('../utils/jobPortal');
 const { bookApplication, notifyBooking } = require('../services/jobBooking');
@@ -246,6 +246,7 @@ class JobPortalController {
                         photoCount: r.damage.images.length,
                         catalogueEstimate: { min: r.pricing.estimateMin, max: r.pricing.estimateMax, currency: r.pricing.currency },
                         maxInspectionFee: maxInspectionFee(r),
+                        minInspectionFee: minInspectionFee(r),
                         publishedAt: publishedAt(r),
                         postedAt: lastPostedAt(r),
                         reposted: !!r.repostedAt,
@@ -321,7 +322,7 @@ class JobPortalController {
             if (!isOpenForApplications(request) || !canTechnicianEverTakeRequest(technician, this.needsOf(request, levels))) {
                 return refuse(res, 409, 'JOB_NOT_OPEN', 'this job is not open to you');
             }
-            const check = validateApplicationInput(req.body, { maxFee: maxInspectionFee(request) });
+            const check = validateApplicationInput(req.body, { maxFee: maxInspectionFee(request), minFee: minInspectionFee(request) });
             if (!check.valid) return refuse(res, 400, check.code, check.message);
 
             const requestId = request._id.toString();

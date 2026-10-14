@@ -73,6 +73,8 @@ const { runWorkflowFixesTests } = require('./tests/workflowFixesTests');
 const { runRemainingGapsTests } = require('./tests/remainingGapsTests');
 const { runInspectionFeeTests } = require('./tests/inspectionFeeTests');
 const { runInspectionFeeOutcomeTests } = require('./tests/inspectionFeeOutcomeTests');
+const { runInspectionFeeFloorTests } = require('./tests/inspectionFeeFloorTests');
+const { withMinimumInspectionFee } = require('./utils/inspectionFee');
 const { runDeclinedQuoteCloseTests } = require('./tests/declinedQuoteCloseTests');
 
 // Known local-development accounts (see docs for this project's role bootstrap).
@@ -8289,7 +8291,8 @@ async function testServiceDefinitions() {
             byIdParsed.pricingEstimate?.currency === 'usd' &&
             byIdParsed.pricingEstimate?.min === 33 &&
             byIdParsed.pricingEstimate?.max === 77 &&
-            byIdParsed.pricingEstimate?.inspectionFee === 11
+            // Stored 11, shown at the 100 BDT fee floor (utils/inspectionFee.js).
+            byIdParsed.pricingEstimate?.inspectionFee === 100
         );
 
         await makeRequest(
@@ -8316,7 +8319,7 @@ async function testServiceDefinitions() {
         logTest(
             '33. Pricing estimate helper returns server-owned values',
             estimate.currency === 'usd' && estimate.estimateMin === 33 && estimate.estimateMax === 77 &&
-            estimate.inspectionFee === 11 && estimate.pricingVersion === 1
+            estimate.inspectionFee === 100 && estimate.pricingVersion === 1
         );
 
         const tamperedDoc = { ...storedDocA, clientSuppliedCost: 999999 };
@@ -8895,7 +8898,7 @@ async function testRepairRequestV2() {
         logTest('21. Pricing snapshot matches service definition', v2Doc.pricing.estimateMin === 25 && v2Doc.pricing.estimateMax === 75);
         logTest('22. Currency server-derived', v2Doc.pricing.currency === 'usd');
         logTest('23. Estimate min/max server-derived', v2Doc.pricing.estimateMin === activeDef.pricingRule.baseMin && v2Doc.pricing.estimateMax === activeDef.pricingRule.baseMax);
-        logTest('24. Inspection fee server-derived', v2Doc.pricing.inspectionFee === activeDef.pricingRule.inspectionFee);
+        logTest('24. Inspection fee server-derived', v2Doc.pricing.inspectionFee === withMinimumInspectionFee(activeDef.pricingRule.inspectionFee, activeDef.pricingRule.baseMax));
         logTest('25. Calculation version server-derived', v2Doc.pricing.calculationVersion === activeDef.pricingRule.version);
 
         // quoteStatus derivation (Phase I): inspectionRequired === true ->
@@ -13617,6 +13620,7 @@ async function runAllTests() {
     await runWarrantyTests({ logTest });
     await runInspectionFeeTests({ logTest });
     await runInspectionFeeOutcomeTests({ logTest });
+    await runInspectionFeeFloorTests({ logTest });
     await runDeclinedQuoteCloseTests({ logTest });
     // Last: its daily job looks at the whole test database.
     await runWorkflowFixesTests({ logTest });

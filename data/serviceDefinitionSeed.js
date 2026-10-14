@@ -8,6 +8,10 @@
 // deliberately remains USD-configured (see config/paymentConfig.js) - v2
 // requests are not payable yet, so the two never meet in this unit.
 //
+// INSPECTION FEE FLOOR (2026-10-14): every service has an inspection fee of
+// at least 100 BDT (estimate up to 1,000 BDT) or 200 BDT (bigger repairs) -
+// see utils/inspectionFee.js#minimumInspectionFee.
+//
 // PRICING PROVENANCE: every baseMin/baseMax/inspectionFee below is an
 // explicit, business-set BDT amount for this unit - NOT a runtime exchange-
 // rate conversion of the previous USD figures. The values are whole-taka
@@ -44,7 +48,7 @@ const SERVICE_DEFINITION_SEED = [
         label: 'General Diagnosis - Mobile Phone',
         description: `Initial diagnosis for an unclear smartphone problem. ${PROVISIONAL_NOTE}`,
         isActive: true,
-        pricingRule: { currency: 'BDT', baseMin: 300, baseMax: 500, inspectionFee: 0, version: 2 },
+        pricingRule: { currency: 'BDT', baseMin: 300, baseMax: 500, inspectionFee: 100, version: 2 },
         requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30,
         inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true }
     },
@@ -53,7 +57,7 @@ const SERVICE_DEFINITION_SEED = [
         label: 'Screen Replacement - Mobile Phone',
         description: `Replacement of a cracked or unresponsive smartphone display. ${PROVISIONAL_NOTE}`,
         isActive: true,
-        pricingRule: { currency: 'BDT', baseMin: 1500, baseMax: 6000, inspectionFee: 0, version: 2 },
+        pricingRule: { currency: 'BDT', baseMin: 1500, baseMax: 6000, inspectionFee: 200, version: 2 },
         requiredExpertiseLevel: 'intermediate', estimatedDurationMinutes: 45,
         inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true }
     },
@@ -62,7 +66,7 @@ const SERVICE_DEFINITION_SEED = [
         label: 'General Diagnosis - Laptop / Computer',
         description: `Initial diagnosis for an unclear laptop or computer problem. ${PROVISIONAL_NOTE}`,
         isActive: true,
-        pricingRule: { currency: 'BDT', baseMin: 500, baseMax: 800, inspectionFee: 0, version: 2 },
+        pricingRule: { currency: 'BDT', baseMin: 500, baseMax: 800, inspectionFee: 100, version: 2 },
         requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30,
         inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true }
     },
@@ -80,7 +84,7 @@ const SERVICE_DEFINITION_SEED = [
         label: 'General Diagnosis - TV / Electronics',
         description: `Initial diagnosis for an unclear television problem. ${PROVISIONAL_NOTE}`,
         isActive: true,
-        pricingRule: { currency: 'BDT', baseMin: 500, baseMax: 800, inspectionFee: 0, version: 2 },
+        pricingRule: { currency: 'BDT', baseMin: 500, baseMax: 800, inspectionFee: 100, version: 2 },
         requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30,
         inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true }
     },
@@ -89,7 +93,7 @@ const SERVICE_DEFINITION_SEED = [
         label: 'Screen / Panel Repair - TV',
         description: `Diagnosis and repair of a damaged or malfunctioning television panel. ${PROVISIONAL_NOTE}`,
         isActive: true,
-        pricingRule: { currency: 'BDT', baseMin: 4000, baseMax: 18000, inspectionFee: 0, version: 2 },
+        pricingRule: { currency: 'BDT', baseMin: 4000, baseMax: 18000, inspectionFee: 200, version: 2 },
         requiredExpertiseLevel: 'advanced', estimatedDurationMinutes: 120,
         inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true }
     },
@@ -98,7 +102,7 @@ const SERVICE_DEFINITION_SEED = [
         label: 'General Diagnosis - Refrigerator',
         description: `Initial diagnosis for an unclear refrigerator problem. ${PROVISIONAL_NOTE}`,
         isActive: true,
-        pricingRule: { currency: 'BDT', baseMin: 500, baseMax: 800, inspectionFee: 0, version: 2 },
+        pricingRule: { currency: 'BDT', baseMin: 500, baseMax: 800, inspectionFee: 100, version: 2 },
         requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30,
         inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true }
     },
@@ -116,7 +120,7 @@ const SERVICE_DEFINITION_SEED = [
         label: 'General Diagnosis - Washing Machine',
         description: `Initial diagnosis for an unclear washing machine problem. ${PROVISIONAL_NOTE}`,
         isActive: true,
-        pricingRule: { currency: 'BDT', baseMin: 500, baseMax: 800, inspectionFee: 0, version: 2 },
+        pricingRule: { currency: 'BDT', baseMin: 500, baseMax: 800, inspectionFee: 100, version: 2 },
         requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30,
         inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true }
     },
@@ -134,7 +138,7 @@ const SERVICE_DEFINITION_SEED = [
         label: 'General Diagnosis - AC',
         description: `Initial diagnosis for an unclear air conditioner problem. ${PROVISIONAL_NOTE}`,
         isActive: true,
-        pricingRule: { currency: 'BDT', baseMin: 500, baseMax: 800, inspectionFee: 0, version: 2 },
+        pricingRule: { currency: 'BDT', baseMin: 500, baseMax: 800, inspectionFee: 100, version: 2 },
         requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30,
         inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true }
     },
@@ -152,7 +156,7 @@ const SERVICE_DEFINITION_SEED = [
         label: 'General Diagnosis - Microwave',
         description: `Initial diagnosis for an unclear microwave problem. ${PROVISIONAL_NOTE}`,
         isActive: true,
-        pricingRule: { currency: 'BDT', baseMin: 400, baseMax: 700, inspectionFee: 0, version: 2 },
+        pricingRule: { currency: 'BDT', baseMin: 400, baseMax: 700, inspectionFee: 100, version: 2 },
         requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30,
         inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true }
     },
@@ -170,7 +174,7 @@ const SERVICE_DEFINITION_SEED = [
         label: 'General Diagnosis - Other Electronics',
         description: `Initial diagnosis for any other electronic device or appliance. ${PROVISIONAL_NOTE}`,
         isActive: true,
-        pricingRule: { currency: 'BDT', baseMin: 400, baseMax: 700, inspectionFee: 0, version: 2 },
+        pricingRule: { currency: 'BDT', baseMin: 400, baseMax: 700, inspectionFee: 100, version: 2 },
         requiredExpertiseLevel: 'beginner', estimatedDurationMinutes: 30,
         inspectionRequired: false, imageRequirements: { min: 0, max: 3, recommended: true }
     },

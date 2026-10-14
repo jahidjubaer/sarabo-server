@@ -16,6 +16,7 @@
 // an admin has changed.
 const { getRepairCategoryBySlug } = require('../utils/repairCategory');
 const { SERVICE_DEFINITION_SEED, PROVISIONAL_NOTE } = require('./serviceDefinitionSeed');
+const { withMinimumInspectionFee } = require('../utils/inspectionFee');
 
 function service(productCategorySlug, repairCategorySlug, label, summary, [baseMin, baseMax, inspectionFee], requiredExpertiseLevel, estimatedDurationMinutes) {
     const category = getRepairCategoryBySlug(repairCategorySlug);
@@ -24,7 +25,7 @@ function service(productCategorySlug, repairCategorySlug, label, summary, [baseM
         productCategorySlug, repairCategorySlug, label,
         description: `${summary} ${PROVISIONAL_NOTE}`,
         isActive: true,
-        pricingRule: { currency: 'BDT', baseMin, baseMax, inspectionFee: inspectionRequired ? inspectionFee : 0, version: 2 },
+        pricingRule: { currency: 'BDT', baseMin, baseMax, inspectionFee: withMinimumInspectionFee(inspectionRequired ? inspectionFee : 0, baseMax), version: 2 },
         requiredExpertiseLevel, estimatedDurationMinutes,
         inspectionRequired, imageRequirements: { min: 0, max: 3, recommended: category.imageEvidenceUseful },
     };

@@ -77,7 +77,8 @@ async function runInspectionFeeTests({ logTest }) {
     };
     const definition = await c.serviceDefinitions.findOne({ isActive: true, 'pricingRule.inspectionFee': { $gte: 100 } })
         || await c.serviceDefinitions.findOne({ isActive: true, 'pricingRule.inspectionFee': { $gt: 0 } });
-    const cap = Math.floor(definition.pricingRule.inspectionFee);
+    // High enough that a second, lower offer still clears the 200 BDT floor.
+    const cap = Math.max(Math.floor(definition.pricingRule.inspectionFee), 300);
     const insertTech = async (name) => {
         const email = `fee-${name}-${runId}@example.test`;
         emails.push(email);

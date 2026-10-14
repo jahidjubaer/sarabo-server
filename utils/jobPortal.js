@@ -7,6 +7,7 @@
 // (repostedAt); the admin is alerted only if no technician has an offer
 // waiting 24 hours after it was last posted.
 const { isV2RepairRequest } = require('./repairRequestSchema');
+const { minimumInspectionFee, withMinimumInspectionFee } = require('./inspectionFee');
 
 const CHOOSE_WITHIN_MS = 24 * 60 * 60 * 1000;
 const MAX_ESTIMATE_BDT = 100000;
@@ -71,10 +72,18 @@ function validateDeclineInput(body) {
 }
 
 // The most a technician may charge for the visit: the service's inspection fee
-// as priced when the request was made (admins set it in Services & prices).
+// as priced when the request was made (admins set it in Services & prices),
+// never below the fee floor - so requests made before the floor existed
+// follow it too.
 function maxInspectionFee(request) {
-    const fee = request && request.pricing ? Number(request.pricing.inspectionFee) : 0;
-    return Number.isFinite(fee) && fee > 0 ? Math.floor(fee) : 0;
+    const pricing = (request && request.pricing) || {};
+    return Math.floor(withMinimumInspectionFee(pricing.inspectionFee, pricing.estimateMax));
+}
+
+// The least a technician may charge for the visit (utils/inspectionFee.js).
+function minInspectionFee(request) {
+    const pricing = (request && request.pricing) || {};
+    return minimumInspectionFee(pricing.estimateMax);
 }
 
 function isWholeAmount(value, min, max) {
@@ -82,7 +91,7 @@ function isWholeAmount(value, min, max) {
 }
 
 // { valid, normalized } or { valid: false, code, message }.
-function validateApplicationInput(body, { maxFee }) {
+function validateApplicationInput(body, { maxFee, minFee = 0 }) {
     if (typeof body !== 'object' || body === null || Array.isArray(body)) {
         return { valid: false, code: 'INVALID_APPLICATION', message: 'application must be an object' };
     }
@@ -93,8 +102,11 @@ function validateApplicationInput(body, { maxFee }) {
     if (estimateMin > estimateMax) {
         return { valid: false, code: 'INVALID_ESTIMATE', message: 'the lowest estimate cannot be above the highest' };
     }
-    if (!isWholeAmount(inspectionFee, 0, maxFee)) {
-        return { valid: false, code: 'INSPECTION_FEE_TOO_HIGH', message: `the inspection fee must be whole taka from 0 to ${maxFee}` };
+    if (Number.isInteger(inspectionFee) && inspectionFee < minFee) {
+        return { valid: false, code: 'INSPECTION_FEE_TOO_LOW', message: `the inspection fee must be at least ${minFee} taka` };
+    }
+    if (!isWholeAmount(inspectionFee, minFee, maxFee)) {
+        return { valid: false, code: 'INSPECTION_FEE_TOO_HIGH', message: `the inspection fee must be whole taka from ${minFee} to ${maxFee}` };
     }
     const note = body.note === undefined || body.note === null ? '' : body.note;
     if (typeof note !== 'string' || note.trim().length > NOTE_MAX_LENGTH) {
@@ -115,6 +127,7 @@ module.exports = {
     lastPostedAt,
     canReoffer,
     maxInspectionFee,
+    minInspectionFee,
     validateApplicationInput,
     validateDeclineInput,
 };

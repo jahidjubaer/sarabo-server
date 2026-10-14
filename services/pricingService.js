@@ -6,13 +6,15 @@
 // area fee, brand modifier) and produces no quote or final amount - it is
 // strictly the estimate range plus optional inspection fee, matching the
 // locked "hybrid pricing" architecture decision.
+const { withMinimumInspectionFee } = require('../utils/inspectionFee');
+
 function getPricingEstimate(serviceDefinition) {
     const { pricingRule } = serviceDefinition;
     return {
         currency: pricingRule.currency,
         estimateMin: pricingRule.baseMin,
         estimateMax: pricingRule.baseMax,
-        inspectionFee: pricingRule.inspectionFee,
+        inspectionFee: withMinimumInspectionFee(pricingRule.inspectionFee, pricingRule.baseMax),
         pricingVersion: pricingRule.version
     };
 }

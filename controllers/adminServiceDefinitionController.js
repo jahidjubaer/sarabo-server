@@ -3,6 +3,15 @@ const { validateServiceDefinitionInput, buildDocumentFromInput, WRITABLE_TOP_LEV
 const { PRODUCT_CATEGORY_SLUGS } = require('../utils/productCategory');
 const { getAllowedRepairCategories, validateProductRepairPair } = require('../utils/serviceTaxonomy');
 const { ACTIVE_STATUSES, ASSIGNMENT_PENDING } = require('../utils/repairRequestStatus');
+const { minimumInspectionFee } = require('../utils/inspectionFee');
+
+// A refusal when the inspection fee is below the floor for this price range
+// (utils/inspectionFee.js), or null.
+function inspectionFeeFloorRefusal(pricingRule) {
+    const floor = minimumInspectionFee(pricingRule.baseMax);
+    if (Number(pricingRule.inspectionFee) >= floor) return null;
+    return { message: `the inspection fee must be at least ${floor} BDT for this price range`, code: 'INSPECTION_FEE_TOO_LOW', minimumInspectionFee: floor };
+}
 
 // Requests that still need a technician. While a service is switched off
 // these cannot be assigned (matching and assignment require an active service
@@ -28,6 +37,7 @@ function serializeAdminDefinition(doc, counts) {
         description: doc.description,
         isActive: doc.isActive,
         pricingRule: doc.pricingRule,
+        minimumInspectionFee: minimumInspectionFee(doc.pricingRule && doc.pricingRule.baseMax),
         requiredExpertiseLevel: doc.requiredExpertiseLevel,
         estimatedDurationMinutes: doc.estimatedDurationMinutes,
         inspectionRequired: doc.inspectionRequired,
@@ -99,6 +109,8 @@ class AdminServiceDefinitionController {
             if (!validation.valid) {
                 return res.status(400).send({ message: validation.message, code: validation.code });
             }
+            const feeRefusal = inspectionFeeFloorRefusal(input.pricingRule);
+            if (feeRefusal) return res.status(400).send(feeRefusal);
             const now = new Date();
             const doc = { ...buildDocumentFromInput(input, now), createdBy: normalizeEmail(req.decoded_email), updatedBy: normalizeEmail(req.decoded_email) };
             try {
@@ -168,6 +180,10 @@ class AdminServiceDefinitionController {
             if (!validation.valid) {
                 return res.status(400).send({ message: validation.message, code: validation.code });
             }
+            // Checked only when prices change, so an old service below the
+            // floor can still be renamed or switched off.
+            const feeRefusal = priceChanged ? inspectionFeeFloorRefusal(candidate.pricingRule) : null;
+            if (feeRefusal) return res.status(400).send(feeRefusal);
 
             if (current.isActive === true && candidate.isActive === false) {
                 const counts = (await this.requestCounts([current._id.toString()])).get(current._id.toString());

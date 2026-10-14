@@ -2,6 +2,7 @@ const { ObjectId } = require('mongodb');
 const { isValidProductCategorySlug, isActiveProductCategory } = require('../utils/productCategory');
 const { isValidRepairCategorySlug, isActiveRepairCategory } = require('../utils/repairCategory');
 const { validateProductRepairPair } = require('../utils/serviceTaxonomy');
+const { withMinimumInspectionFee } = require('../utils/inspectionFee');
 
 // Public read-only response shape only - deliberately excludes internal
 // pricing-mutation metadata (pricingRule.version), createdAt/updatedAt, and
@@ -20,7 +21,7 @@ function serializeServiceDefinition(doc) {
             currency: doc.pricingRule.currency,
             min: doc.pricingRule.baseMin,
             max: doc.pricingRule.baseMax,
-            inspectionFee: doc.pricingRule.inspectionFee
+            inspectionFee: withMinimumInspectionFee(doc.pricingRule.inspectionFee, doc.pricingRule.baseMax)
         },
         requiredExpertiseLevel: doc.requiredExpertiseLevel,
         estimatedDurationMinutes: doc.estimatedDurationMinutes,
