@@ -66,6 +66,7 @@ const { runMissedPickupTests } = require('./tests/missedPickupTests');
 const { runInAppReminderTests } = require('./tests/inAppReminderTests');
 const { runMatchGateTests } = require('./tests/matchGateTests');
 const { runJobPortalTests } = require('./tests/jobPortalTests');
+const { runOfferRankingTests } = require('./tests/offerRankingTests');
 const { runInspectionFeeTests } = require('./tests/inspectionFeeTests');
 const { runInspectionFeeOutcomeTests } = require('./tests/inspectionFeeOutcomeTests');
 const { runDeclinedQuoteCloseTests } = require('./tests/declinedQuoteCloseTests');
@@ -13599,6 +13600,7 @@ async function runAllTests() {
     await runInAppReminderTests({ logTest });
     await runMatchGateTests({ logTest });
     await runJobPortalTests({ logTest });
+    await runOfferRankingTests({ logTest });
     await runInspectionFeeTests({ logTest });
     await runInspectionFeeOutcomeTests({ logTest });
     await runDeclinedQuoteCloseTests({ logTest });

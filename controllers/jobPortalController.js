@@ -13,6 +13,7 @@ const { INSPECTION_FEE_PURPOSE } = require('../utils/inspectionFee');
 const { V2_PAYMENT_CURRENCY, toSmallestUnit } = require('../config/paymentConfig');
 const { normalizeSiteOrigin } = require('../config/siteOrigin');
 const { buildPriceGuide } = require('../services/offerPriceGuide');
+const { rankOffers, medianResponseMinutes, RESPONSE_SAMPLE_LIMIT } = require('../services/offerRanking');
 const { AiHelperError } = require('../services/aiHelperCall');
 const { LANGUAGES: NOTE_LANGUAGES } = require('../services/aiOfferNoteService');
 const { findSensitiveInputKind } = require('../utils/supportValidation');
@@ -415,9 +416,30 @@ class JobPortalController {
             ]);
             const techById = new Map(technicians.map((t) => [t._id.toString(), t]));
             const completedById = new Map(completed.map((c) => [c._id, c.count]));
-            const ratings = await Promise.all(techIds.map((id) => this.TechnicianReview.aggregate(id)));
+            const [ratings, history] = await Promise.all([
+                Promise.all(techIds.map((id) => this.TechnicianReview.aggregate(id))),
+                this.matchHistory(applications.filter((a) => a.status === 'pending').map((a) => a.technicianId)),
+            ]);
             const ratingById = new Map(techIds.map((id, i) => [id, ratings[i]]));
             const product = request.product && request.product.categorySlug;
+            const ratingOf = (id) => ratingById.get(id) || { averageRating: null, reviewCount: 0 };
+
+            // Smarter matching: rank the waiting offers (services/offerRanking.js).
+            const ranking = rankOffers(
+                applications.filter((a) => a.status === 'pending').map((a) => {
+                    const t = techById.get(a.technicianId) || {};
+                    const rating = ratingOf(a.technicianId);
+                    const past = history.get(a.technicianId) || { noShows: 0, medianResponseMinutes: null };
+                    return {
+                        id: a._id.toString(), estimateMin: a.estimateMin, estimateMax: a.estimateMax, inspectionFee: a.inspectionFee, createdAt: a.createdAt,
+                        technician: {
+                            district: t.district || null, averageRating: rating.averageRating, reviewCount: rating.reviewCount,
+                            completedRepairs: completedById.get(a.technicianId) || 0, noShows: past.noShows, medianResponseMinutes: past.medianResponseMinutes,
+                        },
+                    };
+                }),
+                { customerDistrict: request.serviceLocation && request.serviceLocation.district },
+            );
 
             res.send({
                 open: isOpenForApplications(request),
@@ -427,9 +449,11 @@ class JobPortalController {
                 applications: applications.map((a) => {
                     const t = techById.get(a.technicianId) || {};
                     const entry = (t.expertise || []).find((e) => e && e.productCategorySlug === product) || null;
-                    const rating = ratingById.get(a.technicianId) || { averageRating: null, reviewCount: 0 };
+                    const rating = ratingOf(a.technicianId);
+                    const match = ranking.get(a._id.toString()) || null;
                     // Public technician facts only - never their email, phone or address.
                     return {
+                        ...(match ? { match } : {}),
                         id: a._id.toString(),
                         status: a.status,
                         estimateMin: a.estimateMin,
@@ -455,6 +479,46 @@ class JobPortalController {
         } catch (error) {
             res.status(500).send({ message: 'Error loading applications', code: 'INTERNAL_ERROR' });
         }
+    }
+
+    // For smarter matching: each technician's missed pickups and their median
+    // minutes from a job being posted to their offer (recent offers only).
+    // Map technicianId -> { noShows, medianResponseMinutes }.
+    async matchHistory(technicianIds) {
+        const ids = [...new Set(technicianIds)];
+        if (ids.length === 0) return new Map();
+        const [noShows, recent] = await Promise.all([
+            this.collections.jobApplications.aggregate([
+                { $match: { technicianId: { $in: ids }, status: 'no_show' } },
+                { $group: { _id: '$technicianId', count: { $sum: 1 } } },
+            ]).toArray(),
+            this.collections.jobApplications.aggregate([
+                { $match: { technicianId: { $in: ids } } },
+                { $sort: { createdAt: -1 } },
+                { $group: { _id: '$technicianId', offers: { $push: { requestId: '$requestId', createdAt: '$createdAt' } } } },
+                { $project: { offers: { $slice: ['$offers', RESPONSE_SAMPLE_LIMIT] } } },
+            ]).toArray(),
+        ]);
+        const requestIds = [...new Set(recent.flatMap((r) => r.offers.map((o) => o.requestId)))].filter((id) => ObjectId.isValid(id));
+        const requests = requestIds.length ? await this.collections.repairRequests.find(
+            { _id: { $in: requestIds.map((id) => new ObjectId(id)) } },
+            { projection: { createdAt: 1, repostedAt: 1, damage: 1 } }
+        ).toArray() : [];
+        const requestById = new Map(requests.map((r) => [r._id.toString(), r]));
+        const noShowsById = new Map(noShows.map((n) => [n._id, n.count]));
+
+        return new Map(ids.map((id) => {
+            const row = recent.find((r) => r._id === id);
+            const samples = (row ? row.offers : []).map((o) => {
+                const job = requestById.get(o.requestId);
+                if (!job || !o.createdAt) return null;
+                // Offers sent after a repost count from the repost.
+                const reposted = job.repostedAt ? new Date(job.repostedAt) : null;
+                const postedAt = reposted && reposted <= new Date(o.createdAt) ? reposted : publishedAt(job);
+                return postedAt ? { appliedAt: o.createdAt, postedAt } : null;
+            }).filter(Boolean);
+            return [id, { noShows: noShowsById.get(id) || 0, medianResponseMinutes: medianResponseMinutes(samples) }];
+        }));
     }
 
     // POST /repair-requests/:id/applications/:applicationId/accept  (the owner)
