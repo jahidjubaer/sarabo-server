@@ -3,7 +3,7 @@ const { client } = require('../config/database');
 const { logTracking } = require('../middleware/logging');
 const { createNotificationService } = require('../services/notificationService');
 const { createStripeRefunder, markFeeForRefund, sendFeeRefund, notifyFeeRefunded } = require('../services/inspectionFeeRefunds');
-const { inspectionCredit, bookingCancellationOutcome, buildInspectionFeeSettlement, INSPECTION_FEE_PURPOSE } = require('../utils/inspectionFee');
+const { inspectionCredit, bookingCancellationOutcome, buildInspectionFeeSettlement } = require('../utils/inspectionFee');
 const { ACTIVE_STATUSES } = require('../utils/repairRequestStatus');
 const { ASSIGNED_NOT_COLLECTED } = require('./missedPickupController');
 
@@ -165,16 +165,17 @@ class InspectionFeeController {
     }
 
     // POST /admin/repair-requests/:id/inspection-fee/retry-refund - sends every
-    // inspection-fee refund on this request that is still pending.
+    // refund on this request that is still pending: inspection fees, and a
+    // repair payment that arrived after the request was cancelled.
     async retryRefund(req, res) {
         try {
             const id = req.params.id;
             if (!ObjectId.isValid(id)) return res.status(400).send({ message: 'invalid repair request id', code: 'INVALID_REQUEST_ID' });
             const pending = await this.collections.payments
-                .find({ requestId: id, purpose: INSPECTION_FEE_PURPOSE, refundStatus: 'pending' }, { projection: { sessionId: 1 } })
+                .find({ requestId: id, refundStatus: 'pending' }, { projection: { sessionId: 1 } })
                 .toArray();
             if (pending.length === 0) {
-                return res.status(409).send({ message: 'there is no inspection-fee refund waiting on this request', code: 'NO_REFUND_PENDING' });
+                return res.status(409).send({ message: 'there is no refund waiting on this request', code: 'NO_REFUND_PENDING' });
             }
             let refunded = 0;
             for (const row of pending) {

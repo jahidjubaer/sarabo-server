@@ -42,6 +42,8 @@ async function closeDeclinedRequest({ collections, notifications, User, mongoCli
                         cancelledBy: closedBy === 'auto' ? 'system' : actorEmail,
                         cancellationReason: 'quote_declined',
                         closedBy,
+                        // The technician still has the device (workflow review).
+                        deviceReturn: { required: true, since: now },
                         updatedAt: now,
                         ...(feeKept ? {
                             'inspectionPayment.status': 'kept',

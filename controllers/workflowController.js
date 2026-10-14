@@ -7,6 +7,7 @@ const { refundParts, markPaymentRowsRefunded } = require('../services/refundPart
 const { closeUnpaidRequest, isNotRepairable } = require('../services/requestClosure');
 const { confirmReceiptOnce, AUTO_CONFIRM_MS } = require('../services/receiptConfirmation');
 const { refundPlan } = require('../utils/warranty');
+const { findStalledWork } = require('../services/stalledWork');
 const { SETTLEMENT_REVERSED } = require('../utils/settlement');
 const {
     ACTIVE_STATUSES, INSPECTION_COMPLETED, QUOTE_APPROVED, PAYMENT_COMPLETED, REPAIR_IN_PROGRESS, REPAIR_COMPLETED,
@@ -237,6 +238,7 @@ class WorkflowController {
                     {
                         $set: {
                             deliveryStatus: 'cancelled', cancelledAt: now, cancelledBy: admin, cancellationReason: 'paid_repair_cancelled', cancellationNote: note,
+                            deviceReturn: { required: true, since: now },
                             cancellationRefund: { ...plan, parts: plan.parts.map((p) => ({ ...p, status: 'pending' })), approvedAt: now, approvedBy: admin },
                             ...(request.technicianSettlement ? {
                                 'technicianSettlement.status': SETTLEMENT_REVERSED, 'technicianSettlement.reversedAt': now, 'technicianSettlement.reversalReason': 'paid_repair_cancelled',
@@ -264,26 +266,73 @@ class WorkflowController {
     }
 
     // ---- Device return and receipt -----------------------------------------
+    // Two cases share the same steps: a finished repair (confirming receipt
+    // also releases the technician's money and starts the warranty), and a
+    // request cancelled after pickup (deviceReturn.required - the device just
+    // has to go back).
+
+    // Which return case applies now: 'repair' | 'cancelled' | null.
+    returnCase(request) {
+        if (request.deliveryStatus === REPAIR_COMPLETED && request.customerReceiptConfirmation?.status !== 'confirmed') return 'repair';
+        if (request.deliveryStatus === 'cancelled' && request.deviceReturn?.required && !request.deviceReturn.confirmedAt) return 'cancelled';
+        return null;
+    }
+
+    // Records the return of a cancelled request's device as confirmed.
+    async confirmCancelledReturn(request, method, { now, adminEmail = null, note = null } = {}) {
+        const filter = { _id: request._id, deliveryStatus: 'cancelled', 'deviceReturn.required': true, 'deviceReturn.confirmedAt': { $exists: false } };
+        if (method === 'auto') {
+            filter['deviceReturn.markedAt'] = { $lte: new Date(now.getTime() - AUTO_CONFIRM_MS) };
+            filter['deviceReturn.disputedAt'] = { $exists: false };
+        }
+        const result = await this.collections.repairRequests.updateOne(filter, {
+            $set: {
+                'deviceReturn.confirmedAt': now, 'deviceReturn.method': method,
+                ...(adminEmail ? { 'deviceReturn.confirmedByAdmin': adminEmail, 'deviceReturn.resolvedAt': now } : {}),
+                ...(note ? { 'deviceReturn.adminNote': note } : {}),
+                updatedAt: now,
+            },
+        });
+        return result.matchedCount === 1;
+    }
 
     // POST /repair-requests/:id/mark-returned  (its technician)
     async markReturned(req, res) {
         try {
             const { request, isTechnician } = await this.access(req);
             if (!request || !isTechnician) return refuse(res, 404, 'REQUEST_NOT_FOUND', 'repair request not found');
+            const kind = this.returnCase(request);
             const now = this.now();
             const autoConfirmAt = new Date(now.getTime() + AUTO_CONFIRM_MS);
-            const result = await this.collections.repairRequests.updateOne(
+            const result = kind ? await this.collections.repairRequests.updateOne(
                 {
-                    _id: request._id, deliveryStatus: REPAIR_COMPLETED, technicianEmail: request.technicianEmail,
-                    'customerReceiptConfirmation.status': { $ne: 'confirmed' }, 'deviceReturn.markedAt': { $exists: false },
+                    _id: request._id, deliveryStatus: request.deliveryStatus, technicianEmail: request.technicianEmail, 'deviceReturn.markedAt': { $exists: false },
+                    ...(kind === 'repair' ? { 'customerReceiptConfirmation.status': { $ne: 'confirmed' } } : { 'deviceReturn.required': true }),
                 },
                 { $set: { 'deviceReturn.markedAt': now, 'deviceReturn.autoConfirmAt': autoConfirmAt, updatedAt: now } }
-            );
-            if (result.matchedCount === 0) return refuse(res, 409, 'NOT_RETURNABLE', 'only a finished repair not yet confirmed can be marked returned (once)');
+            ) : { matchedCount: 0 };
+            if (result.matchedCount === 0) return refuse(res, 409, 'NOT_RETURNABLE', 'only a device waiting to go back to the customer can be marked returned (once)');
             await this.notifyCustomer(request, 'device_returned');
-            res.send({ deviceReturn: { markedAt: now, autoConfirmAt } });
+            res.send({ deviceReturn: { ...(request.deviceReturn || {}), markedAt: now, autoConfirmAt } });
         } catch (error) {
             res.status(500).send({ message: 'Error marking the device returned', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // POST /repair-requests/:id/confirm-return  (the customer, after a cancellation:
+    // "I got my device back"). A finished repair uses confirm-receipt instead.
+    async confirmReturn(req, res) {
+        try {
+            const { request, isOwner } = await this.access(req);
+            if (!request || !isOwner) return refuse(res, 404, 'REQUEST_NOT_FOUND', 'repair request not found');
+            const now = this.now();
+            if (this.returnCase(request) !== 'cancelled' || !(await this.confirmCancelledReturn(request, 'customer', { now }))) {
+                return refuse(res, 409, 'NOT_RETURNABLE', 'this request is not waiting for its device to be returned');
+            }
+            await this.notifyTechnician(request, 'return_confirmed');
+            res.send({ deviceReturn: { ...(request.deviceReturn || {}), confirmedAt: now, method: 'customer' } });
+        } catch (error) {
+            res.status(500).send({ message: 'Error confirming the return', code: 'INTERNAL_ERROR' });
         }
     }
 
@@ -294,15 +343,16 @@ class WorkflowController {
             if (!check.ok) return refuse(res, 400, 'INVALID_NOTE', check.message);
             const { request, isOwner } = await this.access(req);
             if (!request || !isOwner) return refuse(res, 404, 'REQUEST_NOT_FOUND', 'repair request not found');
+            const kind = this.returnCase(request);
             const now = this.now();
-            const result = await this.collections.repairRequests.updateOne(
+            const result = kind ? await this.collections.repairRequests.updateOne(
                 {
-                    _id: request._id, deliveryStatus: REPAIR_COMPLETED,
-                    'customerReceiptConfirmation.status': { $ne: 'confirmed' }, 'deviceReturn.disputedAt': { $exists: false },
+                    _id: request._id, deliveryStatus: request.deliveryStatus, 'deviceReturn.disputedAt': { $exists: false },
+                    ...(kind === 'repair' ? { 'customerReceiptConfirmation.status': { $ne: 'confirmed' } } : { 'deviceReturn.required': true, 'deviceReturn.confirmedAt': { $exists: false } }),
                 },
                 { $set: { 'deviceReturn.disputedAt': now, 'deviceReturn.disputeNote': check.note, updatedAt: now } }
-            );
-            if (result.matchedCount === 0) return refuse(res, 409, 'NOT_DISPUTABLE', 'this repair is not waiting for you to receive the device');
+            ) : { matchedCount: 0 };
+            if (result.matchedCount === 0) return refuse(res, 409, 'NOT_DISPUTABLE', 'this request is not waiting for you to receive the device');
             await this.notifyTechnician(request, 'receipt_disputed');
             await this.notifyAdmins(request, 'receipt_disputed');
             res.send({ deviceReturn: { ...(request.deviceReturn || {}), disputedAt: now, disputeNote: check.note } });
@@ -318,9 +368,17 @@ class WorkflowController {
             if (!check.ok) return refuse(res, 400, 'INVALID_NOTE', check.message);
             const request = await this.loadRequest(req.params.id);
             if (!request) return refuse(res, 404, 'REQUEST_NOT_FOUND', 'repair request not found');
-            const confirmation = await confirmReceiptOnce({
-                collections: this.collections, request, method: 'admin', now: this.now(), adminEmail: normalize(req.decoded_email), note: check.note,
-            });
+            const now = this.now();
+            const adminEmail = normalize(req.decoded_email);
+            if (this.returnCase(request) === 'cancelled') {
+                if (!(await this.confirmCancelledReturn(request, 'admin', { now, adminEmail, note: check.note }))) {
+                    return refuse(res, 409, 'NOT_CONFIRMABLE', 'this request is not waiting for its device to be returned');
+                }
+                await this.notifyCustomer(request, 'return_confirmed_by_admin');
+                await this.notifyTechnician(request, 'return_confirmed');
+                return res.send({ deviceReturn: { ...(request.deviceReturn || {}), confirmedAt: now, method: 'admin' } });
+            }
+            const confirmation = await confirmReceiptOnce({ collections: this.collections, request, method: 'admin', now, adminEmail, note: check.note });
             if (!confirmation) return refuse(res, 409, 'NOT_CONFIRMABLE', 'only a finished repair not yet confirmed can be confirmed');
             await logTrackingSafely(this.collections.trackingEvents, request.trackingId, 'customer_receipt_confirmed');
             await this.notifyCustomer(request, 'receipt_confirmed_by_admin');
@@ -331,18 +389,19 @@ class WorkflowController {
         }
     }
 
-    // Daily job: confirms receipt where the technician marked the device
-    // returned 3+ days ago and the customer neither confirmed nor disputed.
+    // Daily job: where the technician marked the device returned 3+ days ago
+    // and the customer neither confirmed nor disputed, confirm it - receipt of
+    // a finished repair, or the return of a cancelled request's device.
     async autoConfirmReceipts({ limit = 200 } = {}) {
         const now = this.now();
-        const due = await this.collections.repairRequests.find({
-            deliveryStatus: REPAIR_COMPLETED,
-            'customerReceiptConfirmation.status': { $ne: 'confirmed' },
-            'deviceReturn.markedAt': { $lte: new Date(now.getTime() - AUTO_CONFIRM_MS) },
-            'deviceReturn.disputedAt': { $exists: false },
-        }).limit(limit).toArray();
-        const counts = { found: due.length, confirmed: 0, failed: 0 };
-        for (const request of due) {
+        const cutoff = new Date(now.getTime() - AUTO_CONFIRM_MS);
+        const markedAndQuiet = { 'deviceReturn.markedAt': { $lte: cutoff }, 'deviceReturn.disputedAt': { $exists: false } };
+        const [finished, cancelled] = await Promise.all([
+            this.collections.repairRequests.find({ deliveryStatus: REPAIR_COMPLETED, 'customerReceiptConfirmation.status': { $ne: 'confirmed' }, ...markedAndQuiet }).limit(limit).toArray(),
+            this.collections.repairRequests.find({ deliveryStatus: 'cancelled', 'deviceReturn.required': true, 'deviceReturn.confirmedAt': { $exists: false }, ...markedAndQuiet }).limit(limit).toArray(),
+        ]);
+        const counts = { found: finished.length + cancelled.length, confirmed: 0, returnsConfirmed: 0, failed: 0 };
+        for (const request of finished) {
             try {
                 const confirmation = await confirmReceiptOnce({ collections: this.collections, request, method: 'auto', now });
                 if (!confirmation) continue;
@@ -360,7 +419,99 @@ class WorkflowController {
                 console.error('Auto-confirming receipt failed (will retry tomorrow):', error.message);
             }
         }
+        for (const request of cancelled) {
+            try {
+                if (!(await this.confirmCancelledReturn(request, 'auto', { now }))) continue;
+                counts.returnsConfirmed += 1;
+                await this.notifyCustomer(request, 'return_auto_confirmed');
+                await this.notifyTechnician(request, 'return_confirmed');
+            } catch (error) {
+                counts.failed += 1;
+                console.error('Auto-confirming a return failed (will retry tomorrow):', error.message);
+            }
+        }
         return counts;
+    }
+
+    // ---- Pickup: customer not home, condition --------------------------------
+
+    // POST /repair-requests/:id/customer-not-available  { note }  (its technician)
+    // The technician came but could not reach the customer: the booking stays,
+    // and the customer is asked to choose a new pickup time (the same state an
+    // admin's "ask for a new time" makes - not a technician no-show).
+    async customerNotAvailable(req, res) {
+        try {
+            const check = readNote(req.body, { required: true });
+            if (!check.ok) return refuse(res, 400, 'INVALID_NOTE', check.message);
+            const { request, isTechnician } = await this.access(req);
+            if (!request || !isTechnician) return refuse(res, 404, 'REQUEST_NOT_FOUND', 'repair request not found');
+            const now = this.now();
+            const result = await this.collections.repairRequests.updateOne(
+                { _id: request._id, deliveryStatus: { $in: ['driver_assigned', 'rider_arriving'] }, technicianEmail: request.technicianEmail, pickupRescheduleRequestedAt: { $exists: false } },
+                { $set: { pickupRescheduleRequestedAt: now, pickupAttempt: { failedAt: now, note: check.note, reportedBy: 'technician' }, updatedAt: now } }
+            );
+            if (result.matchedCount === 0) {
+                return refuse(res, 409, 'NOT_REPORTABLE', request.pickupRescheduleRequestedAt
+                    ? 'the customer has already been asked for a new time'
+                    : 'you can report this only while you are on the way to collect the device');
+            }
+            await logTrackingSafely(this.collections.trackingEvents, request.trackingId, 'pickup_reschedule_requested');
+            await this.notifyCustomer(request, 'customer_not_home', String(now.getTime()));
+            res.send({ pickupRescheduleRequestedAt: now, pickupAttempt: { failedAt: now, note: check.note } });
+        } catch (error) {
+            res.status(500).send({ message: 'Error saving the report', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // POST /repair-requests/:id/pickup-condition/dispute  { note }  (the customer)
+    async disputePickupCondition(req, res) {
+        try {
+            const check = readNote(req.body, { required: true });
+            if (!check.ok) return refuse(res, 400, 'INVALID_NOTE', check.message);
+            const { request, isOwner } = await this.access(req);
+            if (!request || !isOwner) return refuse(res, 404, 'REQUEST_NOT_FOUND', 'repair request not found');
+            const now = this.now();
+            const result = await this.collections.repairRequests.updateOne(
+                { _id: request._id, pickupCondition: { $exists: true }, 'pickupCondition.customerDisputedAt': { $exists: false } },
+                { $set: { 'pickupCondition.customerDisputedAt': now, 'pickupCondition.customerNote': check.note, updatedAt: now } }
+            );
+            if (result.matchedCount === 0) return refuse(res, 409, 'NOT_DISPUTABLE', 'there is no pickup condition to dispute, or you already did');
+            await this.notifyTechnician(request, 'condition_disputed');
+            await this.notifyAdmins(request, 'condition_disputed');
+            res.send({ pickupCondition: { ...request.pickupCondition, customerDisputedAt: now, customerNote: check.note } });
+        } catch (error) {
+            res.status(500).send({ message: 'Error saving your note', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // POST /admin/repair-requests/:id/pickup-condition/reviewed  { note }
+    async adminReviewPickupCondition(req, res) {
+        try {
+            const check = readNote(req.body, { required: true });
+            if (!check.ok) return refuse(res, 400, 'INVALID_NOTE', check.message);
+            const request = await this.loadRequest(req.params.id);
+            if (!request) return refuse(res, 404, 'REQUEST_NOT_FOUND', 'repair request not found');
+            const now = this.now();
+            const result = await this.collections.repairRequests.updateOne(
+                { _id: request._id, 'pickupCondition.customerDisputedAt': { $exists: true }, 'pickupCondition.reviewedAt': { $exists: false } },
+                { $set: { 'pickupCondition.reviewedAt': now, 'pickupCondition.reviewNote': check.note, 'pickupCondition.reviewedBy': normalize(req.decoded_email), updatedAt: now } }
+            );
+            if (result.matchedCount === 0) return refuse(res, 409, 'NOT_REVIEWABLE', 'there is no open condition dispute on this request');
+            await this.notifyCustomer(request, 'condition_reviewed');
+            res.send({ pickupCondition: { ...request.pickupCondition, reviewedAt: now, reviewNote: check.note } });
+        } catch (error) {
+            res.status(500).send({ message: 'Error saving the review', code: 'INTERNAL_ERROR' });
+        }
+    }
+
+    // Daily job: tells admins about each request that has stalled, once per
+    // request and stage (services/stalledWork.js).
+    async alertStalled() {
+        const stalled = await findStalledWork(this.collections, this.now());
+        for (const item of stalled) {
+            await this.notifyAdmins(item.request, 'stalled', item.stage);
+        }
+        return { found: stalled.length };
     }
 }
 

@@ -49,6 +49,15 @@ function createPaymentProcessor(models, collections, notifications, { refundPaym
     // (and Stripe metadata) never influence the amount or currency here.
     async function completeV2CheckoutSession({ session, repairRequest, sessionId, source }) {
         const quote = repairRequest.quote;
+        // A cancelled request can never become paid - the cancellation is
+        // authoritative. Checked first: once a request closes, its fee and
+        // amounts change, so later checks would refuse it for the wrong reason
+        // and the charge would go unrecorded. Stripe has already taken the
+        // money, so it is recorded and refunded, never lost.
+        if (repairRequest.deliveryStatus === 'cancelled') {
+            await refundPaymentForCancelledRequest({ session, repairRequest, sessionId });
+            return { code: 'REQUEST_CANCELLED' };
+        }
         // The quote must still be approved and the request still awaiting
         // payment. These mirror the eligibility rules but are re-checked here
         // against fresh repair request state, since a payment can only be finalized for
@@ -71,12 +80,6 @@ function createPaymentProcessor(models, collections, notifications, { refundPaym
             return { code: 'CURRENCY_MISMATCH' };
         }
 
-        // A cancelled request can never become paid - the customer's
-        // cancellation is authoritative (common non-racing case; the guarded
-        // update below covers the true concurrent race).
-        if (repairRequest.deliveryStatus === 'cancelled') {
-            return { code: 'REQUEST_CANCELLED' };
-        }
         // Already completed through a different session (this exact session was
         // ruled out by the existing-payment fast path in the caller).
         if (isRepairRequestPaid(repairRequest)) {
@@ -236,12 +239,37 @@ function createPaymentProcessor(models, collections, notifications, { refundPaym
             }
             const latestRepairRequest = await RepairRequest.findById(repairRequest._id.toString());
             if (latestRepairRequest && latestRepairRequest.deliveryStatus === 'cancelled') {
+                await refundPaymentForCancelledRequest({ session, repairRequest, sessionId });
                 return { code: 'REQUEST_CANCELLED' };
             }
             return { code: 'ALREADY_PAID_OTHER_SESSION' };
         }
 
         return { code: 'OK', alreadyProcessed: false, transactionId: committed.transactionId, trackingId: committed.trackingId };
+    }
+
+    // A repair payment that arrived after the request was cancelled (workflow
+    // review): Stripe has charged the customer, so the payment is recorded
+    // with a pending refund and refunded at once. If Stripe fails, the row
+    // stays pending on the admin attention list for a retry
+    // (POST /admin/repair-requests/:id/inspection-fee/retry-refund refunds any
+    // pending payment on the request). The idempotency key is per session.
+    async function refundPaymentForCancelledRequest({ session, repairRequest, sessionId }) {
+        try {
+            await collections.payments.insertOne({
+                sessionId, transactionId: session.payment_intent || null, requestId: repairRequest._id.toString(), trackingId: repairRequest.trackingId,
+                // What Stripe actually charged (smallest unit -> whole taka).
+                customerEmail: normalize(repairRequest.senderEmail), amount: Math.round(Number(session.amount_total) || 0) / 100,
+                currency: normalize(session.currency) === V2_PAYMENT_CURRENCY ? 'BDT' : String(session.currency || '').toUpperCase(), paymentStatus: 'paid', purpose: 'repair',
+                paidAt: new Date(), refundStatus: 'pending', refundReason: 'request_cancelled', schemaVersion: 2,
+            });
+        } catch (error) {
+            if (!(error && error.code === 11000)) throw error;
+        }
+        const refund = await sendFeeRefund({ collections, refundPayment, sessionId });
+        if (refund.refunded && !refund.alreadyRefunded) {
+            await logTrackingSafely(collections.trackingEvents, repairRequest.trackingId, 'payment_refunded');
+        }
     }
 
     // ---- Inspection fee (job-portal phase C) ----------------------------
@@ -374,7 +402,7 @@ function createPaymentProcessor(models, collections, notifications, { refundPaym
             // calls safe even if that earlier reconciliation did not run.
             await checkoutSessionManager.completeByRequestId(existingPayment.requestId);
             return {
-                code: existingPayment.refundStatus ? 'INSPECTION_FEE_REFUNDED' : 'OK',
+                code: existingPayment.refundReason === 'request_cancelled' ? 'REQUEST_CANCELLED' : existingPayment.refundStatus ? 'INSPECTION_FEE_REFUNDED' : 'OK',
                 alreadyProcessed: true,
                 transactionId: existingPayment.transactionId,
                 trackingId: existingPayment.trackingId,

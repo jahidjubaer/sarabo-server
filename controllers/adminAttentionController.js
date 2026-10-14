@@ -1,5 +1,6 @@
 const { canTechnicianEverTakeRequest } = require('../services/technicianEligibilityService');
 const { isOpenForApplications, publishedAt, lastPostedAt, CHOOSE_WITHIN_MS } = require('../utils/jobPortal');
+const { findStalledWork } = require('../services/stalledWork');
 
 // Requests that need an admin now (overdue-alerts phase). Read-only.
 //
@@ -24,7 +25,10 @@ const { isOpenForApplications, publishedAt, lastPostedAt, CHOOSE_WITHIN_MS } = r
 //                   gets refunded.
 // - blockedRepairs  the technician says a paid repair cannot be finished - an
 //                   admin cancels and refunds it (controllers/workflowController.js).
-// - receiptDisputes the customer says the repaired device was not returned.
+// - receiptDisputes the customer says the device was not returned (a finished
+//                   repair, or one cancelled after pickup) and no admin has settled it.
+// - conditionDisputes the customer disagrees with the condition recorded at pickup.
+// - stalled         work that has not moved on in time (services/stalledWork.js).
 // A request can be in more than one list; each list is independent.
 const WAITING = 'pending-pickup';
 const ASSIGNED_NOT_COLLECTED = ['assignment_pending', 'driver_assigned', 'rider_arriving'];
@@ -72,10 +76,16 @@ class AdminAttentionController {
             'pickupSlot.endsAt': { $lte: now },
             pickupRescheduleRequestedAt: { $exists: false },
         };
-        const refundFilter = { purpose: 'inspection_fee', refundStatus: 'pending' };
+        // Any payment waiting for its refund: inspection fees, and a repair
+        // payment that arrived after the request was cancelled.
+        const refundFilter = { refundStatus: 'pending' };
         const blockedFilter = { deliveryStatus: { $in: ['payment_completed', 'repair_in_progress'] }, repairBlocked: { $exists: true } };
-        const disputeFilter = { deliveryStatus: 'repair_completed', 'deviceReturn.disputedAt': { $exists: true } };
-        const [overdueWaiting, overdueWaitingTotal, missedPickups, missedPickupsTotal, waiting, technicians, definitions, feeRefunds, feeRefundsTotal, blockedRepairs, receiptDisputes] = await Promise.all([
+        const disputeFilter = {
+            deliveryStatus: { $in: ['repair_completed', 'cancelled'] }, 'deviceReturn.disputedAt': { $exists: true },
+            'deviceReturn.resolvedAt': { $exists: false }, 'deviceReturn.confirmedAt': { $exists: false },
+        };
+        const conditionFilter = { 'pickupCondition.customerDisputedAt': { $exists: true }, 'pickupCondition.reviewedAt': { $exists: false } };
+        const [overdueWaiting, overdueWaitingTotal, missedPickups, missedPickupsTotal, waiting, technicians, definitions, feeRefunds, feeRefundsTotal, blockedRepairs, receiptDisputes, conditionDisputes, stalled] = await Promise.all([
             // Longest overdue first.
             rr.find({ deliveryStatus: WAITING, 'pickupSlot.startsAt': { $lte: now } }, { projection: SUMMARY_PROJECTION })
                 .sort({ 'pickupSlot.startsAt': 1 }).limit(LIST_LIMIT).toArray(),
@@ -88,11 +98,13 @@ class AdminAttentionController {
             this.collections.technicians.find({ status: 'approved' }, { projection: { status: 1, region: 1, expertise: 1 } }).toArray(),
             this.collections.serviceDefinitions.find({}, { projection: { requiredExpertiseLevel: 1 } }).toArray(),
             // Oldest first; never the customer's email or Stripe ids.
-            this.collections.payments.find(refundFilter, { projection: { requestId: 1, trackingId: 1, amount: 1, currency: 1, refundReason: 1, paidAt: 1, lastRefundAttemptAt: 1 } })
+            this.collections.payments.find(refundFilter, { projection: { requestId: 1, trackingId: 1, amount: 1, currency: 1, purpose: 1, refundReason: 1, paidAt: 1, lastRefundAttemptAt: 1 } })
                 .sort({ paidAt: 1 }).limit(LIST_LIMIT).toArray(),
             this.collections.payments.countDocuments(refundFilter),
             rr.find(blockedFilter, { projection: { ...SUMMARY_PROJECTION, repairBlocked: 1 } }).sort({ 'repairBlocked.reportedAt': 1 }).limit(LIST_LIMIT).toArray(),
             rr.find(disputeFilter, { projection: { ...SUMMARY_PROJECTION, deviceReturn: 1 } }).sort({ 'deviceReturn.disputedAt': 1 }).limit(LIST_LIMIT).toArray(),
+            rr.find(conditionFilter, { projection: { ...SUMMARY_PROJECTION, pickupCondition: 1 } }).sort({ 'pickupCondition.customerDisputedAt': 1 }).limit(LIST_LIMIT).toArray(),
+            findStalledWork(this.collections, now),
         ]);
 
         const levelByDefinition = new Map(definitions.map((d) => [d._id.toString(), d.requiredExpertiseLevel]));
@@ -127,6 +139,8 @@ class AdminAttentionController {
                 feeRefunds: feeRefundsTotal,
                 blockedRepairs: blockedRepairs.length,
                 receiptDisputes: receiptDisputes.length,
+                conditionDisputes: conditionDisputes.length,
+                stalled: stalled.length,
             },
             overdueWaiting: overdueWaiting.map(summarize),
             missedPickups: missedPickups.map(summarize),
@@ -140,12 +154,15 @@ class AdminAttentionController {
             })),
             blockedRepairs: blockedRepairs.map((doc) => ({ ...summarize(doc), reason: doc.repairBlocked.reason, reportedAt: doc.repairBlocked.reportedAt })),
             receiptDisputes: receiptDisputes.map((doc) => ({ ...summarize(doc), note: doc.deviceReturn.disputeNote || '', disputedAt: doc.deviceReturn.disputedAt })),
+            conditionDisputes: conditionDisputes.map((doc) => ({ ...summarize(doc), note: doc.pickupCondition.customerNote || '', disputedAt: doc.pickupCondition.customerDisputedAt })),
+            stalled: stalled.slice(0, LIST_LIMIT).map((item) => ({ ...summarize(item.request), stage: item.stage, since: item.since })),
             feeRefunds: feeRefunds.map((row) => ({
                 id: row.requestId,
                 trackingId: row.trackingId || null,
                 amount: row.amount,
                 currency: row.currency || 'BDT',
                 reason: row.refundReason || null,
+                purpose: row.purpose || 'inspection_fee',
                 paidAt: row.paidAt || null,
                 lastAttemptAt: row.lastRefundAttemptAt || null,
             })),

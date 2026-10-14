@@ -80,8 +80,8 @@ class PickupReminderController {
                 console.error('Closing stale declined quotes failed:', error.message);
                 declinedClosed = { error: true };
             }
-            const { unpaidClosed, receiptsConfirmed, warrantyOverdue } = await this.runWorkflowJobs();
-            res.send({ date: tomorrow, found: requests.length, inApp, ...email, emailEnabled: this.emailService.enabled, declinedClosed, unpaidClosed, receiptsConfirmed, warrantyOverdue });
+            const { unpaidClosed, receiptsConfirmed, warrantyOverdue, stalled } = await this.runWorkflowJobs();
+            res.send({ date: tomorrow, found: requests.length, inApp, ...email, emailEnabled: this.emailService.enabled, declinedClosed, unpaidClosed, receiptsConfirmed, warrantyOverdue, stalled });
         } catch (error) {
             res.status(500).send({ message: 'Error sending reminders', code: 'INTERNAL_ERROR' });
         }
@@ -109,6 +109,7 @@ class PickupReminderController {
             })),
             receiptsConfirmed: await attempt('Auto-confirming receipts', () => this.workflow.autoConfirmReceipts()),
             warrantyOverdue: await attempt('Warranty overdue alerts', () => this.warranty.alertOverdueClaims()),
+            stalled: await attempt('Stalled work alerts', () => this.workflow.alertStalled()),
         };
     }
 

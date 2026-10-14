@@ -54,6 +54,8 @@ async function closeUnpaidRequest({
                         cancelledBy: closedBy === 'auto' ? 'system' : actorEmail,
                         cancellationReason: reason,
                         closedBy,
+                        // The technician still has the device: it must go back.
+                        deviceReturn: { required: true, since: now },
                         updatedAt: now,
                         ...(feeKept ? {
                             'inspectionPayment.status': 'kept',

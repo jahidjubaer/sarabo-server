@@ -69,6 +69,7 @@ const { runJobPortalTests } = require('./tests/jobPortalTests');
 const { runOfferRankingTests } = require('./tests/offerRankingTests');
 const { runWarrantyTests } = require('./tests/warrantyTests');
 const { runWorkflowFixesTests } = require('./tests/workflowFixesTests');
+const { runRemainingGapsTests } = require('./tests/remainingGapsTests');
 const { runInspectionFeeTests } = require('./tests/inspectionFeeTests');
 const { runInspectionFeeOutcomeTests } = require('./tests/inspectionFeeOutcomeTests');
 const { runDeclinedQuoteCloseTests } = require('./tests/declinedQuoteCloseTests');
@@ -13617,6 +13618,7 @@ async function runAllTests() {
     await runDeclinedQuoteCloseTests({ logTest });
     // Last: its daily job looks at the whole test database.
     await runWorkflowFixesTests({ logTest });
+    await runRemainingGapsTests({ logTest });
 
     // Stop the harness's own API server, then the shared Mongo connection
     // (config/database.js's connectDatabase()), now that every test needing

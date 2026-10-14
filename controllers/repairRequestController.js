@@ -33,6 +33,18 @@ const { createDisabledEmailService } = require('../services/emailService');
 const { buildSettlementView } = require('../utils/settlement');
 const { confirmReceiptOnce } = require('../services/receiptConfirmation');
 const { isNotRepairable, UNPAID_APPROVED_CLOSE_MS } = require('../services/requestClosure');
+
+// The device's condition when the technician collects it: { note, accessories }.
+// Optional for the API (older clients); the app always asks for it.
+function validatePickupCondition(raw) {
+    if (raw === undefined || raw === null) return { valid: true, value: null };
+    if (typeof raw !== 'object' || Array.isArray(raw)) return { valid: false, message: 'pickupCondition must be an object' };
+    const note = typeof raw.note === 'string' ? raw.note.trim() : '';
+    const accessories = typeof raw.accessories === 'string' ? raw.accessories.trim() : '';
+    if (note.length < 10 || note.length > 500) return { valid: false, message: 'describe the condition in 10-500 characters' };
+    if (accessories.length > 200) return { valid: false, message: 'accessories must be at most 200 characters' };
+    return { valid: true, value: { note, accessories } };
+}
 const { inspectionPaymentView, inspectionFeeSettlementView } = require('../utils/inspectionFee');
 const { isRepairRequestPaid, buildPaymentStateMatch } = require('../utils/paymentState');
 const {
@@ -261,6 +273,21 @@ class RepairRequestController {
             safeRepairRequest.notRepairable = isNotRepairable(repairRequest);
             if (repairRequest.deliveryStatus === QUOTE_APPROVED && quote && quote.decidedAt) {
                 safeRepairRequest.paymentDueAt = new Date(new Date(quote.decidedAt).getTime() + UNPAID_APPROVED_CLOSE_MS);
+            }
+            // Which admin settled a dispute stays with admins.
+            if (!isAdmin) {
+                if (safeRepairRequest.deviceReturn) {
+                    const { confirmedByAdmin, ...deviceReturn } = safeRepairRequest.deviceReturn;
+                    safeRepairRequest.deviceReturn = deviceReturn;
+                }
+                if (safeRepairRequest.customerReceiptConfirmation?.confirmedByAdmin) {
+                    const { confirmedByAdmin, ...confirmation } = safeRepairRequest.customerReceiptConfirmation;
+                    safeRepairRequest.customerReceiptConfirmation = confirmation;
+                }
+                if (safeRepairRequest.pickupCondition?.reviewedBy) {
+                    const { reviewedBy, ...condition } = safeRepairRequest.pickupCondition;
+                    safeRepairRequest.pickupCondition = condition;
+                }
             }
             if (cancellationRefund) {
                 safeRepairRequest.cancellationRefund = {
@@ -825,12 +852,23 @@ class RepairRequestController {
                 return res.status(409).send({ message: 'invalid status transition', code: 'STATUS_TRANSITION_NOT_ALLOWED' });
             }
 
+            // Collecting the device (workflow review): when it was picked up,
+            // and the condition the technician recorded with the customer, so
+            // a later "you scratched it" has a record to check against.
+            const pickupSet = {};
+            if (requestedStatus === 'parcel_picked_up') {
+                const condition = validatePickupCondition(req.body.pickupCondition);
+                if (!condition.valid) return res.status(400).send({ message: condition.message, code: 'INVALID_PICKUP_CONDITION' });
+                pickupSet.pickedUpAt = new Date();
+                if (condition.value) pickupSet.pickupCondition = { ...condition.value, recordedAt: pickupSet.pickedUpAt };
+            }
+
             // Guarded atomically against a concurrent status change landing
             // between the read above and this write - the query condition
             // itself is the race-resolver, not the read-then-write check.
             const result = await this.collections.repairRequests.updateOne(
                 { _id: repairRequest._id, deliveryStatus: repairRequest.deliveryStatus },
-                { $set: { deliveryStatus: requestedStatus } }
+                { $set: { deliveryStatus: requestedStatus, ...pickupSet } }
             );
 
             if (result.matchedCount === 0) {

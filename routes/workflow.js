@@ -8,12 +8,16 @@ function workflowRoutes(app, controllers) {
     app.post('/repair-requests/:id/close-not-repairable', verifyFBToken, ensureDatabaseReady, (req, res) => c.closeNotRepairable(req, res));
     app.post('/repair-requests/:id/cancel-unpaid', verifyFBToken, ensureDatabaseReady, (req, res) => c.cancelUnpaid(req, res));
     app.post('/repair-requests/:id/receipt-dispute', verifyFBToken, ensureDatabaseReady, (req, res) => c.disputeReceipt(req, res));
+    app.post('/repair-requests/:id/confirm-return', verifyFBToken, ensureDatabaseReady, (req, res) => c.confirmReturn(req, res));
+    app.post('/repair-requests/:id/pickup-condition/dispute', verifyFBToken, ensureDatabaseReady, (req, res) => c.disputePickupCondition(req, res));
 
     app.post('/repair-requests/:id/repair/cannot-complete', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => c.reportCannotComplete(req, res));
     app.post('/repair-requests/:id/mark-returned', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => c.markReturned(req, res));
+    app.post('/repair-requests/:id/customer-not-available', verifyFBToken, ensureDatabaseReady, verifyTechnician, (req, res) => c.customerNotAvailable(req, res));
 
     app.post('/admin/repair-requests/:id/cancel-paid-repair', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => c.adminCancelPaidRepair(req, res));
     app.post('/admin/repair-requests/:id/confirm-receipt', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => c.adminConfirmReceipt(req, res));
+    app.post('/admin/repair-requests/:id/pickup-condition/reviewed', verifyFBToken, ensureDatabaseReady, verifyAdmin, (req, res) => c.adminReviewPickupCondition(req, res));
 }
 
 module.exports = workflowRoutes;
