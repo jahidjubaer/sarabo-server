@@ -12228,6 +12228,7 @@ async function testV2PaymentWorkflow() {
             logTest('17. Creates a (test) checkout session', r.statusCode === 200 && typeof r.body.url === 'string' && r.body.url.length > 0);
             logTest('18. Correct amount sent to Stripe (450000 poisha)', cap.line_items[0].price_data.unit_amount === 450000);
             logTest('19. Correct BDT currency sent to Stripe', cap.line_items[0].price_data.currency === 'bdt');
+            logTest('19b. Stripe item names the device from the product snapshot (not "undefined")', cap.line_items[0].price_data.product_data.name === 'Repair: B M');
             const md = cap.metadata || {};
             logTest('20. Safe metadata only (requestId/trackingId/schemaVersion/quoteVersion)', md.requestId === p.id && md.trackingId === p.trackingId && md.schemaVersion === '2' && md.quoteVersion === '1' && !('amount' in md) && !('currency' in md) && Object.keys(md).length === 4);
             // 21. Repeated request reuses the same open session, never a second payable one.

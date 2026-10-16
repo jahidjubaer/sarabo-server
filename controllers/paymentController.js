@@ -8,6 +8,7 @@ const { createNotificationService } = require('../services/notificationService')
 const { PAYMENT_CURRENCY, V2_PAYMENT_CURRENCY, toSmallestUnit } = require('../config/paymentConfig');
 const { normalizeSiteOrigin } = require('../config/siteOrigin');
 const { buildReceipt, renderReceiptPdf } = require('../services/paymentReceipt');
+const { deviceLabelOf } = require('../utils/emailTemplates');
 
 // Fails fast at module load (server startup) rather than at first checkout
 // request - the same normalized origin config/cors.js uses as the production
@@ -334,7 +335,8 @@ class PaymentController {
                                     currency: V2_PAYMENT_CURRENCY,
                                     unit_amount: unitAmount,
                                     product_data: {
-                                        name: `Repair request: ${repairRequest.deviceName}`
+                                        // v2 requests have no legacy deviceName - name the device from the product snapshot
+                                        name: `Repair: ${deviceLabelOf(repairRequest)}`
                                     }
                                 },
                                 quantity: 1,
